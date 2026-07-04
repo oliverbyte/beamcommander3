@@ -540,6 +540,18 @@ struct MidiBinding {
     int channel = -1;      // 0-15, or -1 to match any channel
     int number  = -1;      // note number or CC number (0-127)
     std::string action;    // e.g. "r", "shape:circle", "move:pan", "cue:5"
+
+    // Optional per-binding response curve for "cc" bindings (ignored for
+    // "note" bindings) - mirrors the original BeamCommander's MIDI mapper
+    // (MidiToOscMapper.h) so mappings ported from it behave the same way:
+    bool  centered = false; // bipolar knob: raw MIDI 63/64 = exact center -> 0
+    float deadzone = 0.0f;  // (centered only) snap to 0 within this distance of center, 0..1
+    float gamma    = 1.0f;  // response curve exponent (1 = linear)
+    bool  invert   = false;
+    float scale    = 1.0f;  // applied before offset, non-centered mode only
+    float offset   = 0.0f;  // applied after scale, non-centered mode only
+    float outMin   = 0.0f;  // final mapped output range
+    float outMax   = 1.0f;
 };
 static std::vector<MidiBinding> G_midi_bindings;
 static std::mutex               G_midi_mtx;
@@ -565,10 +577,18 @@ static void load_midi_map(const std::string& path) {
         if (depth != 0) break;
         std::string obj = body.substr(i, j - i);
         MidiBinding b;
-        b.type    = json_str(obj, "type");
-        b.channel = json_int(obj, "channel", -1);
-        b.number  = json_int(obj, "number", -1);
-        b.action  = json_str(obj, "action");
+        b.type     = json_str(obj, "type");
+        b.channel  = json_int(obj, "channel", -1);
+        b.number   = json_int(obj, "number", -1);
+        b.action   = json_str(obj, "action");
+        b.centered = json_bool(obj, "centered", false);
+        b.deadzone = json_float(obj, "deadzone", 0.0f);
+        b.gamma    = json_float(obj, "gamma", 1.0f);
+        b.invert   = json_bool(obj, "invert", false);
+        b.scale    = json_float(obj, "scale", 1.0f);
+        b.offset   = json_float(obj, "offset", 0.0f);
+        b.outMin   = json_float(obj, "outMin", 0.0f);
+        b.outMax   = json_float(obj, "outMax", 1.0f);
         if ((b.type == "note" || b.type == "cc") && b.number >= 0 && !b.action.empty())
             G_midi_bindings.push_back(b);
         i = body.find('{', j);
@@ -576,35 +596,71 @@ static void load_midi_map(const std::string& path) {
     std::cout << "[midi] loaded " << G_midi_bindings.size() << " binding(s) from " << path << "\n";
 }
 
-// Applies one MIDI-triggered action to the shared state. `value01` is the
-// normalised 0..1 value for continuous controls (CC); `isPress`/`isRelease`
-// describe note on/off for button-style controls. Mirrors the same fields
-// and clamping the HTTP handlers use - this is just a different input path
-// into the identical state.
-static float g_pre_flash_intensity = -1.0f; // <0 = flash not currently held
-static bool  g_midi_cue_save_armed = false;
+// Converts a raw 0..127 CC value into the binding's configured output range,
+// replicating the original BeamCommander's MidiToOscMapper.h curve engine:
+//  - "centered" bipolar knobs treat raw 63/64 as the exact zero point (not
+//    just val/127*2-1), so the physical center detent reads as exact 0.
+//  - "gamma" applies a response curve (symmetric around center when
+//    centered) for a less twitchy/more natural feel on fine controls.
+//  - "deadzone" (centered only) snaps small values near center to exactly 0.
+//  - non-centered controls use the simpler invert/scale/offset/gamma chain.
+static float midi_cc_value(const MidiBinding& b, int raw) {
+    raw = std::clamp(raw, 0, 127);
+    if (b.centered) {
+        float c = (raw >= 64) ? (float)(raw - 64) / 63.0f : (float)(raw - 63) / 63.0f;
+        if (b.invert) c = -c;
+        c = std::clamp(c, -1.0f, 1.0f);
+        if (b.gamma > 0.0f && b.gamma != 1.0f) {
+            float sgn = c >= 0.0f ? 1.0f : -1.0f;
+            c = sgn * std::pow(std::fabs(c), b.gamma);
+        }
+        if (b.deadzone > 0.0f && std::fabs(c) < b.deadzone) c = 0.0f;
+        return b.outMin + (c + 1.0f) * 0.5f * (b.outMax - b.outMin);
+    }
+    float norm = raw / 127.0f;
+    if (b.invert) norm = 1.0f - norm;
+    norm = std::clamp(norm * b.scale + b.offset, 0.0f, 1.0f);
+    if (b.gamma > 0.0f && b.gamma != 1.0f) norm = std::pow(norm, b.gamma);
+    return b.outMin + norm * (b.outMax - b.outMin);
+}
 
-static void midi_apply_action(const std::string& action, float value01, bool isPress, bool isRelease) {
-    if (action=="r") { std::lock_guard<std::mutex> lk(G_mtx); G.r=std::clamp(value01,0.0f,1.0f); return; }
-    if (action=="g") { std::lock_guard<std::mutex> lk(G_mtx); G.g=std::clamp(value01,0.0f,1.0f); return; }
-    if (action=="b") { std::lock_guard<std::mutex> lk(G_mtx); G.b=std::clamp(value01,0.0f,1.0f); return; }
-    if (action=="intensity")      { std::lock_guard<std::mutex> lk(G_mtx); G.intensity=std::clamp(value01,0.0f,1.0f); return; }
-    if (action=="shape_scale")    { std::lock_guard<std::mutex> lk(G_mtx); G.shape_scale=std::clamp(value01*2.0f-1.0f,-1.0f,1.0f); return; }
-    if (action=="rotation_speed") { std::lock_guard<std::mutex> lk(G_mtx); G.rotation_speed=(value01*2.0f-1.0f)*4.0f; return; }
-    if (action=="pos_x")          { std::lock_guard<std::mutex> lk(G_mtx); G.pos_x=std::clamp(value01*2.0f-1.0f,-1.0f,1.0f); return; }
-    if (action=="pos_y")          { std::lock_guard<std::mutex> lk(G_mtx); G.pos_y=std::clamp(value01*2.0f-1.0f,-1.0f,1.0f); return; }
-    if (action=="dot_amount")     { std::lock_guard<std::mutex> lk(G_mtx); G.dot_amount=std::clamp(value01,0.0f,1.0f); return; }
-    if (action=="flicker_hz")     { std::lock_guard<std::mutex> lk(G_mtx); G.flicker_hz=value01*30.0f; return; }
-    if (action=="wave_frequency") { std::lock_guard<std::mutex> lk(G_mtx); G.wave_frequency=0.1f+value01*7.9f; return; }
-    if (action=="wave_amplitude") { std::lock_guard<std::mutex> lk(G_mtx); G.wave_amplitude=std::clamp(value01,0.0f,1.0f); return; }
-    if (action=="wave_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.wave_speed=(value01*2.0f-1.0f)*4.0f; return; }
-    if (action=="rainbow_amount") { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_amount=std::clamp(value01,0.0f,1.0f); return; }
-    if (action=="rainbow_speed")  { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_speed=(value01*2.0f-1.0f)*2.0f; return; }
-    if (action=="move_size")      { std::lock_guard<std::mutex> lk(G_mtx); G.move_size=std::clamp(value01,0.0f,1.0f); return; }
-    if (action=="move_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.move_speed=(value01*2.0f-1.0f)*4.0f; return; }
-    if (action=="rate_kpps")      { std::lock_guard<std::mutex> lk(G_mtx); G.rate_kpps=std::clamp(1.0f+value01*59.0f,1.0f,100.0f); return; }
+// Applies one CC-triggered action. `out` is already mapped into the
+// binding's configured output range (see midi_cc_value above), so each
+// branch just clamps to the field's valid range and assigns - no further
+// scaling here.
+static void midi_apply_cc_action(const std::string& action, float out) {
+    if (action=="r")              { std::lock_guard<std::mutex> lk(G_mtx); G.r=std::clamp(out,0.0f,1.0f); return; }
+    if (action=="g")              { std::lock_guard<std::mutex> lk(G_mtx); G.g=std::clamp(out,0.0f,1.0f); return; }
+    if (action=="b")              { std::lock_guard<std::mutex> lk(G_mtx); G.b=std::clamp(out,0.0f,1.0f); return; }
+    if (action=="intensity")      { std::lock_guard<std::mutex> lk(G_mtx); G.intensity=std::clamp(out,0.0f,1.0f); return; }
+    if (action=="shape_scale")    { std::lock_guard<std::mutex> lk(G_mtx); G.shape_scale=std::clamp(out,-1.0f,1.0f); return; }
+    if (action=="rotation_speed") { std::lock_guard<std::mutex> lk(G_mtx); G.rotation_speed=out; return; }
+    if (action=="pos_x")          { std::lock_guard<std::mutex> lk(G_mtx); G.pos_x=std::clamp(out,-1.0f,1.0f); return; }
+    if (action=="pos_y")          { std::lock_guard<std::mutex> lk(G_mtx); G.pos_y=std::clamp(out,-1.0f,1.0f); return; }
+    if (action=="dot_amount")     { std::lock_guard<std::mutex> lk(G_mtx); G.dot_amount=std::clamp(out,0.0f,1.0f); return; }
+    if (action=="flicker_hz")     { std::lock_guard<std::mutex> lk(G_mtx); G.flicker_hz=std::max(0.0f,out); return; }
+    if (action=="wave_frequency") { std::lock_guard<std::mutex> lk(G_mtx); G.wave_frequency=std::max(0.1f,out); return; }
+    if (action=="wave_amplitude") { std::lock_guard<std::mutex> lk(G_mtx); G.wave_amplitude=std::clamp(out,0.0f,1.0f); return; }
+    if (action=="wave_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.wave_speed=out; return; }
+    if (action=="rainbow_amount") { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_amount=std::clamp(out,0.0f,1.0f); return; }
+    if (action=="rainbow_speed")  { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_speed=out; return; }
+    if (action=="move_size")      { std::lock_guard<std::mutex> lk(G_mtx); G.move_size=std::clamp(out,0.0f,1.0f); return; }
+    if (action=="move_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.move_speed=std::max(0.0f,out); return; }
+    if (action=="rate_kpps")      { std::lock_guard<std::mutex> lk(G_mtx); G.rate_kpps=std::clamp(out,1.0f,100.0f); return; }
+}
 
-    // Everything below is button-triggered (note on/off) only.
+// State for the momentary (hold-to-preview) cue buttons and the momentary
+// flash button - both need to remember what to restore on release.
+static float     g_pre_flash_intensity = -1.0f; // <0 = flash not currently held
+static bool      g_midi_cue_save_armed = false;
+static LaserState g_cue_momentary_snapshot;
+static bool       g_cue_momentary_active = false;
+static bool       g_motion_held = false;        // for "motion_hold" (freeze movement while held)
+static float      g_pre_motion_speed = 0.0f;
+
+// Applies one note-triggered (button) action. `isPress`/`isRelease`
+// describe note-on/note-off.
+static void midi_apply_note_action(const std::string& action, bool isPress, bool isRelease) {
     if (!isPress && !isRelease) return;
 
     if (action.rfind("shape:",0)==0) {
@@ -642,6 +698,30 @@ static void midi_apply_action(const std::string& action, float value01, bool isP
         std::lock_guard<std::mutex> lk(G_mtx); G.blackout = !G.blackout;
         return;
     }
+    // Preset button from the original mapping (rainbow/preset/slowfull):
+    // full rainbow blend at a slow animation speed, one press away.
+    if (action=="rainbow_preset_slowfull") {
+        if (!isPress) return;
+        std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_amount=1.0f; G.rainbow_speed=0.15f;
+        return;
+    }
+    // Momentary movement freeze (motion/hold in the original mapping):
+    // stops the movement pattern in place while held, resumes on release.
+    if (action=="motion_hold") {
+        std::lock_guard<std::mutex> lk(G_mtx);
+        if (isPress && !g_motion_held) { g_pre_motion_speed = G.move_speed; G.move_speed = 0.0f; g_motion_held = true; }
+        else if (isRelease && g_motion_held) { G.move_speed = g_pre_motion_speed; g_motion_held = false; }
+        return;
+    }
+    // "Hold" blackout (matches the original BeamCommander's Blackout button):
+    // dark while held, resumes on release - safer for a live "oh no" button
+    // than a toggle, since letting go always restores the show.
+    if (action=="blackout_hold") {
+        std::lock_guard<std::mutex> lk(G_mtx);
+        if (isPress) G.blackout = true;
+        else if (isRelease) G.blackout = false;
+        return;
+    }
     if (action=="flash") {
         if (isPress) {
             std::lock_guard<std::mutex> lk(G_mtx);
@@ -668,6 +748,25 @@ static void midi_apply_action(const std::string& action, float value01, bool isP
             std::cout << "[midi] recalled cue " << n << "\n";
         } else {
             std::cout << "[midi] cue " << n << " is empty\n";
+        }
+        return;
+    }
+    // Momentary cue preview (matches the original BeamCommander's APC40
+    // grid buttons): hold to preview the cue, release to snap back to
+    // whatever was showing before - lets you audition a look without
+    // committing to it.
+    if (action.rfind("cue_momentary:",0)==0) {
+        int n = 0;
+        try { n = std::stoi(action.substr(14)); } catch (...) { return; }
+        if (isPress) {
+            { std::lock_guard<std::mutex> lk(G_mtx); g_cue_momentary_snapshot = G; }
+            g_cue_momentary_active = true;
+            if (do_cue_recall(n)) std::cout << "[midi] previewing cue " << n << "\n";
+        } else if (isRelease && g_cue_momentary_active) {
+            { std::lock_guard<std::mutex> lk(G_mtx);
+              std::string ip = G.target_ip; G = g_cue_momentary_snapshot; G.target_ip = ip; }
+            g_cue_momentary_active = false;
+            std::cout << "[midi] cue " << n << " preview released\n";
         }
         return;
     }
@@ -707,8 +806,11 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
                     }
                 }
                 if (found) {
-                    float value01 = isNote ? (d2 > 0 ? 1.0f : 0.0f) : (d2 / 127.0f);
-                    midi_apply_action(match.action, value01, isPress, isRelease);
+                    if (isNote) {
+                        midi_apply_note_action(match.action, isPress, isRelease);
+                    } else {
+                        midi_apply_cc_action(match.action, midi_cc_value(match, d2));
+                    }
                 } else {
                     std::cout << "[midi] unmapped " << (isNote ? "note" : "cc")
                               << " ch=" << (int)channel << " num=" << (int)d1

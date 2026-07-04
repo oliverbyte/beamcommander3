@@ -95,19 +95,36 @@ configured), this subsystem simply does nothing.
    scanning every few seconds for hot-plugged devices, no restart needed).
 2. Bindings live in `backend/midi_map.json`, a plain JSON array of
    `{ "type": "note"|"cc", "channel": 0-15|-1, "number": 0-127, "action": "..." }`
-   objects (`channel: -1` matches any channel). A starter template with
-   illustrative example numbers ships in the repo — since the exact note/CC
-   numbers a controller sends depend on its firmware mode and can't be
-   verified without the physical unit, **treat the shipped numbers as a
-   starting point, not a guarantee**.
+   objects (`channel: -1` matches any channel). The shipped default is
+   ported directly from the original BeamCommander's Akai APC40 mkII mapping
+   (`MidiToOscMapper.h` / `midi_mapping.json`), including its response-curve
+   engine (see "CC response curve" below) — so it should work out of the box
+   with that exact controller. For any other controller, or if your APC40's
+   firmware mode sends different numbers, **the console log is the source of
+   truth** (see step 3).
 3. To calibrate: press a button / turn a knob on your controller and watch
    the daemon's console output. Every message that doesn't match a binding
    is logged, e.g. `[midi] unmapped cc ch=0 num=90 val=42` — add/edit the
    matching entry in `midi_map.json` and restart the daemon.
 
+### CC response curve
+
+Each `cc` binding can optionally shape its raw 0-127 value before it's
+applied, matching the original BeamCommander's MIDI mapper:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `centered` | `false` | Bipolar knob: raw MIDI 63/64 is treated as the *exact* center (0), not just `val/127`. Use for knobs that should rest at a neutral value in the middle of their travel (position, rotation speed, rainbow speed). |
+| `deadzone` | `0` | (centered only) snap to exactly 0 within this distance of center (0..1) — stops a physical knob's center detent from drifting. |
+| `gamma` | `1.0` | Response curve exponent (symmetric around center when `centered`). `>1` = more resolution near the low end / center; `<1` = more resolution at the extremes. |
+| `invert` | `false` | Reverse direction. |
+| `scale`, `offset` | `1.0`, `0.0` | Applied before clamping, non-centered mode only. |
+| `outMin`, `outMax` | `0.0`, `1.0` | Final mapped range for the target field. |
+
 ### Action catalog
 
-**Continuous (`cc`, value scaled from the incoming 0-127):**
+**Continuous (`cc`, mapped into each action's own natural range via the
+curve fields above):**
 `r`, `g`, `b`, `intensity`, `shape_scale`, `rotation_speed`, `pos_x`, `pos_y`,
 `dot_amount`, `flicker_hz`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
 `rainbow_amount`, `rainbow_speed`, `move_size`, `move_speed`, `rate_kpps`
@@ -115,11 +132,18 @@ configured), this subsystem simply does nothing.
 **Buttons (`note`, note-on presses / note-off or velocity-0 releases):**
 `shape:<circle|line|triangle|square|wave|staticwave>`,
 `move:<none|circle|pan|tilt|eight|random>`,
-`color:<red|orange|yellow|green|cyan|blue|magenta|white>`,
-`blackout_toggle`, `flash` (full brightness while held, restores on release),
+`color:<red|green|blue|white>` (plus `orange`, `yellow`, `cyan`, `magenta` if
+you want to bind extra buttons to them),
+`rainbow_preset_slowfull` (full rainbow blend at a slow speed, one press),
+`blackout_toggle` / `blackout_hold` (dark until pressed again, vs. dark only
+while held — the original APC40 mapping uses `_hold`),
+`flash` (full brightness while held, restores previous brightness on
+release), `motion_hold` (freezes the current movement pattern in place while
+held, resumes on release),
 `cue_save_arm` (arm save mode — the *next* `cue:<n>` button saves instead of
-recalls, mirroring the original BeamCommander's `/cue/save` + `/cue/<n>`
-two-step flow), `cue:<1-32>`
+recalls) + `cue:<1-32>` (latching save/recall),
+`cue_momentary:<1-32>` (hold to preview that cue, release to snap back to
+whatever was showing before — matches the original APC40 grid buttons).
 
 ## Supported hardware
 
