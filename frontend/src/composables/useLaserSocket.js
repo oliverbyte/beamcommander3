@@ -93,6 +93,19 @@ function applyState(s) {
   Object.assign(laserState, s)
 }
 
+// Guards against the background poll clobbering an optimistic local edit
+// that's still in flight (debounce + network round trip). Any local mutation
+// calls markLocalChange(); polled responses are ignored for a short window
+// afterwards so the just-changed value doesn't visibly "bounce back".
+let lastLocalChangeAt = 0
+export function markLocalChange() { lastLocalChangeAt = Date.now() }
+
+function applyPolledState(s) {
+  if (!s) return
+  if (Date.now() - lastLocalChangeAt < 700) return
+  Object.assign(laserState, s)
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 export async function fetchState() {
@@ -100,37 +113,46 @@ export async function fetchState() {
 }
 
 export async function updateState(partial) {
+  markLocalChange()
   applyState(await api('/state', { method: 'POST', body: JSON.stringify(partial) }))
 }
 
 export async function resetState() {
+  markLocalChange()
   applyState(await api('/reset', { method: 'POST' }))
 }
 
 export async function setShape(shape) {
+  markLocalChange()
   await laser(`/shape/${shape}`, { method: 'POST' })
   laserState.shape = shape
 }
 
 export async function setBrightness(v) {
+  markLocalChange()
   applyState(await laser(`/brightness/${v}`, { method: 'POST' }))
 }
 
 export async function connectLaser(ip) {
+  markLocalChange()
   applyState(await laser(`/connect/${encodeURIComponent(ip)}`, { method: 'POST' }))
 }
 
 export async function disconnectLaser() {
+  markLocalChange()
   applyState(await laser('/disconnect', { method: 'POST' }))
 }
 
 // ── Status polling ─────────────────────────────────────────────────────────────
 // Keeps this client's view of laserState in sync even when another client
 // (a different browser tab, curl, etc.) changes settings on the backend.
+// Uses the guarded merge so it never clobbers a still-in-flight local edit.
 let statusPoll = null
 export function startStatusPolling(intervalMs = 1000) {
   if (statusPoll) return
-  statusPoll = setInterval(() => fetchState().catch(() => {}), intervalMs)
+  statusPoll = setInterval(() => {
+    api('/state').then(applyPolledState).catch(() => {})
+  }, intervalMs)
 }
 export function stopStatusPolling() {
   clearInterval(statusPoll)

@@ -26,8 +26,8 @@ const MAX_SCAN_POINTS = 20000
 
 let renderer, scene, camera, controls, laser
 let cone, coneUniforms, scanLine, scanLineGeo, scanDot, flare, flareMat, dust
-let scanGeo, scanPositions, scanColors, scanTimestamps
-let scanWriteIndex = 0
+let segGeo, segPositions, segColors, segTimestamps
+let segWriteIndex = 0
 let animationId = 0
 
 function makeGlowTexture(size = 128) {
@@ -157,19 +157,24 @@ function setupScene() {
   scanLine.userData.mat = scanLineMat
   laser.add(scanLine)
 
-  // Real scanner output point cloud, fed entirely from the backend WebSocket
-  scanPositions = new Float32Array(MAX_SCAN_POINTS * 3)
-  scanColors = new Float32Array(MAX_SCAN_POINTS * 3)
-  scanTimestamps = new Float64Array(MAX_SCAN_POINTS).fill(-Infinity)
-  scanGeo = new THREE.BufferGeometry()
-  scanGeo.setAttribute('position', new THREE.BufferAttribute(scanPositions, 3).setUsage(THREE.DynamicDrawUsage))
-  scanGeo.setAttribute('color', new THREE.BufferAttribute(scanColors, 3).setUsage(THREE.DynamicDrawUsage))
-  const scanPointsMat = new THREE.PointsMaterial({
-    size: 0.16, map: glowTex, vertexColors: true, transparent: true,
-    blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+  // Real scanner beam trace: rendered as connected LINE SEGMENTS (not a
+  // point cloud) so it reads as a continuous drawn stroke, matching how
+  // real ILDA laser projectors and show-visualizer software (Pangolin
+  // Beyond/QuickShow, Liberation) render scanned output - the galvo mirrors
+  // move continuously and paint a solid line between consecutive points,
+  // they don't blink between isolated dots.
+  segPositions = new Float32Array(MAX_SCAN_POINTS * 2 * 3) // 2 vertices/segment
+  segColors = new Float32Array(MAX_SCAN_POINTS * 2 * 3)
+  segTimestamps = new Float64Array(MAX_SCAN_POINTS).fill(-Infinity)
+  segGeo = new THREE.BufferGeometry()
+  segGeo.setAttribute('position', new THREE.BufferAttribute(segPositions, 3).setUsage(THREE.DynamicDrawUsage))
+  segGeo.setAttribute('color', new THREE.BufferAttribute(segColors, 3).setUsage(THREE.DynamicDrawUsage))
+  const segMat = new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true,
+    blending: THREE.AdditiveBlending, depthWrite: false,
   })
-  const scanPoints = new THREE.Points(scanGeo, scanPointsMat)
-  laser.add(scanPoints)
+  const scanSegments = new THREE.LineSegments(segGeo, segMat)
+  laser.add(scanSegments)
 
   flareMat = new THREE.SpriteMaterial({
     map: glowTex, color: 0x00ff55, transparent: true, opacity: 0.8,
@@ -222,8 +227,13 @@ function handleIncomingPoints(msg) {
 }
 
 // Advances the virtual scan head and writes newly "visited" points into the
-// ring buffer with real per-point timestamps spaced 1/pointRateHz apart -
-// exactly reproducing how a physical scanner would have hit them in time.
+// segment ring buffer with real per-segment timestamps spaced 1/pointRateHz
+// apart - exactly reproducing how a physical scanner would have traced them
+// in time. Each new point creates one line segment from the previously
+// emitted point to this one, so the beam renders as a continuous stroke.
+let prevEmitX = 0, prevEmitY = 0
+let prevEmitValid = false
+
 function emitScanPoints(now) {
   if (currentFrame.length === 0) return
   const pointRateHz = Math.max(1, laserState.rate_kpps * 1000)
@@ -244,26 +254,35 @@ function emitScanPoints(now) {
     const [x, y, r, g, b] = frame[idx]
     const t = lastEmitTime + (k + 1) * period
 
-    const idx3 = scanWriteIndex * 3
-    scanPositions[idx3] = x * WORLD_SCALE
-    scanPositions[idx3 + 1] = y * WORLD_SCALE
-    scanPositions[idx3 + 2] = lastBeamLen
+    const wx = x * WORLD_SCALE
+    const wy = y * WORLD_SCALE
     // Daemon sends 0..1 floats; simulation sends 0..255 integers.
     const scale = (r > 1 || g > 1 || b > 1) ? 1 / 255 : 1
-    baseColors[idx3] = r * scale
-    baseColors[idx3 + 1] = g * scale
-    baseColors[idx3 + 2] = b * scale
-    scanTimestamps[scanWriteIndex] = t
-    scanWriteIndex = (scanWriteIndex + 1) % MAX_SCAN_POINTS
-    lastPoint = [x, y]
+    const cr = r * scale, cg = g * scale, cb = b * scale
 
+    if (prevEmitValid) {
+      const vi = segWriteIndex * 6   // 2 vertices * 3 floats
+      segPositions[vi]     = prevEmitX
+      segPositions[vi + 1] = prevEmitY
+      segPositions[vi + 2] = lastBeamLen
+      segPositions[vi + 3] = wx
+      segPositions[vi + 4] = wy
+      segPositions[vi + 5] = lastBeamLen
+      segBaseColors[vi]     = cr; segBaseColors[vi + 1] = cg; segBaseColors[vi + 2] = cb
+      segBaseColors[vi + 3] = cr; segBaseColors[vi + 4] = cg; segBaseColors[vi + 5] = cb
+      segTimestamps[segWriteIndex] = t
+      segWriteIndex = (segWriteIndex + 1) % MAX_SCAN_POINTS
+    }
+
+    prevEmitX = wx; prevEmitY = wy; prevEmitValid = true
+    lastPoint = [x, y]
     emitIndex += 1
   }
   lastEmitTime += n * period
-  scanGeo.attributes.position.needsUpdate = true
+  segGeo.attributes.position.needsUpdate = true
 }
 
-const baseColors = new Float32Array(MAX_SCAN_POINTS * 3)
+const segBaseColors = new Float32Array(MAX_SCAN_POINTS * 2 * 3)
 let lastBeamLen = BEAM_LEN
 let lastPoint = [0, 0]
 const tmpV1 = new THREE.Vector3()
@@ -288,27 +307,31 @@ function animate() {
   flareMat.color.copy(color)
   scanLine.userData.mat.color.copy(color).lerp(new THREE.Color(0xffffff), 0.6)
 
-  // Fade every point by its age — this approximates the eye's flicker-fusion
-  // persistence, a fixed physiological time window (~human CFF, roughly
-  // 15-25ms), independent of the scanner's own parameters. Whether the
-  // circle *looks* solid or visibly flickers/strobes is then an emergent
-  // result: if the beam revisits a point faster than this window (i.e. the
-  // revolution rate exceeds the eye's flicker-fusion threshold), successive
-  // hits overlap and it reads as a continuous beam/tunnel/circle. If the
-  // scan is slower than that (low scan_rate_kpps relative to
-  // points_per_circle), the dot genuinely fades out before the beam comes
-  // back around — same as a real, too-slow scanner would look to a viewer.
+  // Fade every segment by its age — this approximates the eye's
+  // flicker-fusion persistence, a fixed physiological time window (~human
+  // CFF, roughly 15-25ms), independent of the scanner's own parameters.
+  // Whether the shape *looks* solid or visibly flickers/strobes is then an
+  // emergent result: if the beam revisits a segment faster than this
+  // window (i.e. the revolution rate exceeds the eye's flicker-fusion
+  // threshold), successive passes overlap and it reads as a continuous,
+  // solid line. If the scan is slower than that (low scan_rate_kpps
+  // relative to points_per_circle), the line genuinely fades out before
+  // the beam comes back around — same as a real, too-slow scanner would
+  // look to a viewer.
   const persistenceTau = Math.max(0.001, props.persistenceMs / 1000)
-  const colorArr = scanGeo.attributes.color.array
+  const colorArr = segGeo.attributes.color.array
   for (let i = 0; i < MAX_SCAN_POINTS; i++) {
-    const age = now - scanTimestamps[i]
+    const age = now - segTimestamps[i]
     const brightness = age < 0 ? 0 : Math.exp(-age / persistenceTau)
-    const idx3 = i * 3
-    colorArr[idx3] = baseColors[idx3] * brightness
-    colorArr[idx3 + 1] = baseColors[idx3 + 1] * brightness
-    colorArr[idx3 + 2] = baseColors[idx3 + 2] * brightness
+    const vi = i * 6
+    colorArr[vi]     = segBaseColors[vi]     * brightness
+    colorArr[vi + 1] = segBaseColors[vi + 1] * brightness
+    colorArr[vi + 2] = segBaseColors[vi + 2] * brightness
+    colorArr[vi + 3] = segBaseColors[vi + 3] * brightness
+    colorArr[vi + 4] = segBaseColors[vi + 4] * brightness
+    colorArr[vi + 5] = segBaseColors[vi + 5] * brightness
   }
-  scanGeo.attributes.color.needsUpdate = true
+  segGeo.attributes.color.needsUpdate = true
 
   // The instantaneous beam line/hotspot always follows the latest point,
   // reprojected onto the current (viewer-relative) far plane.
@@ -342,14 +365,15 @@ function handleResize() {
 }
 
 function clearPointBuffer() {
-  scanTimestamps.fill(-Infinity)
-  scanWriteIndex = 0
+  segTimestamps.fill(-Infinity)
+  segWriteIndex = 0
+  prevEmitValid = false
   currentFrame = []
   emitIndex = 0
   lastEmitTime = performance.now() / 1000
-  if (scanGeo) {
-    scanGeo.attributes.position.needsUpdate = true
-    scanGeo.attributes.color.needsUpdate = true
+  if (segGeo) {
+    segGeo.attributes.position.needsUpdate = true
+    segGeo.attributes.color.needsUpdate = true
   }
 }
 

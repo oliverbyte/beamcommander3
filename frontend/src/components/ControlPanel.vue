@@ -88,7 +88,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { laserState, updateState, resetState, connectLaser, disconnectLaser } from '../composables/useLaserSocket.js'
+import { laserState, updateState, resetState, connectLaser, disconnectLaser, markLocalChange } from '../composables/useLaserSocket.js'
 
 const emit = defineEmits(['update:persistence'])
 
@@ -110,6 +110,7 @@ function onPersist(v) { persistenceMs.value = v; emit('update:persistence', v) }
 
 let debounce = null
 function push(partial) {
+  markLocalChange()
   Object.assign(laserState, partial)
   clearTimeout(debounce)
   debounce = setTimeout(() => updateState(partial).catch(console.error), 80)
