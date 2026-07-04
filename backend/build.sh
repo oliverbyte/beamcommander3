@@ -14,6 +14,7 @@ clang++ -std=c++17 -O2 \
   ${LIBUSB_FLAGS} \
   -framework CoreFoundation -framework IOKit \
   -framework CoreAudio -framework AudioToolbox \
+  -framework CoreMIDI \
   -lpthread \
   -o laser_daemon
 

@@ -65,6 +65,10 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /blackout/<0\|1>` | Force output dark |
 | `POST /laser/connect/<ip>` | Connect + arm a controller at this IP |
 | `POST /laser/disconnect` | Disarm and disconnect |
+| `GET /api/cues` | List all populated cue slots (1-32) |
+| `POST /api/cue/<n>/save` | Snapshot current show params into slot `n` |
+| `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the current connection) |
+| `POST /api/cue/<n>/clear` | Delete slot `n` |
 | `WS /ws/points` | Live preview stream, `{"pts":[[x,y,r,g,b],...]}` at ~30fps |
 
 `POST /api/state` accepts a JSON body with any of: `shape`, `radius`, `points`,
@@ -78,6 +82,44 @@ All parameter changes take effect on the next frame — nothing restarts.
 The frontend polls `GET /api/state` every second, so if you change settings
 from another browser tab or via `curl`, all connected UIs pick up the change
 automatically.
+
+## MIDI control (optional)
+
+Any USB MIDI controller — including an Akai APC40 mkII, like the original
+BeamCommander — can drive the exact same state as the REST API and the web
+UI. It's entirely optional: with nothing plugged in (or no bindings
+configured), this subsystem simply does nothing.
+
+1. Plug the controller in via USB, then start `laser_daemon` — it
+   auto-detects and connects to every available MIDI source (and keeps
+   scanning every few seconds for hot-plugged devices, no restart needed).
+2. Bindings live in `backend/midi_map.json`, a plain JSON array of
+   `{ "type": "note"|"cc", "channel": 0-15|-1, "number": 0-127, "action": "..." }`
+   objects (`channel: -1` matches any channel). A starter template with
+   illustrative example numbers ships in the repo — since the exact note/CC
+   numbers a controller sends depend on its firmware mode and can't be
+   verified without the physical unit, **treat the shipped numbers as a
+   starting point, not a guarantee**.
+3. To calibrate: press a button / turn a knob on your controller and watch
+   the daemon's console output. Every message that doesn't match a binding
+   is logged, e.g. `[midi] unmapped cc ch=0 num=90 val=42` — add/edit the
+   matching entry in `midi_map.json` and restart the daemon.
+
+### Action catalog
+
+**Continuous (`cc`, value scaled from the incoming 0-127):**
+`r`, `g`, `b`, `intensity`, `shape_scale`, `rotation_speed`, `pos_x`, `pos_y`,
+`dot_amount`, `flicker_hz`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
+`rainbow_amount`, `rainbow_speed`, `move_size`, `move_speed`, `rate_kpps`
+
+**Buttons (`note`, note-on presses / note-off or velocity-0 releases):**
+`shape:<circle|line|triangle|square|wave|staticwave>`,
+`move:<none|circle|pan|tilt|eight|random>`,
+`color:<red|orange|yellow|green|cyan|blue|magenta|white>`,
+`blackout_toggle`, `flash` (full brightness while held, restores on release),
+`cue_save_arm` (arm save mode — the *next* `cue:<n>` button saves instead of
+recalls, mirroring the original BeamCommander's `/cue/save` + `/cue/<n>`
+two-step flow), `cue:<1-32>`
 
 ## Supported hardware
 

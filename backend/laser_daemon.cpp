@@ -495,6 +495,275 @@ static void load_cues_from_disk() {
     std::cout << "[laser_daemon] Loaded " << G_cues.size() << " cue(s) from " << CUES_FILE << "\n";
 }
 
+// Shared cue operations - used by both the HTTP /api/cue/* routes and the
+// MIDI dispatcher below, so there's exactly one place that knows the correct
+// (deadlock-safe) lock order: G_mtx and G_cues_mtx are NEVER held at the same
+// time by any of these.
+static void do_cue_save(int n) {
+    if (n < 1 || n > MAX_CUES) return;
+    LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap = G; }
+    { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[n] = snap; }
+    save_cues_to_disk();
+}
+static bool do_cue_recall(int n) {
+    if (n < 1 || n > MAX_CUES) return false;
+    bool found = false; LaserState snap;
+    { std::lock_guard<std::mutex> lk(G_cues_mtx);
+      auto it = G_cues.find(n);
+      if (it != G_cues.end()) { snap = it->second; found = true; } }
+    if (!found) return false;
+    { std::lock_guard<std::mutex> lk(G_mtx); std::string ip = G.target_ip; G = snap; G.target_ip = ip; }
+    return true;
+}
+static void do_cue_clear(int n) {
+    if (n < 1 || n > MAX_CUES) return;
+    { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues.erase(n); }
+    save_cues_to_disk();
+}
+
+// ── MIDI control (optional) ─────────────────────────────────────────────────
+// Lets an external MIDI controller (e.g. an Akai APC40 mkII connected via
+// USB, like the original BeamCommander) drive exactly the same state that
+// the REST API drives - it's just another input source feeding the same
+// `G` struct, never a separate code path. Entirely optional: if no MIDI
+// hardware is connected, or backend/midi_map.json has no bindings, this
+// subsystem simply does nothing.
+//
+// Because the exact note/CC numbers a given controller sends depend on its
+// firmware mode (and can't be verified without the physical unit), bindings
+// are loaded from a small JSON file rather than hard-coded: run the daemon,
+// press a button/turn a knob, read the "[midi] unmapped ..." log line it
+// prints, then add a matching entry to midi_map.json (see README.md for the
+// full action-name catalog) and restart the daemon.
+struct MidiBinding {
+    std::string type;      // "note" or "cc"
+    int channel = -1;      // 0-15, or -1 to match any channel
+    int number  = -1;      // note number or CC number (0-127)
+    std::string action;    // e.g. "r", "shape:circle", "move:pan", "cue:5"
+};
+static std::vector<MidiBinding> G_midi_bindings;
+static std::mutex               G_midi_mtx;
+
+static void load_midi_map(const std::string& path) {
+    std::ifstream f(path);
+    if (!f) {
+        std::cout << "[midi] no mapping file at " << path << " - MIDI control disabled\n";
+        return;
+    }
+    std::ostringstream buf; buf << f.rdbuf();
+    std::string body = buf.str();
+
+    std::lock_guard<std::mutex> lk(G_midi_mtx);
+    G_midi_bindings.clear();
+    std::size_t i = body.find('{');
+    while (i != std::string::npos) {
+        int depth = 0; std::size_t j = i;
+        for (; j < body.size(); ++j) {
+            if (body[j] == '{') ++depth;
+            else if (body[j] == '}') { --depth; if (depth == 0) { ++j; break; } }
+        }
+        if (depth != 0) break;
+        std::string obj = body.substr(i, j - i);
+        MidiBinding b;
+        b.type    = json_str(obj, "type");
+        b.channel = json_int(obj, "channel", -1);
+        b.number  = json_int(obj, "number", -1);
+        b.action  = json_str(obj, "action");
+        if ((b.type == "note" || b.type == "cc") && b.number >= 0 && !b.action.empty())
+            G_midi_bindings.push_back(b);
+        i = body.find('{', j);
+    }
+    std::cout << "[midi] loaded " << G_midi_bindings.size() << " binding(s) from " << path << "\n";
+}
+
+// Applies one MIDI-triggered action to the shared state. `value01` is the
+// normalised 0..1 value for continuous controls (CC); `isPress`/`isRelease`
+// describe note on/off for button-style controls. Mirrors the same fields
+// and clamping the HTTP handlers use - this is just a different input path
+// into the identical state.
+static float g_pre_flash_intensity = -1.0f; // <0 = flash not currently held
+static bool  g_midi_cue_save_armed = false;
+
+static void midi_apply_action(const std::string& action, float value01, bool isPress, bool isRelease) {
+    if (action=="r") { std::lock_guard<std::mutex> lk(G_mtx); G.r=std::clamp(value01,0.0f,1.0f); return; }
+    if (action=="g") { std::lock_guard<std::mutex> lk(G_mtx); G.g=std::clamp(value01,0.0f,1.0f); return; }
+    if (action=="b") { std::lock_guard<std::mutex> lk(G_mtx); G.b=std::clamp(value01,0.0f,1.0f); return; }
+    if (action=="intensity")      { std::lock_guard<std::mutex> lk(G_mtx); G.intensity=std::clamp(value01,0.0f,1.0f); return; }
+    if (action=="shape_scale")    { std::lock_guard<std::mutex> lk(G_mtx); G.shape_scale=std::clamp(value01*2.0f-1.0f,-1.0f,1.0f); return; }
+    if (action=="rotation_speed") { std::lock_guard<std::mutex> lk(G_mtx); G.rotation_speed=(value01*2.0f-1.0f)*4.0f; return; }
+    if (action=="pos_x")          { std::lock_guard<std::mutex> lk(G_mtx); G.pos_x=std::clamp(value01*2.0f-1.0f,-1.0f,1.0f); return; }
+    if (action=="pos_y")          { std::lock_guard<std::mutex> lk(G_mtx); G.pos_y=std::clamp(value01*2.0f-1.0f,-1.0f,1.0f); return; }
+    if (action=="dot_amount")     { std::lock_guard<std::mutex> lk(G_mtx); G.dot_amount=std::clamp(value01,0.0f,1.0f); return; }
+    if (action=="flicker_hz")     { std::lock_guard<std::mutex> lk(G_mtx); G.flicker_hz=value01*30.0f; return; }
+    if (action=="wave_frequency") { std::lock_guard<std::mutex> lk(G_mtx); G.wave_frequency=0.1f+value01*7.9f; return; }
+    if (action=="wave_amplitude") { std::lock_guard<std::mutex> lk(G_mtx); G.wave_amplitude=std::clamp(value01,0.0f,1.0f); return; }
+    if (action=="wave_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.wave_speed=(value01*2.0f-1.0f)*4.0f; return; }
+    if (action=="rainbow_amount") { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_amount=std::clamp(value01,0.0f,1.0f); return; }
+    if (action=="rainbow_speed")  { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_speed=(value01*2.0f-1.0f)*2.0f; return; }
+    if (action=="move_size")      { std::lock_guard<std::mutex> lk(G_mtx); G.move_size=std::clamp(value01,0.0f,1.0f); return; }
+    if (action=="move_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.move_speed=(value01*2.0f-1.0f)*4.0f; return; }
+    if (action=="rate_kpps")      { std::lock_guard<std::mutex> lk(G_mtx); G.rate_kpps=std::clamp(1.0f+value01*59.0f,1.0f,100.0f); return; }
+
+    // Everything below is button-triggered (note on/off) only.
+    if (!isPress && !isRelease) return;
+
+    if (action.rfind("shape:",0)==0) {
+        if (!isPress) return;
+        static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","staticwave"};
+        std::string s = action.substr(6);
+        if (SHAPES.count(s)) { std::lock_guard<std::mutex> lk(G_mtx); G.shape=s; }
+        return;
+    }
+    if (action.rfind("move:",0)==0) {
+        if (!isPress) return;
+        static const std::set<std::string> MOVES{"none","circle","pan","tilt","eight","random"};
+        std::string m = action.substr(5);
+        if (MOVES.count(m)) { std::lock_guard<std::mutex> lk(G_mtx); G.move_mode=m; }
+        return;
+    }
+    if (action.rfind("color:",0)==0) {
+        if (!isPress) return;
+        std::string c = action.substr(6);
+        float cr,cg,cb;
+        if      (c=="red")     { cr=1.0f; cg=0.0f;  cb=0.0f; }
+        else if (c=="orange")  { cr=1.0f; cg=0.4f;  cb=0.0f; }
+        else if (c=="yellow")  { cr=1.0f; cg=1.0f;  cb=0.0f; }
+        else if (c=="green")   { cr=0.0f; cg=1.0f;  cb=0.0f; }
+        else if (c=="cyan")    { cr=0.0f; cg=1.0f;  cb=1.0f; }
+        else if (c=="blue")    { cr=0.0f; cg=0.2f;  cb=1.0f; }
+        else if (c=="magenta") { cr=1.0f; cg=0.0f;  cb=1.0f; }
+        else if (c=="white")   { cr=1.0f; cg=1.0f;  cb=1.0f; }
+        else return;
+        std::lock_guard<std::mutex> lk(G_mtx); G.r=cr; G.g=cg; G.b=cb;
+        return;
+    }
+    if (action=="blackout_toggle") {
+        if (!isPress) return;
+        std::lock_guard<std::mutex> lk(G_mtx); G.blackout = !G.blackout;
+        return;
+    }
+    if (action=="flash") {
+        if (isPress) {
+            std::lock_guard<std::mutex> lk(G_mtx);
+            if (g_pre_flash_intensity < 0.0f) { g_pre_flash_intensity = G.intensity; G.intensity = 1.0f; }
+        } else if (isRelease) {
+            std::lock_guard<std::mutex> lk(G_mtx);
+            if (g_pre_flash_intensity >= 0.0f) { G.intensity = g_pre_flash_intensity; g_pre_flash_intensity = -1.0f; }
+        }
+        return;
+    }
+    if (action=="cue_save_arm") {
+        if (isPress) { g_midi_cue_save_armed = true; std::cout << "[midi] cue save armed - next cue button saves\n"; }
+        return;
+    }
+    if (action.rfind("cue:",0)==0) {
+        if (!isPress) return;
+        int n = 0;
+        try { n = std::stoi(action.substr(4)); } catch (...) { return; }
+        if (g_midi_cue_save_armed) {
+            do_cue_save(n);
+            g_midi_cue_save_armed = false;
+            std::cout << "[midi] saved cue " << n << "\n";
+        } else if (do_cue_recall(n)) {
+            std::cout << "[midi] recalled cue " << n << "\n";
+        } else {
+            std::cout << "[midi] cue " << n << " is empty\n";
+        }
+        return;
+    }
+}
+
+#ifdef __APPLE__
+#include <CoreMIDI/CoreMIDI.h>
+
+static MIDIClientRef g_midi_client  = 0;
+static MIDIPortRef   g_midi_in_port = 0;
+
+static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
+    const MIDIPacket* packet = &pktlist->packet[0];
+    for (UInt32 i = 0; i < pktlist->numPackets; ++i) {
+        if (packet->length >= 2) {
+            unsigned char status  = packet->data[0];
+            unsigned char type    = status & 0xF0;
+            unsigned char channel = status & 0x0F;
+            unsigned char d1      = packet->data[1];
+            unsigned char d2      = packet->length >= 3 ? packet->data[2] : 0;
+
+            bool isNote = (type == 0x90 || type == 0x80);
+            bool isCC   = (type == 0xB0);
+            if (isNote || isCC) {
+                bool isPress   = isNote && type == 0x90 && d2 > 0;
+                bool isRelease = isNote && (type == 0x80 || (type == 0x90 && d2 == 0));
+
+                MidiBinding match; bool found = false;
+                {
+                    std::lock_guard<std::mutex> lk(G_midi_mtx);
+                    for (auto& b : G_midi_bindings) {
+                        bool typeOk = (isNote && b.type=="note") || (isCC && b.type=="cc");
+                        if (!typeOk || b.number != d1) continue;
+                        if (b.channel != -1 && b.channel != channel) continue;
+                        match = b; found = true;
+                        if (b.channel == channel) break; // exact-channel match wins over wildcard
+                    }
+                }
+                if (found) {
+                    float value01 = isNote ? (d2 > 0 ? 1.0f : 0.0f) : (d2 / 127.0f);
+                    midi_apply_action(match.action, value01, isPress, isRelease);
+                } else {
+                    std::cout << "[midi] unmapped " << (isNote ? "note" : "cc")
+                              << " ch=" << (int)channel << " num=" << (int)d1
+                              << " val=" << (int)d2 << "\n" << std::flush;
+                }
+            }
+        }
+        packet = MIDIPacketNext(packet);
+    }
+}
+
+// Runs on its own thread with an active CFRunLoop (required for CoreMIDI to
+// deliver read-proc callbacks). Periodically rescans for newly-connected
+// sources so plugging in the controller after the daemon starts still works.
+static void midi_thread() {
+    load_midi_map("midi_map.json");
+
+    OSStatus st = MIDIClientCreate(CFSTR("BeamCommander3"), nullptr, nullptr, &g_midi_client);
+    if (st != noErr) { std::cout << "[midi] MIDIClientCreate failed (" << st << ")\n"; return; }
+    st = MIDIInputPortCreate(g_midi_client, CFSTR("BeamCommander3 In"), midi_read_proc, nullptr, &g_midi_in_port);
+    if (st != noErr) { std::cout << "[midi] MIDIInputPortCreate failed (" << st << ")\n"; return; }
+
+    std::set<MIDIEndpointRef> connected;
+    auto scan = [&]() {
+        ItemCount n = MIDIGetNumberOfSources();
+        for (ItemCount i = 0; i < n; ++i) {
+            MIDIEndpointRef src = MIDIGetSource(i);
+            if (connected.count(src)) continue;
+            CFStringRef nameRef = nullptr;
+            MIDIObjectGetStringProperty(src, kMIDIPropertyDisplayName, &nameRef);
+            char name[256] = "?";
+            if (nameRef) { CFStringGetCString(nameRef, name, sizeof(name), kCFStringEncodingUTF8); CFRelease(nameRef); }
+            if (MIDIPortConnectSource(g_midi_in_port, src, nullptr) == noErr) {
+                connected.insert(src);
+                std::cout << "[midi] connected: " << name << "\n" << std::flush;
+            }
+        }
+    };
+    scan();
+    std::cout << "[midi] " << connected.size() << " source(s) connected"
+                 " (will keep scanning for hot-plugged devices)\n" << std::flush;
+
+    CFRunLoopTimerRef timer = CFRunLoopTimerCreateWithHandler(
+        kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 3, 3, 0, 0,
+        ^(CFRunLoopTimerRef) { scan(); });
+    CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopDefaultMode);
+
+    CFRunLoopRun(); // pumps MIDI + the rescan timer forever
+}
+#else
+static void midi_thread() {
+    std::cout << "[midi] CoreMIDI is only implemented on macOS - MIDI control disabled\n";
+}
+#endif
+
 #define APPLY_F(key, field) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) G.field=_v; }
 #define APPLY_S(key, field) { auto _v=json_str(req.body,key); if(!_v.empty()) G.field=_v; }
 #define APPLY_B(key, field) { if(req.body.find("\""+std::string(key)+"\"")!=std::string::npos) G.field=json_bool(req.body,key,G.field); }
@@ -512,6 +781,8 @@ int main(int argc, char* argv[]) {
     load_cues_from_disk();
 
     std::thread laser_t(laser_thread);
+    std::thread midi_t(midi_thread);
+    midi_t.detach(); // pumps a CFRunLoop forever; torn down on process exit
     httplib::Server svr;
 
     svr.set_default_headers({{"Access-Control-Allow-Origin","*"},{"Access-Control-Allow-Methods","GET,POST,OPTIONS"},{"Access-Control-Allow-Headers","Content-Type"}});
@@ -673,9 +944,7 @@ int main(int argc, char* argv[]) {
     svr.Post(R"(/api/cue/(\d+)/save)",[](const httplib::Request& req,httplib::Response& res){
         int n=std::stoi(std::string(req.matches[1]));
         if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
-        LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap=G; }
-        { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[n]=snap; }
-        save_cues_to_disk();
+        do_cue_save(n);
         res.set_content("{\"saved\":"+std::to_string(n)+"}","application/json");
     });
 
@@ -685,17 +954,7 @@ int main(int argc, char* argv[]) {
     svr.Post(R"(/api/cue/(\d+)/recall)",[](const httplib::Request& req,httplib::Response& res){
         int n=std::stoi(std::string(req.matches[1]));
         if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
-        bool found=false; LaserState snap;
-        { std::lock_guard<std::mutex> lk(G_cues_mtx);
-          auto it=G_cues.find(n);
-          if(it!=G_cues.end()){snap=it->second;found=true;} }
-        if(!found){res.status=404;res.set_content("{\"error\":\"empty cue\"}","application/json");return;}
-        {
-            std::lock_guard<std::mutex> lk(G_mtx);
-            std::string ip=G.target_ip;
-            G=snap;
-            G.target_ip=ip;
-        }
+        if(!do_cue_recall(n)){res.status=404;res.set_content("{\"error\":\"empty cue\"}","application/json");return;}
         res.set_content(state_to_json(),"application/json");
     });
 
@@ -703,8 +962,7 @@ int main(int argc, char* argv[]) {
     svr.Post(R"(/api/cue/(\d+)/clear)",[](const httplib::Request& req,httplib::Response& res){
         int n=std::stoi(std::string(req.matches[1]));
         if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
-        { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues.erase(n); }
-        save_cues_to_disk();
+        do_cue_clear(n);
         res.set_content("{\"cleared\":"+std::to_string(n)+"}","application/json");
     });
 
@@ -725,7 +983,8 @@ int main(int argc, char* argv[]) {
               << "  POST /move/mode/<none|circle|pan|tilt|eight|random>\n"
               << "  POST /laser/rainbow/amount/<v>  /laser/rainbow/speed/<v>\n"
               << "  POST /blackout/<0|1>  /laser/connect/<ip>  /laser/disconnect\n"
-              << "  WS   /ws/points\n";
+              << "  WS   /ws/points\n"
+              << "  MIDI: optional, see backend/midi_map.json (Akai APC40 mkII or any USB controller)\n";
 
     std::thread stop_t([&](){while(G_running)std::this_thread::sleep_for(100ms);svr.stop();});
     svr.listen("0.0.0.0",http_port);
