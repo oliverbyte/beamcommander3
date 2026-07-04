@@ -55,20 +55,21 @@ function setupScene() {
 
   // The laser fixture sits at (0, 4.2, -8) and shoots down its local +Z
   // axis, so the projected pattern plane sits at world z = -8 + BEAM_LEN.
-  // The default camera sits behind the fixture, on the beam's own axis,
-  // looking straight down it toward the shape - "looking into the beam"
-  // rather than a 3/4 side angle. An exactly-on-axis view used to cause a
-  // hard-edged ray artifact from a hollow shell "haze cone" mesh, but that
-  // mesh is gone now: the beam is drawn purely as additive line spokes,
-  // which have no silhouette edges from any angle, so viewing it dead-on
-  // is safe and reads as flying straight down the beam. OrbitControls
-  // lets the viewer rotate away from there if they want to.
+  // The default camera sits out on the audience side of the beam (past
+  // the pattern plane), looking back toward the fixture - i.e. the beam
+  // is aimed straight at the viewer, like standing in the crowd at a real
+  // show and looking directly into the projector ("audience blinding"),
+  // rather than a bystander's 3/4 side angle or a view from behind the
+  // fixture looking away from the audience. Because the beam is drawn
+  // purely as additive line spokes (no silhouette geometry), there's no
+  // degenerate-view artifact from staring straight down it either way.
+  // OrbitControls lets the viewer rotate away from there if they want to.
   const planeZ = -8 + BEAM_LEN
   camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500)
-  camera.position.set(0, 4.2, -18)
+  camera.position.set(0, 4.2, planeZ + 6)
 
   controls = new OrbitControls(camera, renderer.domElement)
-  controls.target.set(0, 4.2, planeZ)
+  controls.target.set(0, 4.2, -8)
   controls.enableDamping = true
   controls.maxPolarAngle = Math.PI * 0.62
   controls.minDistance = 4
