@@ -1,5 +1,9 @@
 <template>
-  <div id="ui">
+  <div id="ui" :class="{ collapsed }">
+    <button class="collapse-btn" @click="collapsed = !collapsed" :title="collapsed ? 'Show panel' : 'Hide panel'">
+      {{ collapsed ? '☰' : '✕' }}
+    </button>
+    <div class="panel-body" v-show="!collapsed">
     <h1>BeamCommander<span class="ver">3</span></h1>
     <div class="status-row">
       <span class="dot" :class="{ on: laserState.wsConnected }"></span>
@@ -83,6 +87,7 @@
       <button v-else @click="disarm" class="btn-stop">Disconnect</button>
     </div>
     <p class="error" v-if="laserState.error">{{ laserState.error }}</p>
+    </div>
   </div>
 </template>
 
@@ -96,6 +101,7 @@ const SHAPES = ['circle','line','triangle','square','wave','staticwave']
 const MOVES  = ['none','circle','pan','tilt','eight','random']
 const persistenceMs = ref(25)
 const ipInput = ref('10.10.10.4')
+const collapsed = ref(false)
 
 const hexColor = computed(() => {
   const to = v => Math.round(v*255).toString(16).padStart(2,'0')
@@ -133,6 +139,16 @@ async function reset() { await resetState().catch(console.error) }
   font-family:-apple-system,"Segoe UI",Roboto,sans-serif;
   max-height:calc(100vh - 24px); overflow-y:auto;
 }
+#ui.collapsed {
+  width:auto; max-height:none; overflow:visible; padding:8px;
+}
+.collapse-btn {
+  position:absolute; top:10px; right:10px; z-index:11;
+  width:22px; height:22px; padding:0; line-height:1;
+  font-size:12px; display:flex; align-items:center; justify-content:center;
+}
+#ui.collapsed .collapse-btn { position:static; }
+.panel-body { padding-right:26px; }
 h1 { font-size:13px; letter-spacing:2px; text-transform:uppercase; margin:0 0 8px; color:#8fe3ff; }
 h1 .ver { color:#48e07a; }
 h2 { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; margin:8px 0 4px; color:#9aa0bd; }
