@@ -5,18 +5,41 @@
 import { reactive } from 'vue'
 
 export const laserState = reactive({
-  shape:       'circle',
-  radius:      0.7,
-  points:      300,
-  rate_kpps:   30,
-  intensity:   1.0,
-  r:           0.0,
-  g:           1.0,
-  b:           0.314,
-  armed:       false,
-  ip:          '',
-  wsConnected: false,
-  error:       null,
+  // Shape
+  shape:           'circle',
+  radius:          0.7,
+  points:          300,
+  shape_scale:     0.0,
+  // Color
+  r: 0.0, g: 1.0, b: 0.314,
+  intensity:       1.0,
+  // Position & rotation
+  pos_x:           0.0,
+  pos_y:           0.0,
+  rotation_speed:  0.0,
+  // Movement
+  move_mode:       'none',
+  move_speed:      0.3,
+  move_size:       0.5,
+  // Wave
+  wave_frequency:  1.0,
+  wave_amplitude:  0.45,
+  wave_speed:      0.0,
+  // Rainbow
+  rainbow_amount:  0.0,
+  rainbow_speed:   0.0,
+  // FX
+  blackout:        false,
+  dot_amount:      1.0,
+  flicker_hz:      0.0,
+  // Scan
+  rate_kpps:       30,
+  // Controller
+  armed:           false,
+  ip:              '',
+  // UI-only
+  wsConnected:     false,
+  error:           null,
 })
 
 // ── WebSocket preview ──────────────────────────────────────────────────────────

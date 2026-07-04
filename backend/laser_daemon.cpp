@@ -1,7 +1,6 @@
-// BeamCommander3 — single C++ binary
-//   • libera-laser output (Ether Dream, Helios, LaserCube, …)
-//   • HTTP REST API on :8000
-//   • WebSocket /ws/points — ~30fps preview frames to browser
+// BeamCommander3 — C++ laser backend + HTTP/WebSocket server
+//   Full feature parity with BeamCommander (Python edition):
+//   position, scale, rotation, movement, wave, rainbow, blackout, flash
 //
 // Build: cd backend && bash build.sh
 // Run:   ./laser_daemon [--port 8000]
@@ -27,64 +26,190 @@
 using namespace std::chrono_literals;
 using namespace libera;
 
-// ── Shared laser state ─────────────────────────────────────────────────────────
-struct LaserParams {
-    std::string shape     = "circle";
+// ── Laser state — full BeamCommander feature set ───────────────────────────────
+struct LaserState {
+    // Controller
     std::string target_ip;
-    float radius          = 0.7f;
-    int   points          = 300;
     float rate_kpps       = 30.0f;
-    float intensity       = 1.0f;
-    float r               = 0.0f;
-    float g               = 1.0f;
-    float b               = 0.314f;
+
+    // Shape
+    std::string shape     = "circle";
+    float radius          = 0.7f;     // normalised 0..1
+    int   points          = 300;
+    float shape_scale     = 0.0f;     // -1..1 (0 = no extra scale)
+
+    // Color (0..1)
+    float r = 0.0f, g = 1.0f, b = 0.314f;
+    float intensity       = 1.0f;     // master brightness
+
+    // Position -1..1
+    float pos_x = 0.0f, pos_y = 0.0f;
+
+    // Rotation
+    float rotation_speed  = 0.0f;     // rotations/sec
+
+    // Movement
+    std::string move_mode = "none";   // none circle pan tilt eight random
+    float move_speed      = 0.30f;    // cycles/sec
+    float move_size       = 0.50f;    // 0..1
+
+    // Wave shape params
+    float wave_frequency  = 1.0f;     // cycles across width
+    float wave_amplitude  = 0.45f;    // fraction of radius
+    float wave_speed      = 0.0f;     // cycles/sec (animated wave)
+
+    // Rainbow
+    float rainbow_amount  = 0.0f;     // 0..1 blend
+    float rainbow_speed   = 0.0f;     // hue cycles/sec
+
+    // FX
+    bool  blackout        = false;
+    float dot_amount      = 1.0f;     // 0..1 fraction of points shown
+    float flicker_hz      = 0.0f;     // strobe frequency
+
+    // Preview-only
+    int   persistence_ms  = 25;
 };
-static LaserParams        G_params;
-static std::mutex         G_mtx;
-static std::atomic<bool>  G_armed{false};
-static std::atomic<bool>  G_running{true};
+
+static LaserState        G;
+static std::mutex        G_mtx;
+static std::atomic<bool> G_armed{false};
+static std::atomic<bool> G_running{true};
+
+// Runtime animation clock (seconds since start, never locked — only laser thread writes)
+static double G_time = 0.0;
 
 // ── Shape generators ───────────────────────────────────────────────────────────
-static core::Frame make_frame(const LaserParams& p) {
+struct Pt { float x, y; };
+
+static std::vector<Pt> gen_base_shape(const LaserState& s) {
     const float pi  = std::acos(-1.0f);
     const float tau = 2.0f * pi;
-    const int   n   = std::max(8, p.points);
-    const float rad = std::max(0.01f, p.radius);
-    const float rr  = p.r * p.intensity;
-    const float rg  = p.g * p.intensity;
-    const float rb  = p.b * p.intensity;
+    const int   n   = std::max(8, s.points);
+    const float rad = std::max(0.01f, s.radius);
 
-    core::Frame frame;
-    frame.points.reserve(static_cast<std::size_t>(n));
-    auto push = [&](float x, float y) {
-        frame.points.emplace_back(core::LaserPoint{x, y, rr, rg, rb, 1.0f});
-    };
+    // Scale factor: map shape_scale [-1..1] -> geometric scale
+    float sf = s.shape_scale >= 0 ? (1.0f + s.shape_scale * 2.0f) : (1.0f + s.shape_scale * 0.7f);
+    const float r = rad * sf;
 
-    if (p.shape == "circle") {
-        for (int i=0;i<n;++i) { float a=(float)i/n*tau; push(rad*std::cos(a),rad*std::sin(a)); }
-    } else if (p.shape == "line") {
-        for (int i=0;i<n;++i) { float t=(float)i/(n-1)*2.0f-1.0f; push(t*rad,0.0f); }
-    } else if (p.shape == "triangle") {
-        float vx[3]={0.0f,-rad,rad}, vy[3]={rad,-rad*0.577f,-rad*0.577f};
+    std::vector<Pt> pts;
+    pts.reserve(n);
+
+    if (s.shape == "circle") {
+        for (int i = 0; i < n; ++i) { float a = (float)i/n*tau; pts.push_back({r*std::cos(a), r*std::sin(a)}); }
+    } else if (s.shape == "line") {
+        for (int i = 0; i < n; ++i) { float t = (float)i/(n-1)*2.0f-1.0f; pts.push_back({t*r, 0.0f}); }
+    } else if (s.shape == "triangle") {
+        float vx[3]={0.0f,-r,r}, vy[3]={r,-r*0.577f,-r*0.577f};
         int third=n/3;
         for (int e=0;e<3;++e) { int nx=(e+1)%3;
             for (int i=0;i<third;++i) { float t=(float)i/third;
-                push(vx[e]+t*(vx[nx]-vx[e]),vy[e]+t*(vy[nx]-vy[e])); } }
-    } else if (p.shape == "square") {
-        float cx[4]={-rad,rad,rad,-rad},cy[4]={-rad,-rad,rad,rad};
+                pts.push_back({vx[e]+t*(vx[nx]-vx[e]),vy[e]+t*(vy[nx]-vy[e])}); } }
+    } else if (s.shape == "square") {
+        float cx[4]={-r,r,r,-r},cy[4]={-r,-r,r,r};
         int side=n/4;
         for (int e=0;e<4;++e) { int nx=(e+1)%4;
             for (int i=0;i<side;++i) { float t=(float)i/side;
-                push(cx[e]+t*(cx[nx]-cx[e]),cy[e]+t*(cy[nx]-cy[e])); } }
-    } else if (p.shape == "wave") {
-        static float phase=0.0f; phase+=0.05f;
-        for (int i=0;i<n;++i) { float t=(float)i/(n-1)*tau;
-            push((t/tau*2.0f-1.0f)*rad,rad*0.5f*std::sin(t+phase)); }
-    } else if (p.shape == "staticwave") {
-        for (int i=0;i<n;++i) { float t=(float)i/(n-1)*tau;
-            push((t/tau*2.0f-1.0f)*rad,rad*0.5f*std::sin(t)); }
+                pts.push_back({cx[e]+t*(cx[nx]-cx[e]),cy[e]+t*(cy[nx]-cy[e])}); } }
+    } else if (s.shape == "wave") {
+        float phase = (float)(s.wave_speed * G_time * 2 * pi);
+        for (int i=0;i<n;++i) {
+            float t=(float)i/(n-1)*tau;
+            pts.push_back({(t/tau*2.0f-1.0f)*r, r*s.wave_amplitude*std::sin(s.wave_frequency*t+phase)});
+        }
+    } else if (s.shape == "staticwave") {
+        for (int i=0;i<n;++i) {
+            float t=(float)i/(n-1)*tau;
+            pts.push_back({(t/tau*2.0f-1.0f)*r, r*s.wave_amplitude*std::sin(s.wave_frequency*t)});
+        }
     } else {
-        for (int i=0;i<n;++i) push(0.0f,0.0f);
+        for (int i=0;i<n;++i) pts.push_back({0.0f,0.0f});
+    }
+    return pts;
+}
+
+static void rotate_pts(std::vector<Pt>& pts, float angle) {
+    float c=std::cos(angle), sv=std::sin(angle);
+    for (auto& p : pts) { float nx=p.x*c-p.y*sv; p.y=p.x*sv+p.y*c; p.x=nx; }
+}
+
+static Pt calc_movement(const LaserState& s) {
+    if (s.move_mode == "none") return {0.0f,0.0f};
+    const float pi = std::acos(-1.0f);
+    float phase = (float)(s.move_speed * G_time * 2.0 * pi);
+    float amp   = s.move_size * 0.6f; // fraction of canvas
+    if (s.move_mode=="circle")  return {amp*std::cos(phase), amp*std::sin(phase)};
+    if (s.move_mode=="pan")     return {amp*std::sin(phase), 0.0f};
+    if (s.move_mode=="tilt")    return {0.0f, amp*std::sin(phase)};
+    if (s.move_mode=="eight")   return {amp*std::sin(phase), amp*std::sin(2*phase)};
+    if (s.move_mode=="random")  return {amp*(std::sin(phase*1.3f)+std::sin(phase*2.7f))/2,
+                                        amp*(std::sin(phase*1.7f)+std::sin(phase*3.1f))/2};
+    return {0.0f,0.0f};
+}
+
+// Simple HSV->RGB (h 0..1)
+static void hsv_to_rgb(float h, float s, float v, float& r, float& g, float& b) {
+    if (s == 0) { r=g=b=v; return; }
+    int i = (int)(h*6);
+    float f=h*6-i; float p=v*(1-s),q=v*(1-f*s),t=v*(1-(1-f)*s);
+    switch (i%6) {
+        case 0:r=v;g=t;b=p;break; case 1:r=q;g=v;b=p;break;
+        case 2:r=p;g=v;b=t;break; case 3:r=p;g=q;b=v;break;
+        case 4:r=t;g=p;b=v;break; default:r=v;g=p;b=q;break;
+    }
+}
+
+static core::Frame make_frame(const LaserState& s) {
+    auto base = gen_base_shape(s);
+
+    // Rotation
+    if (s.rotation_speed != 0.0f) {
+        rotate_pts(base, (float)(s.rotation_speed * G_time * 2 * std::acos(-1.0f)));
+    }
+
+    // Position + movement
+    Pt mv = calc_movement(s);
+    float ox = s.pos_x + mv.x;
+    float oy = s.pos_y + mv.y;
+
+    // Dot amount
+    int step = 1;
+    if (s.dot_amount < 1.0f && s.dot_amount > 0.0f)
+        step = std::max(1, (int)(1.0f / std::max(0.01f, s.dot_amount)));
+
+    // Flicker/strobe blackout
+    bool frame_blank = s.blackout;
+    if (!frame_blank && s.flicker_hz > 0.0f) {
+        double period = 1.0 / s.flicker_hz;
+        double phase  = std::fmod(G_time, period);
+        frame_blank = (phase > period * 0.5);
+    }
+
+    // Rainbow phase
+    float rainbow_phase = (float)std::fmod(s.rainbow_speed * G_time, 1.0);
+
+    core::Frame frame;
+    int n = (int)base.size();
+    frame.points.reserve((n + step - 1) / step);
+
+    for (int i = 0; i < n; i += step) {
+        float fr = s.r, fg = s.g, fb = s.b;
+
+        if (s.rainbow_amount > 0.0f) {
+            float hue = std::fmod(rainbow_phase + (float)i/n * s.rainbow_amount, 1.0f);
+            float rr, rg, rb;
+            hsv_to_rgb(hue, 1.0f, 1.0f, rr, rg, rb);
+            fr = fr*(1-s.rainbow_amount) + rr*s.rainbow_amount;
+            fg = fg*(1-s.rainbow_amount) + rg*s.rainbow_amount;
+            fb = fb*(1-s.rainbow_amount) + rb*s.rainbow_amount;
+        }
+
+        float bri = frame_blank ? 0.0f : s.intensity;
+        frame.points.emplace_back(core::LaserPoint{
+            base[i].x + ox,
+            base[i].y + oy,
+            fr * bri, fg * bri, fb * bri, 1.0f
+        });
     }
     return frame;
 }
@@ -94,25 +219,42 @@ static std::string frame_to_ws_json(const core::Frame& fr) {
     std::ostringstream ss;
     ss << std::fixed << std::setprecision(4) << "{\"pts\":[";
     for (std::size_t i=0;i<fr.points.size();++i) {
-        if (i) ss << ',';
-        const auto& pt=fr.points[i];
-        ss<<'['<<pt.x<<','<<pt.y<<','<<pt.r<<','<<pt.g<<','<<pt.b<<']';
+        if (i) ss<<',';
+        const auto& p=fr.points[i];
+        ss<<'['<<p.x<<','<<p.y<<','<<p.r<<','<<p.g<<','<<p.b<<']';
     }
     ss << "]}"; return ss.str();
 }
-static std::string params_to_json(const LaserParams& p) {
+
+static std::string state_to_json() {
+    std::lock_guard<std::mutex> lk(G_mtx);
     std::ostringstream ss; ss << std::fixed << std::setprecision(4);
     ss << "{"
-       << "\"shape\":\""    << p.shape      << "\","
-       << "\"radius\":"     << p.radius     << ","
-       << "\"points\":"     << p.points     << ","
-       << "\"rate_kpps\":"  << p.rate_kpps  << ","
-       << "\"intensity\":"  << p.intensity  << ","
-       << "\"r\":"          << p.r          << ","
-       << "\"g\":"          << p.g          << ","
-       << "\"b\":"          << p.b          << ","
-       << "\"armed\":"      << (G_armed.load()?"true":"false") << ","
-       << "\"ip\":\""       << p.target_ip  << "\""
+       << "\"shape\":\""       << G.shape         << "\","
+       << "\"radius\":"        << G.radius         << ","
+       << "\"points\":"        << G.points         << ","
+       << "\"rate_kpps\":"     << G.rate_kpps      << ","
+       << "\"intensity\":"     << G.intensity      << ","
+       << "\"r\":"             << G.r              << ","
+       << "\"g\":"             << G.g              << ","
+       << "\"b\":"             << G.b              << ","
+       << "\"shape_scale\":"   << G.shape_scale    << ","
+       << "\"pos_x\":"         << G.pos_x          << ","
+       << "\"pos_y\":"         << G.pos_y          << ","
+       << "\"rotation_speed\":" << G.rotation_speed << ","
+       << "\"move_mode\":\""   << G.move_mode      << "\","
+       << "\"move_speed\":"    << G.move_speed     << ","
+       << "\"move_size\":"     << G.move_size      << ","
+       << "\"wave_frequency\":" << G.wave_frequency << ","
+       << "\"wave_amplitude\":" << G.wave_amplitude << ","
+       << "\"wave_speed\":"    << G.wave_speed     << ","
+       << "\"rainbow_amount\":" << G.rainbow_amount << ","
+       << "\"rainbow_speed\":" << G.rainbow_speed  << ","
+       << "\"blackout\":"      << (G.blackout?"true":"false") << ","
+       << "\"dot_amount\":"    << G.dot_amount     << ","
+       << "\"flicker_hz\":"    << G.flicker_hz     << ","
+       << "\"armed\":"         << (G_armed.load()?"true":"false") << ","
+       << "\"ip\":\""          << G.target_ip      << "\""
        << "}";
     return ss.str();
 }
@@ -125,103 +267,79 @@ static void ws_broadcast(const std::string& msg) {
     for (auto* ws : G_ws_clients) ws->send(msg);
 }
 
-// ── Signal handler ─────────────────────────────────────────────────────────────
+// ── Signal ─────────────────────────────────────────────────────────────────────
 static void on_signal(int) { G_running = false; }
 
 // ── Laser output thread ────────────────────────────────────────────────────────
-// libera System lives here — created once so it only binds UDP 45457 once.
 static void laser_thread() {
     System sys;
-
-    // Loop the last frame indefinitely — no auto-blank
     core::LaserController::setMaxFrameHoldTime(std::chrono::milliseconds(0));
 
     using Clock = std::chrono::steady_clock;
     auto last_preview = Clock::now() - 1s;
+    auto last_tick    = Clock::now();
 
     std::shared_ptr<core::LaserController> ctrl;
     std::string connected_ip;
     float       connected_rate = 0;
 
     while (G_running) {
+        // Advance animation clock
+        auto now_tp = Clock::now();
+        G_time += std::chrono::duration<double>(now_tp - last_tick).count();
+        last_tick = now_tp;
+
         std::string ip; float rate;
         {
             std::lock_guard<std::mutex> lk(G_mtx);
-            ip   = G_params.target_ip;
-            rate = G_params.rate_kpps;
+            ip   = G.target_ip;
+            rate = G.rate_kpps;
         }
 
-        // Disarm
         if (ip.empty() || !G_armed.load()) {
-            if (ctrl) {
-                ctrl->setArmed(false);
-                ctrl.reset();
-                connected_ip.clear();
-                std::cout << "[laser] disarmed\n" << std::flush;
-            }
+            if (ctrl) { ctrl->setArmed(false); ctrl.reset(); connected_ip.clear(); std::cout << "[laser] disarmed\n" << std::flush; }
             std::this_thread::sleep_for(200ms);
             continue;
         }
 
-        // (Re)connect when IP or rate changed
-        if (!ctrl || connected_ip != ip || std::abs(rate - connected_rate) > 0.1f) {
+        if (!ctrl || connected_ip != ip || std::abs(rate-connected_rate) > 0.1f) {
             if (ctrl) { ctrl->setArmed(false); ctrl.reset(); }
-
-            // Build info directly — no UDP discovery needed for Ether Dream
-            etherdream::EtherDreamControllerInfo info(
-                ip,              // id
-                "Ether Dream",   // label
-                ip,              // ip
-                7765,            // port
-                4095             // bufferSizePoints — standard ED buffer
-            );
+            etherdream::EtherDreamControllerInfo info(ip,"Ether Dream",ip,7765,4095);
             ctrl = sys.connectController(info);
-            if (!ctrl) {
-                std::cout << "[laser] connect failed " << ip << ", retrying...\n" << std::flush;
-                std::this_thread::sleep_for(1s);
-                continue;
-            }
+            if (!ctrl) { std::cout << "[laser] connect failed " << ip << "\n" << std::flush; std::this_thread::sleep_for(1s); continue; }
             ctrl->setPointRate(static_cast<std::uint32_t>(rate * 1000));
             ctrl->setArmed(true);
-            connected_ip   = ip;
-            connected_rate = rate;
+            connected_ip = ip; connected_rate = rate;
             std::cout << "[laser] streaming " << ip << " @ " << rate << " kpps\n" << std::flush;
         }
 
-        // Update point rate live without reconnect
+        // Live rate update
         {
             std::lock_guard<std::mutex> lk(G_mtx);
-            if (std::abs(G_params.rate_kpps - connected_rate) > 0.1f) {
-                ctrl->setPointRate(static_cast<std::uint32_t>(G_params.rate_kpps * 1000));
-                connected_rate = G_params.rate_kpps;
+            if (std::abs(G.rate_kpps-connected_rate) > 0.1f) {
+                ctrl->setPointRate(static_cast<std::uint32_t>(G.rate_kpps*1000));
+                connected_rate = G.rate_kpps;
             }
         }
 
-        if (!ctrl->isReadyForNewFrame()) {
-            std::this_thread::sleep_for(1ms);
-            continue;
-        }
+        if (!ctrl->isReadyForNewFrame()) { std::this_thread::sleep_for(1ms); continue; }
 
-        LaserParams snap;
-        { std::lock_guard<std::mutex> lk(G_mtx); snap = G_params; }
-
+        LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap = G; }
         auto frame = make_frame(snap);
 
-        // WebSocket preview at ~30fps
-        auto now = Clock::now();
-        if (now - last_preview >= 33ms) {
-            last_preview = now;
+        // WS preview ~30fps
+        if (now_tp - last_preview >= 33ms) {
+            last_preview = now_tp;
             ws_broadcast(frame_to_ws_json(frame));
         }
 
         ctrl->sendFrame(std::move(frame));
     }
-
     if (ctrl) ctrl->setArmed(false);
     sys.shutdown();
 }
 
-// ── JSON field parsers ─────────────────────────────────────────────────────────
+// ── JSON parsers ───────────────────────────────────────────────────────────────
 static std::string json_str(const std::string& b, const std::string& k) {
     auto p=b.find("\""+k+"\""); if(p==std::string::npos) return "";
     p=b.find(':',p); if(p==std::string::npos) return "";
@@ -229,88 +347,167 @@ static std::string json_str(const std::string& b, const std::string& k) {
     auto e=b.find('"',p+1); if(e==std::string::npos) return "";
     return b.substr(p+1,e-p-1);
 }
-static float json_float(const std::string& b, const std::string& k, float d) {
+static float json_float(const std::string& b,const std::string& k,float d) {
     auto p=b.find("\""+k+"\""); if(p==std::string::npos) return d;
     p=b.find(':',p); if(p==std::string::npos) return d;
     ++p; while(p<b.size()&&b[p]==' ')++p;
     try{return std::stof(b.substr(p));}catch(...){return d;}
 }
-static int json_int(const std::string& b,const std::string& k,int d){
-    return (int)json_float(b,k,(float)d);
+static bool json_bool(const std::string& b,const std::string& k,bool d) {
+    auto p=b.find("\""+k+"\""); if(p==std::string::npos) return d;
+    p=b.find(':',p); if(p==std::string::npos) return d;
+    ++p; while(p<b.size()&&b[p]==' ')++p;
+    if(p<b.size()&&b.substr(p,4)=="true") return true;
+    if(p<b.size()&&b.substr(p,5)=="false") return false;
+    return d;
 }
+static int json_int(const std::string& b,const std::string& k,int d){ return (int)json_float(b,k,(float)d); }
+
+#define APPLY_F(key, field) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) G.field=_v; }
+#define APPLY_S(key, field) { auto _v=json_str(req.body,key); if(!_v.empty()) G.field=_v; }
+#define APPLY_B(key, field) { if(req.body.find("\""+std::string(key)+"\"")!=std::string::npos) G.field=json_bool(req.body,key,G.field); }
+#define APPLY_CLAMP(key, field, lo, hi) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) G.field=std::clamp(_v,(float)(lo),(float)(hi)); }
 
 // ── main ───────────────────────────────────────────────────────────────────────
 int main(int argc, char* argv[]) {
     int http_port = 8000;
     for (int i=1;i<argc;++i) {
         if (!strcmp(argv[i],"--port")&&i+1<argc) http_port=std::stoi(argv[++i]);
-        else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")){
-            std::cout<<"Usage: laser_daemon [--port 8000]\n"; return 0; }
+        else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")){ std::cout<<"Usage: laser_daemon [--port 8000]\n"; return 0; }
     }
-    std::signal(SIGINT, on_signal);
-    std::signal(SIGTERM, on_signal);
+    std::signal(SIGINT,on_signal); std::signal(SIGTERM,on_signal);
 
     std::thread laser_t(laser_thread);
-
     httplib::Server svr;
-    svr.set_default_headers({
-        {"Access-Control-Allow-Origin","*"},
-        {"Access-Control-Allow-Methods","GET,POST,OPTIONS"},
-        {"Access-Control-Allow-Headers","Content-Type"},
-    });
+
+    svr.set_default_headers({{"Access-Control-Allow-Origin","*"},{"Access-Control-Allow-Methods","GET,POST,OPTIONS"},{"Access-Control-Allow-Headers","Content-Type"}});
     svr.Options(".*",[](const httplib::Request&,httplib::Response& r){r.status=204;});
 
+    // ── GET /api/state ──────────────────────────────────────────────────────────
     svr.Get("/api/state",[](const httplib::Request&,httplib::Response& res){
-        LaserParams p;{std::lock_guard<std::mutex> lk(G_mtx);p=G_params;}
-        res.set_content(params_to_json(p),"application/json");
-    });
-    svr.Post("/api/state",[](const httplib::Request& req,httplib::Response& res){
-        std::lock_guard<std::mutex> lk(G_mtx);
-        auto s=json_str(req.body,"shape");   if(!s.empty()) G_params.shape=s;
-        auto ip=json_str(req.body,"ip");     if(!ip.empty()) G_params.target_ip=ip;
-        float rv=json_float(req.body,"radius",-1);    if(rv>=0) G_params.radius=rv;
-        int   pv=json_int(req.body,"points",-1);      if(pv>0)  G_params.points=pv;
-        float rk=json_float(req.body,"rate_kpps",-1); if(rk>0)  G_params.rate_kpps=rk;
-        float iv=json_float(req.body,"intensity",-1); if(iv>=0) G_params.intensity=iv;
-        float rv2=json_float(req.body,"r",-1); if(rv2>=0) G_params.r=rv2;
-        float gv=json_float(req.body,"g",-1);  if(gv>=0)  G_params.g=gv;
-        float bv=json_float(req.body,"b",-1);  if(bv>=0)  G_params.b=bv;
-        res.set_content(params_to_json(G_params),"application/json");
+        res.set_content(state_to_json(),"application/json");
     });
 
-    static const std::set<std::string> SHAPES{
-        "circle","line","triangle","square","wave","staticwave"};
-    svr.Post(R"(/laser/shape/([a-z]+))",[](const httplib::Request& req,httplib::Response& res){
-        std::string shape=req.matches[1];
-        if(!SHAPES.count(shape)){res.status=400;res.set_content("{\"error\":\"unknown shape\"}","application/json");return;}
-        {std::lock_guard<std::mutex> lk(G_mtx);G_params.shape=shape;}
-        res.set_content("{\"shape\":\""+shape+"\"}","application/json");
+    // ── POST /api/state — bulk update ──────────────────────────────────────────
+    svr.Post("/api/state",[](const httplib::Request& req,httplib::Response& res){
+        std::lock_guard<std::mutex> lk(G_mtx);
+        APPLY_S("shape",shape)  APPLY_S("ip",target_ip)  APPLY_S("move_mode",move_mode)
+        APPLY_F("radius",radius)  APPLY_CLAMP("radius",radius,0,1)
+        APPLY_F("rate_kpps",rate_kpps)  APPLY_CLAMP("rate_kpps",rate_kpps,1,100)
+        APPLY_F("intensity",intensity)  APPLY_CLAMP("intensity",intensity,0,1)
+        APPLY_F("r",r) APPLY_CLAMP("r",r,0,1)
+        APPLY_F("g",g) APPLY_CLAMP("g",g,0,1)
+        APPLY_F("b",b) APPLY_CLAMP("b",b,0,1)
+        APPLY_F("shape_scale",shape_scale) APPLY_CLAMP("shape_scale",shape_scale,-1,1)
+        APPLY_F("pos_x",pos_x) APPLY_CLAMP("pos_x",pos_x,-1,1)
+        APPLY_F("pos_y",pos_y) APPLY_CLAMP("pos_y",pos_y,-1,1)
+        APPLY_F("rotation_speed",rotation_speed)
+        APPLY_F("move_speed",move_speed)
+        APPLY_F("move_size",move_size) APPLY_CLAMP("move_size",move_size,0,1)
+        APPLY_F("wave_frequency",wave_frequency)
+        APPLY_F("wave_amplitude",wave_amplitude) APPLY_CLAMP("wave_amplitude",wave_amplitude,0,1)
+        APPLY_F("wave_speed",wave_speed)
+        APPLY_F("rainbow_amount",rainbow_amount) APPLY_CLAMP("rainbow_amount",rainbow_amount,0,1)
+        APPLY_F("rainbow_speed",rainbow_speed)
+        APPLY_F("dot_amount",dot_amount) APPLY_CLAMP("dot_amount",dot_amount,0,1)
+        APPLY_F("flicker_hz",flicker_hz)
+        APPLY_B("blackout",blackout)
+        APPLY_F("points",points)
+        res.set_content(state_to_json(),"application/json");
     });
+
+    // ── POST /laser/shape/<shape> ───────────────────────────────────────────────
+    static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","staticwave"};
+    svr.Post(R"(/laser/shape/([a-z]+))",[](const httplib::Request& req,httplib::Response& res){
+        std::string s=req.matches[1];
+        if(!SHAPES.count(s)){res.status=400;res.set_content("{\"error\":\"unknown shape\"}","application/json");return;}
+        {std::lock_guard<std::mutex> lk(G_mtx);G.shape=s;}
+        res.set_content("{\"shape\":\""+s+"\"}","application/json");
+    });
+
+    // ── POST /laser/brightness/<val> ───────────────────────────────────────────
     svr.Post(R"(/laser/brightness/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
         try{float v=std::stof(std::string(req.matches[1]));
-            std::lock_guard<std::mutex> lk(G_mtx);G_params.intensity=std::clamp(v,0.0f,1.0f);}catch(...){}
-        LaserParams p;{std::lock_guard<std::mutex> lk(G_mtx);p=G_params;}
-        res.set_content(params_to_json(p),"application/json");
+            std::lock_guard<std::mutex> lk(G_mtx);
+            G.intensity=std::clamp(v>1.0f?v/255.0f:v,0.0f,1.0f);}catch(...){}
+        res.set_content(state_to_json(),"application/json");
     });
+
+    // ── POST /laser/color/<r>/<g>/<b> ──────────────────────────────────────────
     svr.Post(R"(/laser/color/([\d.]+)/([\d.]+)/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
         try{std::lock_guard<std::mutex> lk(G_mtx);
-            G_params.r=std::clamp(std::stof(std::string(req.matches[1])),0.0f,1.0f);
-            G_params.g=std::clamp(std::stof(std::string(req.matches[2])),0.0f,1.0f);
-            G_params.b=std::clamp(std::stof(std::string(req.matches[3])),0.0f,1.0f);}catch(...){}
-        LaserParams p;{std::lock_guard<std::mutex> lk(G_mtx);p=G_params;}
-        res.set_content(params_to_json(p),"application/json");
+            float rv=std::stof(std::string(req.matches[1]));
+            float gv=std::stof(std::string(req.matches[2]));
+            float bv=std::stof(std::string(req.matches[3]));
+            auto norm=[](float v){return v>1.0f?v/255.0f:v;};
+            G.r=std::clamp(norm(rv),0.0f,1.0f);
+            G.g=std::clamp(norm(gv),0.0f,1.0f);
+            G.b=std::clamp(norm(bv),0.0f,1.0f);}catch(...){}
+        res.set_content(state_to_json(),"application/json");
     });
+
+    // ── POST /laser/position/<x>/<y> ───────────────────────────────────────────
+    svr.Post(R"(/laser/position/(-?[\d.]+)/(-?[\d.]+))",[](const httplib::Request& req,httplib::Response& res){
+        try{std::lock_guard<std::mutex> lk(G_mtx);
+            G.pos_x=std::clamp(std::stof(std::string(req.matches[1])),-1.0f,1.0f);
+            G.pos_y=std::clamp(std::stof(std::string(req.matches[2])),-1.0f,1.0f);}catch(...){}
+        res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── POST /laser/rotation/speed/<val> ───────────────────────────────────────
+    svr.Post(R"(/laser/rotation/speed/(-?[\d.]+))",[](const httplib::Request& req,httplib::Response& res){
+        try{std::lock_guard<std::mutex> lk(G_mtx);G.rotation_speed=std::stof(std::string(req.matches[1]));}catch(...){}
+        res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── POST /move/mode/<mode> ─────────────────────────────────────────────────
+    static const std::set<std::string> MOVES{"none","circle","pan","tilt","eight","random"};
+    svr.Post(R"(/move/mode/([a-z]+))",[](const httplib::Request& req,httplib::Response& res){
+        std::string m=req.matches[1];
+        if(!MOVES.count(m)){res.status=400;res.set_content("{\"error\":\"unknown mode\"}","application/json");return;}
+        {std::lock_guard<std::mutex> lk(G_mtx);G.move_mode=m;}
+        res.set_content("{\"move_mode\":\""+m+"\"}","application/json");
+    });
+
+    // ── POST /move/speed/<val>  /move/size/<val> ───────────────────────────────
+    svr.Post(R"(/move/speed/(-?[\d.]+))",[](const httplib::Request& req,httplib::Response& res){
+        try{std::lock_guard<std::mutex> lk(G_mtx);G.move_speed=std::stof(std::string(req.matches[1]));}catch(...){}
+        res.set_content(state_to_json(),"application/json");
+    });
+    svr.Post(R"(/move/size/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
+        try{std::lock_guard<std::mutex> lk(G_mtx);G.move_size=std::clamp(std::stof(std::string(req.matches[1])),0.0f,1.0f);}catch(...){}
+        res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── POST /laser/rainbow/amount/<val>  /speed/<val> ─────────────────────────
+    svr.Post(R"(/laser/rainbow/amount/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
+        try{std::lock_guard<std::mutex> lk(G_mtx);G.rainbow_amount=std::clamp(std::stof(std::string(req.matches[1])),0.0f,1.0f);}catch(...){}
+        res.set_content(state_to_json(),"application/json");
+    });
+    svr.Post(R"(/laser/rainbow/speed/(-?[\d.]+))",[](const httplib::Request& req,httplib::Response& res){
+        try{std::lock_guard<std::mutex> lk(G_mtx);G.rainbow_speed=std::stof(std::string(req.matches[1]));}catch(...){}
+        res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── POST /blackout/<0|1> ───────────────────────────────────────────────────
+    svr.Post(R"(/blackout/([01]))",[](const httplib::Request& req,httplib::Response& res){
+        {std::lock_guard<std::mutex> lk(G_mtx);G.blackout=(req.matches[1]=="1");}
+        res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── POST /laser/connect/<ip>  /laser/disconnect ────────────────────────────
     svr.Post(R"(/laser/connect/(.+))",[](const httplib::Request& req,httplib::Response& res){
         std::string ip=req.matches[1];
-        {std::lock_guard<std::mutex> lk(G_mtx);G_params.target_ip=ip;}
+        {std::lock_guard<std::mutex> lk(G_mtx);G.target_ip=ip;}
         G_armed=true;
         res.set_content("{\"ip\":\""+ip+"\",\"armed\":true}","application/json");
     });
     svr.Post("/laser/disconnect",[](const httplib::Request&,httplib::Response& res){
-        G_armed=false;
-        {std::lock_guard<std::mutex> lk(G_mtx);G_params.target_ip="";}
+        G_armed=false;{std::lock_guard<std::mutex> lk(G_mtx);G.target_ip="";}
         res.set_content("{\"armed\":false}","application/json");
     });
+
+    // ── WebSocket /ws/points ───────────────────────────────────────────────────
     svr.WebSocket("/ws/points",[](const httplib::Request&,httplib::ws::WebSocket& ws){
         {std::lock_guard<std::mutex> lk(G_ws_mtx);G_ws_clients.insert(&ws);}
         std::string msg;
@@ -319,15 +516,17 @@ int main(int argc, char* argv[]) {
     });
 
     std::cout << "[laser_daemon] Listening on :" << http_port << "\n"
-              << "  Supports: Ether Dream, Helios, LaserCube, IDN (via libera)\n"
               << "  GET/POST /api/state\n"
               << "  POST /laser/shape/<circle|line|triangle|square|wave|staticwave>\n"
-              << "  POST /laser/connect/<ip>  /laser/disconnect\n"
+              << "  POST /laser/brightness/<0-1>  /laser/color/<r>/<g>/<b>\n"
+              << "  POST /laser/position/<x>/<y>  /laser/rotation/speed/<v>\n"
+              << "  POST /move/mode/<none|circle|pan|tilt|eight|random>\n"
+              << "  POST /laser/rainbow/amount/<v>  /laser/rainbow/speed/<v>\n"
+              << "  POST /blackout/<0|1>  /laser/connect/<ip>  /laser/disconnect\n"
               << "  WS   /ws/points\n";
 
     std::thread stop_t([&](){while(G_running)std::this_thread::sleep_for(100ms);svr.stop();});
-    svr.listen("0.0.0.0", http_port);
-    stop_t.join();
-    laser_t.join();
+    svr.listen("0.0.0.0",http_port);
+    stop_t.join(); laser_t.join();
     return 0;
 }
