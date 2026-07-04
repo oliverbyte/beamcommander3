@@ -55,17 +55,20 @@ function setupScene() {
 
   // The laser fixture sits at (0, 4.2, -8) and shoots down its local +Z
   // axis, so the projected pattern plane sits at world z = -8 + BEAM_LEN.
-  // Put the camera further along that same axis (same x/y as the fixture)
-  // so it looks straight down the beam at the plane face-on - this is what
-  // guarantees the shape is always fully visible and undistorted by
-  // default, matching the real DAC output point-for-point. OrbitControls
-  // still lets the viewer rotate for a more dramatic angle afterwards.
+  // The default camera is offset to a 3/4 oblique angle (like Pangolin
+  // Beyond / Liberation's default 3D preview) rather than looking exactly
+  // down the beam axis: viewed perfectly end-on, the additive haze "cone"
+  // (a thin hollow shell mesh) projects its ~160 triangular facets as
+  // visible radiating streaks - a classic degenerate-view artifact of that
+  // technique. A modest off-axis angle avoids it entirely while still
+  // keeping the shape fully legible. OrbitControls lets the viewer rotate
+  // further from there.
   const planeZ = -8 + BEAM_LEN
   camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500)
-  camera.position.set(0, 4.2, planeZ + 20)
+  camera.position.set(9, 8.5, planeZ + 18)
 
   controls = new OrbitControls(camera, renderer.domElement)
-  controls.target.set(0, 4.2, planeZ)
+  controls.target.set(0, 4.2, planeZ - 2)
   controls.enableDamping = true
   controls.maxPolarAngle = Math.PI * 0.62
   controls.minDistance = 4
