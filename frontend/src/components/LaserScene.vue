@@ -25,7 +25,7 @@ const BEAM_LEN = 22
 const MAX_SCAN_POINTS = 20000
 
 let renderer, scene, camera, controls, laser
-let scanDot, flare, flareMat, dust
+let flare, flareMat, dust
 let spokeGeo, spokePositions, spokeColors, spokeTimestamps
 let spokeWriteIndex = 0
 let animationId = 0
@@ -123,11 +123,15 @@ function setupScene() {
   // density is driven entirely by the real scanned points, so it always
   // matches whatever pattern is currently projected (a full circle fills
   // in solidly, a thin line/wave only lights up a narrow sliver, etc).
-  // Vertex-colors fade each spoke from bright at the source to dim at the
-  // far point, matching how a real beam's brightness falls off as it
-  // diverges over distance.
-  spokePositions = new Float32Array(MAX_SCAN_POINTS * 2 * 3)
-  spokeColors = new Float32Array(MAX_SCAN_POINTS * 2 * 3)
+  // Each spoke is actually TWO collinear segments: source -> shape point
+  // (bright to dim), then shape point -> a far continuation point well
+  // beyond it (dim fading all the way to fully black). Real laser beams
+  // don't stop at the pattern - they keep travelling on into the haze/sky
+  // until they're no longer visible; fading the continuation to zero
+  // rather than drawing a hard endpoint there reproduces that look
+  // instead of every ray visibly terminating in mid-air.
+  spokePositions = new Float32Array(MAX_SCAN_POINTS * 4 * 3)
+  spokeColors = new Float32Array(MAX_SCAN_POINTS * 4 * 3)
   spokeTimestamps = new Float64Array(MAX_SCAN_POINTS).fill(-Infinity)
   spokeGeo = new THREE.BufferGeometry()
   spokeGeo.setAttribute('position', new THREE.BufferAttribute(spokePositions, 3).setUsage(THREE.DynamicDrawUsage))
@@ -146,14 +150,6 @@ function setupScene() {
   flare = new THREE.Sprite(flareMat)
   flare.scale.setScalar(1.5)
   laser.add(flare)
-
-  const dotMat = new THREE.SpriteMaterial({
-    map: glowTex, color: 0xffffff, transparent: true, opacity: 0.9,
-    blending: THREE.AdditiveBlending, depthWrite: false,
-  })
-  scanDot = new THREE.Sprite(dotMat)
-  scanDot.scale.setScalar(0.8)
-  laser.add(scanDot)
 
   const DUST_COUNT = 600
   const dustPos = new Float32Array(DUST_COUNT * 3)
@@ -219,19 +215,29 @@ function emitScanPoints(now) {
     const scale = (r > 1 || g > 1 || b > 1) ? 1 / 255 : 1
     const cr = r * scale, cg = g * scale, cb = b * scale
 
-    // Spoke: source (local origin) -> this exact scanned point. Bright
-    // near the source, dim at the far point (vertex-color gradient) - this
-    // is what makes the visible beam fan out into the actual shape being
-    // drawn instead of a generic, shape-independent cone.
-    const vi = spokeWriteIndex * 6   // 2 vertices * 3 floats
-    spokePositions[vi]     = 0
-    spokePositions[vi + 1] = 0
-    spokePositions[vi + 2] = 0
-    spokePositions[vi + 3] = wx
-    spokePositions[vi + 4] = wy
-    spokePositions[vi + 5] = BEAM_LEN
+    // Spoke: source (local origin) -> shape point -> far continuation.
+    // Segment 1 (source->point) fades bright-to-dim; segment 2
+    // (point->far) continues fading from dim all the way to black, so the
+    // ray appears to travel on indefinitely with no visible endpoint,
+    // instead of hard-stopping exactly at the shape.
+    const vi = spokeWriteIndex * 12   // 4 vertices * 3 floats
+    const fx = wx * SPOKE_FAR_EXTEND, fy = wy * SPOKE_FAR_EXTEND, fz = BEAM_LEN * SPOKE_FAR_EXTEND
+    spokePositions[vi]      = 0
+    spokePositions[vi + 1]  = 0
+    spokePositions[vi + 2]  = 0
+    spokePositions[vi + 3]  = wx
+    spokePositions[vi + 4]  = wy
+    spokePositions[vi + 5]  = BEAM_LEN
+    spokePositions[vi + 6]  = wx
+    spokePositions[vi + 7]  = wy
+    spokePositions[vi + 8]  = BEAM_LEN
+    spokePositions[vi + 9]  = fx
+    spokePositions[vi + 10] = fy
+    spokePositions[vi + 11] = fz
     spokeBaseColors[vi]     = cr * SPOKE_NEAR_BRIGHT; spokeBaseColors[vi + 1] = cg * SPOKE_NEAR_BRIGHT; spokeBaseColors[vi + 2] = cb * SPOKE_NEAR_BRIGHT
     spokeBaseColors[vi + 3] = cr * SPOKE_FAR_DIM;      spokeBaseColors[vi + 4] = cg * SPOKE_FAR_DIM;      spokeBaseColors[vi + 5] = cb * SPOKE_FAR_DIM
+    spokeBaseColors[vi + 6] = cr * SPOKE_FAR_DIM;      spokeBaseColors[vi + 7] = cg * SPOKE_FAR_DIM;      spokeBaseColors[vi + 8] = cb * SPOKE_FAR_DIM
+    spokeBaseColors[vi + 9] = 0;                       spokeBaseColors[vi + 10] = 0;                      spokeBaseColors[vi + 11] = 0
     spokeTimestamps[spokeWriteIndex] = t
     spokeWriteIndex = (spokeWriteIndex + 1) % MAX_SCAN_POINTS
 
@@ -243,13 +249,16 @@ function emitScanPoints(now) {
 }
 
 // Brightness falloff along each spoke: bright near the source, dim at the
-// far (shape) end - approximates how a real beam's apparent brightness in
-// haze falls off as it diverges over distance (same optical power spread
-// over an ever-larger cross-section further from the aperture).
+// shape point, then fading all the way to black on the continuation past
+// it - approximates how a real beam's apparent brightness in haze falls
+// off as it diverges over distance, with no hard visible end.
 const SPOKE_NEAR_BRIGHT = 1.0
 const SPOKE_FAR_DIM = 0.08
+// How much further the beam continues past the shape point (as a
+// multiple of the source->point distance) before fully fading to black.
+const SPOKE_FAR_EXTEND = 6
 
-const spokeBaseColors = new Float32Array(MAX_SCAN_POINTS * 2 * 3)
+const spokeBaseColors = new Float32Array(MAX_SCAN_POINTS * 4 * 3)
 let lastPoint = [0, 0]
 const tmpV1 = new THREE.Vector3()
 const tmpV2 = new THREE.Vector3()
@@ -281,20 +290,12 @@ function animate() {
   for (let i = 0; i < MAX_SCAN_POINTS; i++) {
     const age = now - spokeTimestamps[i]
     const brightness = age < 0 ? 0 : Math.exp(-age / persistenceTau)
-    const vi = i * 6
-    colorArr[vi]     = spokeBaseColors[vi]     * brightness
-    colorArr[vi + 1] = spokeBaseColors[vi + 1] * brightness
-    colorArr[vi + 2] = spokeBaseColors[vi + 2] * brightness
-    colorArr[vi + 3] = spokeBaseColors[vi + 3] * brightness
-    colorArr[vi + 4] = spokeBaseColors[vi + 4] * brightness
-    colorArr[vi + 5] = spokeBaseColors[vi + 5] * brightness
+    const vi = i * 12
+    for (let c = 0; c < 12; c++) {
+      colorArr[vi + c] = spokeBaseColors[vi + c] * brightness
+    }
   }
   spokeGeo.attributes.color.needsUpdate = true
-
-  // The scan-dot hotspot always follows the latest emitted point,
-  // reprojected onto the beam's fixed far plane.
-  const [ex, ey] = lastPoint
-  scanDot.position.set(ex * WORLD_SCALE, ey * WORLD_SCALE, BEAM_LEN)
 
   // "Looking into the laser" flare: brightens when the camera is inside the cone
   tmpV2.copy(camera.position).sub(tmpV1).normalize()
