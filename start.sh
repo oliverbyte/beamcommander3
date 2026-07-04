@@ -6,10 +6,13 @@ DAEMON_BIN="$ROOT/backend/laser_daemon"
 DAEMON_LOG="${TMPDIR:-/tmp}/bc3-daemon.log"
 FRONTEND_LOG="${TMPDIR:-/tmp}/bc3-frontend.log"
 
-# Kill child processes on exit/Ctrl-C
+# Kill child processes on exit/Ctrl-C — run only once
+_cleaned=0
 cleanup() {
+    [[ $_cleaned -eq 1 ]] && return; _cleaned=1
     echo ""
     echo "[start.sh] Stopping..."
+    trap '' INT TERM  # ignore further signals during cleanup
     kill "$DAEMON_PID" "$FRONTEND_PID" 2>/dev/null || true
     wait "$DAEMON_PID" "$FRONTEND_PID" 2>/dev/null || true
     echo "[start.sh] Done."

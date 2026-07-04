@@ -390,6 +390,7 @@ int main(int argc, char* argv[]) {
 
     // ── POST /api/state — bulk update ──────────────────────────────────────────
     svr.Post("/api/state",[](const httplib::Request& req,httplib::Response& res){
+        { // scope the lock so it's released before state_to_json() re-locks G_mtx
         std::lock_guard<std::mutex> lk(G_mtx);
         APPLY_S("shape",shape)  APPLY_S("ip",target_ip)  APPLY_S("move_mode",move_mode)
         APPLY_F("radius",radius)  APPLY_CLAMP("radius",radius,0,1)
@@ -413,6 +414,7 @@ int main(int argc, char* argv[]) {
         APPLY_F("flicker_hz",flicker_hz)
         APPLY_B("blackout",blackout)
         APPLY_F("points",points)
+        } // lock released here
         res.set_content(state_to_json(),"application/json");
     });
 
