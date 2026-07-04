@@ -15,8 +15,10 @@
 #include <cmath>
 #include <csignal>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -376,6 +378,123 @@ static bool json_bool(const std::string& b,const std::string& k,bool d) {
 }
 static int json_int(const std::string& b,const std::string& k,int d){ return (int)json_float(b,k,(float)d); }
 
+// ── Cue save/recall ──────────────────────────────────────────────────────────
+// A cue is a saved snapshot of every show parameter (shape, color, transform,
+// movement, wave, rainbow, FX) — NOT the controller connection (target_ip),
+// so recalling a cue never drops/changes the current DAC link. Persisted to
+// a small JSON file on disk so cues survive a daemon restart, mirroring the
+// cue system from the original BeamCommander (Python edition).
+static constexpr int MAX_CUES = 16;
+static std::map<int, LaserState> G_cues;
+static std::mutex                G_cues_mtx;
+static const std::string         CUES_FILE = "cues.json";
+
+static std::string cue_state_to_json(const LaserState& s) {
+    std::ostringstream ss; ss << std::fixed << std::setprecision(4);
+    ss << "{"
+       << "\"shape\":\""       << s.shape         << "\","
+       << "\"radius\":"        << s.radius        << ","
+       << "\"points\":"        << s.points        << ","
+       << "\"rate_kpps\":"     << s.rate_kpps     << ","
+       << "\"intensity\":"     << s.intensity     << ","
+       << "\"r\":"             << s.r             << ","
+       << "\"g\":"             << s.g             << ","
+       << "\"b\":"             << s.b             << ","
+       << "\"shape_scale\":"   << s.shape_scale   << ","
+       << "\"pos_x\":"         << s.pos_x         << ","
+       << "\"pos_y\":"         << s.pos_y         << ","
+       << "\"rotation_speed\":" << s.rotation_speed << ","
+       << "\"move_mode\":\""   << s.move_mode     << "\","
+       << "\"move_speed\":"    << s.move_speed    << ","
+       << "\"move_size\":"     << s.move_size     << ","
+       << "\"wave_frequency\":" << s.wave_frequency << ","
+       << "\"wave_amplitude\":" << s.wave_amplitude << ","
+       << "\"wave_speed\":"    << s.wave_speed    << ","
+       << "\"rainbow_amount\":" << s.rainbow_amount << ","
+       << "\"rainbow_speed\":" << s.rainbow_speed << ","
+       << "\"blackout\":"      << (s.blackout?"true":"false") << ","
+       << "\"dot_amount\":"    << s.dot_amount    << ","
+       << "\"flicker_hz\":"    << s.flicker_hz
+       << "}";
+    return ss.str();
+}
+
+static LaserState cue_state_from_json(const std::string& obj) {
+    LaserState s{};
+    auto str = json_str(obj,"shape");     if(!str.empty()) s.shape = str;
+    s.radius          = json_float(obj,"radius",s.radius);
+    s.points          = json_int(obj,"points",s.points);
+    s.rate_kpps       = json_float(obj,"rate_kpps",s.rate_kpps);
+    s.intensity       = json_float(obj,"intensity",s.intensity);
+    s.r               = json_float(obj,"r",s.r);
+    s.g               = json_float(obj,"g",s.g);
+    s.b               = json_float(obj,"b",s.b);
+    s.shape_scale     = json_float(obj,"shape_scale",s.shape_scale);
+    s.pos_x           = json_float(obj,"pos_x",s.pos_x);
+    s.pos_y           = json_float(obj,"pos_y",s.pos_y);
+    s.rotation_speed  = json_float(obj,"rotation_speed",s.rotation_speed);
+    auto mv = json_str(obj,"move_mode");  if(!mv.empty()) s.move_mode = mv;
+    s.move_speed      = json_float(obj,"move_speed",s.move_speed);
+    s.move_size       = json_float(obj,"move_size",s.move_size);
+    s.wave_frequency  = json_float(obj,"wave_frequency",s.wave_frequency);
+    s.wave_amplitude  = json_float(obj,"wave_amplitude",s.wave_amplitude);
+    s.wave_speed      = json_float(obj,"wave_speed",s.wave_speed);
+    s.rainbow_amount  = json_float(obj,"rainbow_amount",s.rainbow_amount);
+    s.rainbow_speed   = json_float(obj,"rainbow_speed",s.rainbow_speed);
+    s.blackout        = json_bool(obj,"blackout",s.blackout);
+    s.dot_amount      = json_float(obj,"dot_amount",s.dot_amount);
+    s.flicker_hz      = json_float(obj,"flicker_hz",s.flicker_hz);
+    return s;
+}
+
+static void save_cues_to_disk() {
+    std::lock_guard<std::mutex> lk(G_cues_mtx);
+    std::ofstream f(CUES_FILE, std::ios::trunc);
+    if (!f) return;
+    f << "{";
+    bool first = true;
+    for (auto& [num, s] : G_cues) {
+        if (!first) f << ",";
+        first = false;
+        f << "\"" << num << "\":" << cue_state_to_json(s);
+    }
+    f << "}";
+}
+
+// Minimal brace-matching split of a flat {"1":{...},"2":{...}} file - this is
+// our own file format (produced only by save_cues_to_disk above), so a full
+// JSON parser isn't needed, just enough to recover each numbered cue block.
+static void load_cues_from_disk() {
+    std::ifstream f(CUES_FILE);
+    if (!f) return;
+    std::ostringstream buf; buf << f.rdbuf();
+    std::string body = buf.str();
+
+    std::lock_guard<std::mutex> lk(G_cues_mtx);
+    G_cues.clear();
+    std::size_t i = 0;
+    while (true) {
+        auto q1 = body.find('"', i);          if (q1 == std::string::npos) break;
+        auto q2 = body.find('"', q1 + 1);     if (q2 == std::string::npos) break;
+        std::string key = body.substr(q1 + 1, q2 - q1 - 1);
+        auto colon = body.find(':', q2);      if (colon == std::string::npos) break;
+        auto brace = body.find('{', colon);   if (brace == std::string::npos) break;
+        int depth = 0; std::size_t j = brace;
+        for (; j < body.size(); ++j) {
+            if (body[j] == '{') ++depth;
+            else if (body[j] == '}') { --depth; if (depth == 0) { ++j; break; } }
+        }
+        if (depth != 0) break; // malformed, bail out
+        try {
+            int num = std::stoi(key);
+            if (num >= 1 && num <= MAX_CUES)
+                G_cues[num] = cue_state_from_json(body.substr(brace, j - brace));
+        } catch (...) {}
+        i = j;
+    }
+    std::cout << "[laser_daemon] Loaded " << G_cues.size() << " cue(s) from " << CUES_FILE << "\n";
+}
+
 #define APPLY_F(key, field) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) G.field=_v; }
 #define APPLY_S(key, field) { auto _v=json_str(req.body,key); if(!_v.empty()) G.field=_v; }
 #define APPLY_B(key, field) { if(req.body.find("\""+std::string(key)+"\"")!=std::string::npos) G.field=json_bool(req.body,key,G.field); }
@@ -389,6 +508,8 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")){ std::cout<<"Usage: laser_daemon [--port 8000]\n"; return 0; }
     }
     std::signal(SIGINT,on_signal); std::signal(SIGTERM,on_signal);
+
+    load_cues_from_disk();
 
     std::thread laser_t(laser_thread);
     httplib::Server svr;
@@ -535,6 +656,58 @@ int main(int argc, char* argv[]) {
         res.set_content("{\"armed\":false}","application/json");
     });
 
+    // ── GET /api/cues — list all populated cue slots ───────────────────────────
+    svr.Get("/api/cues",[](const httplib::Request&,httplib::Response& res){
+        std::ostringstream ss; ss<<"{";
+        { std::lock_guard<std::mutex> lk(G_cues_mtx);
+          bool first=true;
+          for (auto& [num,s] : G_cues) {
+              if(!first) ss<<","; first=false;
+              ss<<"\""<<num<<"\":"<<cue_state_to_json(s);
+          } }
+        ss<<"}";
+        res.set_content(ss.str(),"application/json");
+    });
+
+    // ── POST /api/cue/<n>/save — snapshot current show params into slot n ─────
+    svr.Post(R"(/api/cue/(\d+)/save)",[](const httplib::Request& req,httplib::Response& res){
+        int n=std::stoi(std::string(req.matches[1]));
+        if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
+        LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap=G; }
+        { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[n]=snap; }
+        save_cues_to_disk();
+        res.set_content("{\"saved\":"+std::to_string(n)+"}","application/json");
+    });
+
+    // ── POST /api/cue/<n>/recall — apply slot n's saved show params ────────────
+    // Preserves the current controller connection (target_ip), just like
+    // /api/reset does, so recalling a cue never drops the laser link.
+    svr.Post(R"(/api/cue/(\d+)/recall)",[](const httplib::Request& req,httplib::Response& res){
+        int n=std::stoi(std::string(req.matches[1]));
+        if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
+        bool found=false; LaserState snap;
+        { std::lock_guard<std::mutex> lk(G_cues_mtx);
+          auto it=G_cues.find(n);
+          if(it!=G_cues.end()){snap=it->second;found=true;} }
+        if(!found){res.status=404;res.set_content("{\"error\":\"empty cue\"}","application/json");return;}
+        {
+            std::lock_guard<std::mutex> lk(G_mtx);
+            std::string ip=G.target_ip;
+            G=snap;
+            G.target_ip=ip;
+        }
+        res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── POST /api/cue/<n>/clear — delete a saved cue slot ──────────────────────
+    svr.Post(R"(/api/cue/(\d+)/clear)",[](const httplib::Request& req,httplib::Response& res){
+        int n=std::stoi(std::string(req.matches[1]));
+        if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
+        { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues.erase(n); }
+        save_cues_to_disk();
+        res.set_content("{\"cleared\":"+std::to_string(n)+"}","application/json");
+    });
+
     // ── WebSocket /ws/points ───────────────────────────────────────────────────
     svr.WebSocket("/ws/points",[](const httplib::Request&,httplib::ws::WebSocket& ws){
         {std::lock_guard<std::mutex> lk(G_ws_mtx);G_ws_clients.insert(&ws);}
@@ -545,6 +718,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "[laser_daemon] Listening on :" << http_port << "\n"
               << "  GET/POST /api/state   POST /api/reset\n"
+              << "  GET /api/cues   POST /api/cue/<1-" << MAX_CUES << ">/save|recall|clear\n"
               << "  POST /laser/shape/<circle|line|triangle|square|wave|staticwave>\n"
               << "  POST /laser/brightness/<0-1>  /laser/color/<r>/<g>/<b>\n"
               << "  POST /laser/position/<x>/<y>  /laser/rotation/speed/<v>\n"

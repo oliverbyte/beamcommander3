@@ -1,6 +1,7 @@
 // Talks directly to the C++ laser_daemon (port 8000).
 // API:  GET/POST /api/state   POST /laser/shape/<s>
 //       POST /laser/connect/<ip>  POST /laser/disconnect
+//       GET /api/cues  POST /api/cue/<n>/save|recall|clear
 //       WS   /ws/points
 import { reactive } from 'vue'
 
@@ -41,6 +42,10 @@ export const laserState = reactive({
   wsConnected:     false,
   error:           null,
 })
+
+// Cue slots — { [cueNumber]: <full saved state object> } for populated
+// slots only; a slot simply being absent from this object means it's empty.
+export const cues = reactive({})
 
 // ── WebSocket preview ──────────────────────────────────────────────────────────
 
@@ -143,6 +148,32 @@ export async function disconnectLaser() {
   applyState(await laser('/disconnect', { method: 'POST' }))
 }
 
+// ── Cue save/recall ─────────────────────────────────────────────────────────────
+
+function applyCues(data) {
+  for (const k of Object.keys(cues)) delete cues[k]
+  Object.assign(cues, data || {})
+}
+
+export async function fetchCues() {
+  applyCues(await api('/cues'))
+}
+
+export async function saveCue(n) {
+  await api(`/cue/${n}/save`, { method: 'POST' })
+  await fetchCues()
+}
+
+export async function recallCue(n) {
+  markLocalChange()
+  applyState(await api(`/cue/${n}/recall`, { method: 'POST' }))
+}
+
+export async function clearCue(n) {
+  await api(`/cue/${n}/clear`, { method: 'POST' })
+  await fetchCues()
+}
+
 // ── Status polling ─────────────────────────────────────────────────────────────
 // Keeps this client's view of laserState in sync even when another client
 // (a different browser tab, curl, etc.) changes settings on the backend.
@@ -152,6 +183,7 @@ export function startStatusPolling(intervalMs = 1000) {
   if (statusPoll) return
   statusPoll = setInterval(() => {
     api('/state').then(applyPolledState).catch(() => {})
+    api('/cues').then(applyCues).catch(() => {})
   }, intervalMs)
 }
 export function stopStatusPolling() {
