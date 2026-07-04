@@ -71,7 +71,7 @@
     <label>Rate (kpps) <span class="val">{{ fmt(laserState.rate_kpps) }}</span></label>
     <input type="range" min="1" max="60" step="1" :value="laserState.rate_kpps" @input="push({ rate_kpps: +$event.target.value })" />
     <label>Eye persistence (ms) <span class="val">{{ persistenceMs }}</span></label>
-    <input type="range" min="5" max="100" step="1" :value="persistenceMs" @input="onPersist(+$event.target.value)" />
+    <input type="range" min="0" max="100" step="1" :value="persistenceMs" @input="onPersist(+$event.target.value)" />
 
     <hr />
     <h2>Controller</h2>
