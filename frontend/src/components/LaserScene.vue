@@ -25,9 +25,9 @@ const BEAM_LEN = 22
 const MAX_SCAN_POINTS = 20000
 
 let renderer, scene, camera, controls, laser
-let hazeSprites = [], scanDot, flare, flareMat, dust
-let segGeo, segPositions, segColors, segTimestamps
-let segWriteIndex = 0
+let scanDot, flare, flareMat, dust
+let spokeGeo, spokePositions, spokeColors, spokeTimestamps
+let spokeWriteIndex = 0
 let animationId = 0
 
 function makeGlowTexture(size = 128) {
@@ -113,46 +113,31 @@ function setupScene() {
 
   const glowTex = makeGlowTexture()
 
-  // Ambient haze "cone": a stack of soft, camera-facing radial-gradient
-  // sprites along the beam axis, instead of a hollow shell mesh. A hollow
-  // shell always shows its rim as a hard, straight silhouette edge from
-  // any viewing angle - two such edges converging toward the shape, plus
-  // the old separate hard "instantaneous beam" line, is exactly what read
-  // as 2-3 distinct rays instead of one smooth haze wedge. Sprites have no
-  // edge geometry at all - they're soft round gradients that always face
-  // the camera - so stacking many of them with growing size and fading
-  // opacity along the beam blends into a continuous, hard-edge-free haze,
-  // the same billboard-stack trick real-time volumetric light shafts use.
-  const HAZE_COUNT = 26
-  hazeSprites = []
-  for (let i = 0; i < HAZE_COUNT; i++) {
-    const mat = new THREE.SpriteMaterial({
-      map: glowTex, color: 0x00ff55, transparent: true,
-      blending: THREE.AdditiveBlending, depthWrite: false,
-    })
-    const spr = new THREE.Sprite(mat)
-    laser.add(spr)
-    hazeSprites.push(spr)
-  }
-
-  // Real scanner beam trace: rendered as connected LINE SEGMENTS (not a
-  // point cloud) so it reads as a continuous drawn stroke, matching how
-  // real ILDA laser projectors and show-visualizer software (Pangolin
-  // Beyond/QuickShow, Liberation) render scanned output - the galvo mirrors
-  // move continuously and paint a solid line between consecutive points,
-  // they don't blink between isolated dots.
-  segPositions = new Float32Array(MAX_SCAN_POINTS * 2 * 3) // 2 vertices/segment
-  segColors = new Float32Array(MAX_SCAN_POINTS * 2 * 3)
-  segTimestamps = new Float64Array(MAX_SCAN_POINTS).fill(-Infinity)
-  segGeo = new THREE.BufferGeometry()
-  segGeo.setAttribute('position', new THREE.BufferAttribute(segPositions, 3).setUsage(THREE.DynamicDrawUsage))
-  segGeo.setAttribute('color', new THREE.BufferAttribute(segColors, 3).setUsage(THREE.DynamicDrawUsage))
-  const segMat = new THREE.LineBasicMaterial({
+  // The visible beam is rendered purely as a fan of lines from the source
+  // (local origin) out to each actually-scanned point - there is no
+  // separate flat "projected shape" outline drawn anywhere. This matches
+  // a real aerial beam show: there is no 2D image in the air, only
+  // individual light rays passing through haze; the viewer's own
+  // persistence of vision is what makes the pattern legible, exactly as
+  // it does here via the age-based fade below. Each spoke's shape and
+  // density is driven entirely by the real scanned points, so it always
+  // matches whatever pattern is currently projected (a full circle fills
+  // in solidly, a thin line/wave only lights up a narrow sliver, etc).
+  // Vertex-colors fade each spoke from bright at the source to dim at the
+  // far point, matching how a real beam's brightness falls off as it
+  // diverges over distance.
+  spokePositions = new Float32Array(MAX_SCAN_POINTS * 2 * 3)
+  spokeColors = new Float32Array(MAX_SCAN_POINTS * 2 * 3)
+  spokeTimestamps = new Float64Array(MAX_SCAN_POINTS).fill(-Infinity)
+  spokeGeo = new THREE.BufferGeometry()
+  spokeGeo.setAttribute('position', new THREE.BufferAttribute(spokePositions, 3).setUsage(THREE.DynamicDrawUsage))
+  spokeGeo.setAttribute('color', new THREE.BufferAttribute(spokeColors, 3).setUsage(THREE.DynamicDrawUsage))
+  const spokeMat = new THREE.LineBasicMaterial({
     vertexColors: true, transparent: true,
     blending: THREE.AdditiveBlending, depthWrite: false,
   })
-  const scanSegments = new THREE.LineSegments(segGeo, segMat)
-  laser.add(scanSegments)
+  const spokeSegments = new THREE.LineSegments(spokeGeo, spokeMat)
+  laser.add(spokeSegments)
 
   flareMat = new THREE.SpriteMaterial({
     map: glowTex, color: 0x00ff55, transparent: true, opacity: 0.8,
@@ -204,14 +189,10 @@ function handleIncomingPoints(msg) {
   currentFrame = msg.pts
 }
 
-// Advances the virtual scan head and writes newly "visited" points into the
-// segment ring buffer with real per-segment timestamps spaced 1/pointRateHz
-// apart - exactly reproducing how a physical scanner would have traced them
-// in time. Each new point creates one line segment from the previously
-// emitted point to this one, so the beam renders as a continuous stroke.
-let prevEmitX = 0, prevEmitY = 0
-let prevEmitValid = false
-
+// Advances the virtual scan head and writes each newly "visited" point as
+// one spoke (source -> point) into the ring buffer with a real timestamp
+// spaced 1/pointRateHz apart - exactly reproducing how a physical scanner
+// would have traced them in time.
 function emitScanPoints(now) {
   if (currentFrame.length === 0) return
   const pointRateHz = Math.max(1, laserState.rate_kpps * 1000)
@@ -238,30 +219,37 @@ function emitScanPoints(now) {
     const scale = (r > 1 || g > 1 || b > 1) ? 1 / 255 : 1
     const cr = r * scale, cg = g * scale, cb = b * scale
 
-    if (prevEmitValid) {
-      const vi = segWriteIndex * 6   // 2 vertices * 3 floats
-      segPositions[vi]     = prevEmitX
-      segPositions[vi + 1] = prevEmitY
-      segPositions[vi + 2] = lastBeamLen
-      segPositions[vi + 3] = wx
-      segPositions[vi + 4] = wy
-      segPositions[vi + 5] = lastBeamLen
-      segBaseColors[vi]     = cr; segBaseColors[vi + 1] = cg; segBaseColors[vi + 2] = cb
-      segBaseColors[vi + 3] = cr; segBaseColors[vi + 4] = cg; segBaseColors[vi + 5] = cb
-      segTimestamps[segWriteIndex] = t
-      segWriteIndex = (segWriteIndex + 1) % MAX_SCAN_POINTS
-    }
+    // Spoke: source (local origin) -> this exact scanned point. Bright
+    // near the source, dim at the far point (vertex-color gradient) - this
+    // is what makes the visible beam fan out into the actual shape being
+    // drawn instead of a generic, shape-independent cone.
+    const vi = spokeWriteIndex * 6   // 2 vertices * 3 floats
+    spokePositions[vi]     = 0
+    spokePositions[vi + 1] = 0
+    spokePositions[vi + 2] = 0
+    spokePositions[vi + 3] = wx
+    spokePositions[vi + 4] = wy
+    spokePositions[vi + 5] = BEAM_LEN
+    spokeBaseColors[vi]     = cr * SPOKE_NEAR_BRIGHT; spokeBaseColors[vi + 1] = cg * SPOKE_NEAR_BRIGHT; spokeBaseColors[vi + 2] = cb * SPOKE_NEAR_BRIGHT
+    spokeBaseColors[vi + 3] = cr * SPOKE_FAR_DIM;      spokeBaseColors[vi + 4] = cg * SPOKE_FAR_DIM;      spokeBaseColors[vi + 5] = cb * SPOKE_FAR_DIM
+    spokeTimestamps[spokeWriteIndex] = t
+    spokeWriteIndex = (spokeWriteIndex + 1) % MAX_SCAN_POINTS
 
-    prevEmitX = wx; prevEmitY = wy; prevEmitValid = true
     lastPoint = [x, y]
     emitIndex += 1
   }
   lastEmitTime += n * period
-  segGeo.attributes.position.needsUpdate = true
+  spokeGeo.attributes.position.needsUpdate = true
 }
 
-const segBaseColors = new Float32Array(MAX_SCAN_POINTS * 2 * 3)
-let lastBeamLen = BEAM_LEN
+// Brightness falloff along each spoke: bright near the source, dim at the
+// far (shape) end - approximates how a real beam's apparent brightness in
+// haze falls off as it diverges over distance (same optical power spread
+// over an ever-larger cross-section further from the aperture).
+const SPOKE_NEAR_BRIGHT = 1.0
+const SPOKE_FAR_DIM = 0.08
+
+const spokeBaseColors = new Float32Array(MAX_SCAN_POINTS * 2 * 3)
 let lastPoint = [0, 0]
 const tmpV1 = new THREE.Vector3()
 const tmpV2 = new THREE.Vector3()
@@ -276,57 +264,43 @@ function animate() {
   const color = new THREE.Color(laserState.r, laserState.g, laserState.b)
 
   laser.getWorldPosition(tmpV1)
-  const len = BEAM_LEN
-  lastBeamLen = len
-
-  for (let i = 0; i < hazeSprites.length; i++) {
-    const t = i / (hazeSprites.length - 1)
-    const spr = hazeSprites[i]
-    spr.position.set(0, 0, t * len)
-    const rad = THREE.MathUtils.lerp(0.05, Math.max(r, 0.1), t)
-    spr.scale.setScalar(rad * 2.4)
-    const fade = Math.pow(1 - t, 1.25) + 0.05
-    spr.material.opacity = THREE.MathUtils.clamp(0.11 * fade * laserState.intensity, 0, 1)
-    spr.material.color.copy(color)
-  }
   flareMat.color.copy(color)
 
-  // Fade every segment by its age — this approximates the eye's
+  // Fade every spoke by its age — this approximates the eye's
   // flicker-fusion persistence, a fixed physiological time window (~human
   // CFF, roughly 15-25ms), independent of the scanner's own parameters.
-  // Whether the shape *looks* solid or visibly flickers/strobes is then an
-  // emergent result: if the beam revisits a segment faster than this
-  // window (i.e. the revolution rate exceeds the eye's flicker-fusion
-  // threshold), successive passes overlap and it reads as a continuous,
-  // solid line. If the scan is slower than that (low scan_rate_kpps
-  // relative to points_per_circle), the line genuinely fades out before
-  // the beam comes back around — same as a real, too-slow scanner would
-  // look to a viewer.
+  // Whether the pattern *looks* solid or visibly flickers/strobes is then
+  // an emergent result: if the beam revisits the same point faster than
+  // this window (i.e. the revolution rate exceeds the eye's
+  // flicker-fusion threshold), successive passes overlap and it reads as
+  // continuous. If the scan is slower than that, spokes genuinely fade out
+  // before the beam comes back around — same as a real, too-slow scanner
+  // would look to a viewer.
   const persistenceTau = Math.max(0.001, props.persistenceMs / 1000)
-  const colorArr = segGeo.attributes.color.array
+  const colorArr = spokeGeo.attributes.color.array
   for (let i = 0; i < MAX_SCAN_POINTS; i++) {
-    const age = now - segTimestamps[i]
+    const age = now - spokeTimestamps[i]
     const brightness = age < 0 ? 0 : Math.exp(-age / persistenceTau)
     const vi = i * 6
-    colorArr[vi]     = segBaseColors[vi]     * brightness
-    colorArr[vi + 1] = segBaseColors[vi + 1] * brightness
-    colorArr[vi + 2] = segBaseColors[vi + 2] * brightness
-    colorArr[vi + 3] = segBaseColors[vi + 3] * brightness
-    colorArr[vi + 4] = segBaseColors[vi + 4] * brightness
-    colorArr[vi + 5] = segBaseColors[vi + 5] * brightness
+    colorArr[vi]     = spokeBaseColors[vi]     * brightness
+    colorArr[vi + 1] = spokeBaseColors[vi + 1] * brightness
+    colorArr[vi + 2] = spokeBaseColors[vi + 2] * brightness
+    colorArr[vi + 3] = spokeBaseColors[vi + 3] * brightness
+    colorArr[vi + 4] = spokeBaseColors[vi + 4] * brightness
+    colorArr[vi + 5] = spokeBaseColors[vi + 5] * brightness
   }
-  segGeo.attributes.color.needsUpdate = true
+  spokeGeo.attributes.color.needsUpdate = true
 
   // The scan-dot hotspot always follows the latest emitted point,
   // reprojected onto the beam's fixed far plane.
   const [ex, ey] = lastPoint
-  scanDot.position.set(ex * WORLD_SCALE, ey * WORLD_SCALE, len)
+  scanDot.position.set(ex * WORLD_SCALE, ey * WORLD_SCALE, BEAM_LEN)
 
   // "Looking into the laser" flare: brightens when the camera is inside the cone
   tmpV2.copy(camera.position).sub(tmpV1).normalize()
   const axis = new THREE.Vector3(0, 0, 1).applyQuaternion(laser.quaternion)
   const viewAngle = Math.acos(THREE.MathUtils.clamp(tmpV2.dot(axis), -1, 1))
-  const halfAngle = Math.atan2(r, len)
+  const halfAngle = Math.atan2(r, BEAM_LEN)
   const inside = THREE.MathUtils.smoothstep((halfAngle + 0.25 - viewAngle) / 0.3, 0, 1)
   const flicker = 0.9 + 0.1 * Math.sin(now * 37.0) * Math.sin(now * 23.0)
   flare.scale.setScalar((1.2 + inside * 7.0) * flicker * laserState.intensity)
@@ -346,15 +320,14 @@ function handleResize() {
 }
 
 function clearPointBuffer() {
-  segTimestamps.fill(-Infinity)
-  segWriteIndex = 0
-  prevEmitValid = false
+  spokeTimestamps.fill(-Infinity)
+  spokeWriteIndex = 0
   currentFrame = []
   emitIndex = 0
   lastEmitTime = performance.now() / 1000
-  if (segGeo) {
-    segGeo.attributes.position.needsUpdate = true
-    segGeo.attributes.color.needsUpdate = true
+  if (spokeGeo) {
+    spokeGeo.attributes.position.needsUpdate = true
+    spokeGeo.attributes.color.needsUpdate = true
   }
 }
 
