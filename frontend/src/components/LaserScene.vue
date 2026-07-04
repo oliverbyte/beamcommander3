@@ -25,7 +25,7 @@ const BEAM_LEN = 22
 const MAX_SCAN_POINTS = 20000
 
 let renderer, scene, camera, controls, laser
-let cone, coneUniforms, scanLine, scanLineGeo, scanDot, flare, flareMat, dust
+let hazeSprites = [], scanDot, flare, flareMat, dust
 let segGeo, segPositions, segColors, segTimestamps
 let segWriteIndex = 0
 let animationId = 0
@@ -113,52 +113,27 @@ function setupScene() {
 
   const glowTex = makeGlowTexture()
 
-  // Ambient haze cone (soft, angle-independent glow along the beam path)
-  coneUniforms = {
-    uColor: { value: new THREE.Color(0x00ff55) },
-    uIntensity: { value: 1.0 },
+  // Ambient haze "cone": a stack of soft, camera-facing radial-gradient
+  // sprites along the beam axis, instead of a hollow shell mesh. A hollow
+  // shell always shows its rim as a hard, straight silhouette edge from
+  // any viewing angle - two such edges converging toward the shape, plus
+  // the old separate hard "instantaneous beam" line, is exactly what read
+  // as 2-3 distinct rays instead of one smooth haze wedge. Sprites have no
+  // edge geometry at all - they're soft round gradients that always face
+  // the camera - so stacking many of them with growing size and fading
+  // opacity along the beam blends into a continuous, hard-edge-free haze,
+  // the same billboard-stack trick real-time volumetric light shafts use.
+  const HAZE_COUNT = 26
+  hazeSprites = []
+  for (let i = 0; i < HAZE_COUNT; i++) {
+    const mat = new THREE.SpriteMaterial({
+      map: glowTex, color: 0x00ff55, transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    })
+    const spr = new THREE.Sprite(mat)
+    laser.add(spr)
+    hazeSprites.push(spr)
   }
-  const coneGeo = new THREE.CylinderGeometry(0.015, 1, 1, 160, 1, true)
-  coneGeo.translate(0, -0.5, 0)
-  coneGeo.rotateX(-Math.PI / 2)
-  const coneMat = new THREE.ShaderMaterial({
-    uniforms: coneUniforms,
-    transparent: true,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    blending: THREE.AdditiveBlending,
-    vertexShader: `
-      varying vec3 vPos;
-      void main() {
-        vPos = position;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: `
-      uniform vec3 uColor;
-      uniform float uIntensity;
-      varying vec3 vPos;
-      void main() {
-        float along = clamp(vPos.z, 0.0, 1.0);
-        float fade = pow(1.0 - along, 1.25) + 0.05;
-        float b = 0.16 * fade * uIntensity;
-        gl_FragColor = vec4(uColor * b, 1.0);
-      }
-    `,
-  })
-  cone = new THREE.Mesh(coneGeo, coneMat)
-  laser.add(cone)
-
-  // Instantaneous beam line: source -> most recently scanned point
-  scanLineGeo = new THREE.BufferGeometry()
-  scanLineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, 0, 0, 0, 0, 1]), 3))
-  const scanLineMat = new THREE.LineBasicMaterial({
-    color: 0xffffff, transparent: true, opacity: 0.9,
-    blending: THREE.AdditiveBlending, depthWrite: false,
-  })
-  scanLine = new THREE.Line(scanLineGeo, scanLineMat)
-  scanLine.userData.mat = scanLineMat
-  laser.add(scanLine)
 
   // Real scanner beam trace: rendered as connected LINE SEGMENTS (not a
   // point cloud) so it reads as a continuous drawn stroke, matching how
@@ -304,11 +279,17 @@ function animate() {
   const len = BEAM_LEN
   lastBeamLen = len
 
-  cone.scale.set(r, r, len)
-  coneUniforms.uIntensity.value = laserState.intensity
-  coneUniforms.uColor.value.copy(color)
+  for (let i = 0; i < hazeSprites.length; i++) {
+    const t = i / (hazeSprites.length - 1)
+    const spr = hazeSprites[i]
+    spr.position.set(0, 0, t * len)
+    const rad = THREE.MathUtils.lerp(0.05, Math.max(r, 0.1), t)
+    spr.scale.setScalar(rad * 2.4)
+    const fade = Math.pow(1 - t, 1.25) + 0.05
+    spr.material.opacity = THREE.MathUtils.clamp(0.11 * fade * laserState.intensity, 0, 1)
+    spr.material.color.copy(color)
+  }
   flareMat.color.copy(color)
-  scanLine.userData.mat.color.copy(color).lerp(new THREE.Color(0xffffff), 0.6)
 
   // Fade every segment by its age — this approximates the eye's
   // flicker-fusion persistence, a fixed physiological time window (~human
@@ -336,12 +317,9 @@ function animate() {
   }
   segGeo.attributes.color.needsUpdate = true
 
-  // The instantaneous beam line/hotspot always follows the latest point,
-  // reprojected onto the current (viewer-relative) far plane.
+  // The scan-dot hotspot always follows the latest emitted point,
+  // reprojected onto the beam's fixed far plane.
   const [ex, ey] = lastPoint
-  const pos = scanLineGeo.attributes.position
-  pos.setXYZ(1, ex * WORLD_SCALE, ey * WORLD_SCALE, len)
-  pos.needsUpdate = true
   scanDot.position.set(ex * WORLD_SCALE, ey * WORLD_SCALE, len)
 
   // "Looking into the laser" flare: brightens when the camera is inside the cone
