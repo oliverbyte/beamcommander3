@@ -12,6 +12,7 @@
     <button class="blackout-btn" :class="{ active: laserState.blackout }" @click="push({ blackout: !laserState.blackout })">
       {{ laserState.blackout ? '◼ BLACKOUT' : '◻ Blackout' }}
     </button>
+    <button class="reset-btn" @click="reset">↺ Reset to defaults</button>
 
     <hr />
     <h2>Shape</h2>
@@ -87,7 +88,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { laserState, updateState, connectLaser, disconnectLaser } from '../composables/useLaserSocket.js'
+import { laserState, updateState, resetState, connectLaser, disconnectLaser } from '../composables/useLaserSocket.js'
 
 const emit = defineEmits(['update:persistence'])
 
@@ -119,6 +120,7 @@ async function arm() {
   await connectLaser(ipInput.value).catch(e => { laserState.error = String(e) })
 }
 async function disarm() { await disconnectLaser().catch(console.error) }
+async function reset() { await resetState().catch(console.error) }
 </script>
 
 <style scoped>
@@ -146,6 +148,7 @@ button.active { background:rgba(72,224,122,0.18); border-color:#48e07a; color:#4
 .btn-stop { border-color:rgba(255,100,100,0.5); color:#ff8080; }
 .blackout-btn { width:100%; margin-top:6px; padding:6px; font-size:12px; letter-spacing:1px; }
 .blackout-btn.active { background:rgba(255,50,50,0.28); border-color:#ff4040; color:#ff8080; }
+.reset-btn { width:100%; margin-top:6px; padding:5px; font-size:11px; }
 hr { border:none; border-top:1px solid rgba(255,255,255,0.1); margin:8px 0; }
 .status-row { display:flex; align-items:center; gap:6px; font-size:11px; margin-bottom:3px; }
 .dot { width:7px; height:7px; border-radius:50%; background:#703030; flex-shrink:0; }

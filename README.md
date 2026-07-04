@@ -1,54 +1,89 @@
 # BeamCommander3
 
-Laser show control software using [libera-laser](https://github.com/sebleedelisle/libera-laser) for hardware output.
+Real-time laser show control. A single C++ backend (`laser_daemon`) drives real
+laser hardware via [libera-laser](https://github.com/sebleedelisle/libera-laser)
+and serves a Vue 3 web UI with a live Three.js preview — the preview always
+shows exactly what the backend is currently rendering, whether or not a laser
+is connected.
 
-## Components
+## Architecture
 
-| Component | Description |
-|-----------|-------------|
-| `daemon/circle_daemon` | C++ binary — streams a configurable circle to any libera-supported laser controller (Ether Dream, Helios, LaserCube, …) |
-| `frontend/` | Vue 3 + Three.js web preview (simulation only) |
-| `backend/` | Python FastAPI server for the web UI (simulation only, no hardware) |
-
-## Quick start — hardware output
-
-```sh
-# Stream a green circle to the Ether Dream at 10.10.10.4
-./daemon/circle_daemon --ip 10.10.10.4
-
-# Adjust parameters
-./daemon/circle_daemon --ip 10.10.10.4 --radius 0.5 --rate 20 --intensity 0.3
-
-# Show all options
-./daemon/circle_daemon -h
+```
+start.sh
+  ├── backend/laser_daemon   C++: libera-laser output + HTTP :8000 + WebSocket
+  └── frontend/              Vue 3 + Vite + Three.js UI, talks to :8000
 ```
 
-## Options (`circle_daemon`)
+There is no Python and no separate daemon process — `laser_daemon` *is* the
+backend. It generates every frame once, streams it to the browser preview via
+WebSocket, and (if a controller is connected/armed) sends the same frame to
+the hardware. Preview and hardware output are decoupled: the preview keeps
+animating and responding to every parameter change even when no laser is
+connected.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--ip <addr>` | (any) | Only connect to the controller at this IP |
-| `--radius <f>` | 0.7 | Circle radius in normalised coords 0..1 |
-| `--points <n>` | 300 | Points per circle frame |
-| `--rate <kpps>` | 30 | Scan rate in kilo-points-per-second |
-| `--red <f>` | 0.0 | Red channel 0..1 |
-| `--green <f>` | 1.0 | Green channel 0..1 |
-| `--blue <f>` | 0.314 | Blue channel 0..1 |
-| `--intensity <f>` | 1.0 | Master intensity multiplier 0..1 |
-| `-h`, `--help` | | Show help and exit |
-
-## Web preview (simulation)
+## Quick start
 
 ```sh
-# Terminal 1 — backend
-cd backend && .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-# Terminal 2 — frontend
-cd frontend && npm run dev -- --port 5173 < /dev/null
+./start.sh
 ```
 
-Then open http://localhost:5173
+This builds `backend/laser_daemon` if needed, starts it plus the Vite dev
+server, and opens up:
+
+- UI: http://localhost:5173
+- API: http://localhost:8000/api/state
+
+Press `Ctrl-C` to stop both processes cleanly.
+
+## Connecting a real laser
+
+In the UI, enter the controller's IP address (e.g. an Ether Dream at
+`10.10.10.4`) and click **Connect**. Or via the API:
+
+```sh
+curl -X POST http://localhost:8000/laser/connect/10.10.10.4
+curl -X POST http://localhost:8000/laser/disconnect
+```
+
+## REST API
+
+All parameter changes take effect on the next frame — nothing restarts.
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/state` | Full current state as JSON |
+| `POST /api/state` | Bulk update (send any subset of fields as JSON) |
+| `POST /api/reset` | Reset all show parameters to defaults (keeps the current connection) |
+| `POST /laser/shape/<shape>` | `circle`, `line`, `triangle`, `square`, `wave`, `staticwave` |
+| `POST /laser/brightness/<0-1>` | Master brightness |
+| `POST /laser/color/<r>/<g>/<b>` | Beam color, each channel 0..1 |
+| `POST /laser/position/<x>/<y>` | Shape offset, each axis -1..1 |
+| `POST /laser/rotation/speed/<v>` | Rotation speed in rotations/sec |
+| `POST /move/mode/<mode>` | `none`, `circle`, `pan`, `tilt`, `eight`, `random` |
+| `POST /move/speed/<v>` / `/move/size/<v>` | Movement cycle speed / amplitude |
+| `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow color blend / hue cycle speed |
+| `POST /blackout/<0\|1>` | Force output dark |
+| `POST /laser/connect/<ip>` | Connect + arm a controller at this IP |
+| `POST /laser/disconnect` | Disarm and disconnect |
+| `WS /ws/points` | Live preview stream, `{"pts":[[x,y,r,g,b],...]}` at ~30fps |
+
+`POST /api/state` accepts a JSON body with any of: `shape`, `radius`, `points`,
+`rate_kpps`, `intensity`, `r`, `g`, `b`, `shape_scale`, `pos_x`, `pos_y`,
+`rotation_speed`, `move_mode`, `move_speed`, `move_size`, `wave_frequency`,
+`wave_amplitude`, `wave_speed`, `rainbow_amount`, `rainbow_speed`, `blackout`,
+`dot_amount`, `flicker_hz`, `ip`.
+
+## Multi-client sync
+
+The frontend polls `GET /api/state` every second, so if you change settings
+from another browser tab or via `curl`, all connected UIs pick up the change
+automatically.
 
 ## Supported hardware
 
-Via libera-laser: Ether Dream, Helios USB, Helios Pro (IDN), LaserCube USB, LaserCube Network, AVB/Audio.
+Via libera-laser: Ether Dream, Helios USB, Helios Pro (IDN), LaserCube USB,
+LaserCube Network, AVB/Audio.
+
+## Development
+
+See [DEVELOPER.md](DEVELOPER.md) for build instructions and internals.

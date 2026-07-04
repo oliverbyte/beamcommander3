@@ -271,6 +271,9 @@ static void ws_broadcast(const std::string& msg) {
 static void on_signal(int) { G_running = false; }
 
 // ── Laser output thread ────────────────────────────────────────────────────────
+// Preview (WebSocket) generation is fully decoupled from the hardware
+// connection: the browser preview must keep responding to every parameter
+// change whether or not a real controller is connected/armed.
 static void laser_thread() {
     System sys;
     core::LaserController::setMaxFrameHoldTime(std::chrono::milliseconds(0));
@@ -282,6 +285,7 @@ static void laser_thread() {
     std::shared_ptr<core::LaserController> ctrl;
     std::string connected_ip;
     float       connected_rate = 0;
+    auto        next_connect_attempt = Clock::now();
 
     while (G_running) {
         // Advance animation clock
@@ -296,25 +300,25 @@ static void laser_thread() {
             rate = G.rate_kpps;
         }
 
+        // Tear down the hardware connection if disarmed/disconnected, but
+        // keep running the loop so the preview keeps animating.
         if (ip.empty() || !G_armed.load()) {
             if (ctrl) { ctrl->setArmed(false); ctrl.reset(); connected_ip.clear(); std::cout << "[laser] disarmed\n" << std::flush; }
-            std::this_thread::sleep_for(200ms);
-            continue;
-        }
-
-        if (!ctrl || connected_ip != ip || std::abs(rate-connected_rate) > 0.1f) {
+        } else if ((!ctrl || connected_ip != ip || std::abs(rate-connected_rate) > 0.1f) && now_tp >= next_connect_attempt) {
             if (ctrl) { ctrl->setArmed(false); ctrl.reset(); }
             etherdream::EtherDreamControllerInfo info(ip,"Ether Dream",ip,7765,4095);
             ctrl = sys.connectController(info);
-            if (!ctrl) { std::cout << "[laser] connect failed " << ip << "\n" << std::flush; std::this_thread::sleep_for(1s); continue; }
-            ctrl->setPointRate(static_cast<std::uint32_t>(rate * 1000));
-            ctrl->setArmed(true);
-            connected_ip = ip; connected_rate = rate;
-            std::cout << "[laser] streaming " << ip << " @ " << rate << " kpps\n" << std::flush;
-        }
-
-        // Live rate update
-        {
+            if (!ctrl) {
+                std::cout << "[laser] connect failed " << ip << "\n" << std::flush;
+                next_connect_attempt = now_tp + 1s; // back off before retrying
+            } else {
+                ctrl->setPointRate(static_cast<std::uint32_t>(rate * 1000));
+                ctrl->setArmed(true);
+                connected_ip = ip; connected_rate = rate;
+                std::cout << "[laser] streaming " << ip << " @ " << rate << " kpps\n" << std::flush;
+            }
+        } else if (ctrl && connected_ip == ip) {
+            // Live rate update on an already-connected controller
             std::lock_guard<std::mutex> lk(G_mtx);
             if (std::abs(G.rate_kpps-connected_rate) > 0.1f) {
                 ctrl->setPointRate(static_cast<std::uint32_t>(G.rate_kpps*1000));
@@ -322,22 +326,31 @@ static void laser_thread() {
             }
         }
 
-        if (!ctrl->isReadyForNewFrame()) { std::this_thread::sleep_for(1ms); continue; }
+
+        bool hardwareReady = ctrl && ctrl->isReadyForNewFrame();
+        bool previewDue     = (now_tp - last_preview) >= 33ms;
+
+        if (!hardwareReady && !previewDue) {
+            std::this_thread::sleep_for(1ms);
+            continue;
+        }
 
         LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap = G; }
         auto frame = make_frame(snap);
 
-        // WS preview ~30fps
-        if (now_tp - last_preview >= 33ms) {
+        if (previewDue) {
             last_preview = now_tp;
             ws_broadcast(frame_to_ws_json(frame));
         }
 
-        ctrl->sendFrame(std::move(frame));
+        if (hardwareReady) {
+            ctrl->sendFrame(std::move(frame));
+        }
     }
     if (ctrl) ctrl->setArmed(false);
     sys.shutdown();
 }
+
 
 // ── JSON parsers ───────────────────────────────────────────────────────────────
 static std::string json_str(const std::string& b, const std::string& k) {
@@ -497,6 +510,19 @@ int main(int argc, char* argv[]) {
         res.set_content(state_to_json(),"application/json");
     });
 
+    // ── POST /api/reset — restore all show params to defaults ─────────────────
+    // Preserves the current controller connection (target_ip / armed state)
+    // so resetting the show doesn't drop the laser link.
+    svr.Post("/api/reset",[](const httplib::Request&,httplib::Response& res){
+        {
+            std::lock_guard<std::mutex> lk(G_mtx);
+            std::string ip = G.target_ip;
+            G = LaserState{};
+            G.target_ip = ip;
+        }
+        res.set_content(state_to_json(),"application/json");
+    });
+
     // ── POST /laser/connect/<ip>  /laser/disconnect ────────────────────────────
     svr.Post(R"(/laser/connect/(.+))",[](const httplib::Request& req,httplib::Response& res){
         std::string ip=req.matches[1];
@@ -518,7 +544,7 @@ int main(int argc, char* argv[]) {
     });
 
     std::cout << "[laser_daemon] Listening on :" << http_port << "\n"
-              << "  GET/POST /api/state\n"
+              << "  GET/POST /api/state   POST /api/reset\n"
               << "  POST /laser/shape/<circle|line|triangle|square|wave|staticwave>\n"
               << "  POST /laser/brightness/<0-1>  /laser/color/<r>/<g>/<b>\n"
               << "  POST /laser/position/<x>/<y>  /laser/rotation/speed/<v>\n"

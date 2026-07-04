@@ -103,6 +103,10 @@ export async function updateState(partial) {
   applyState(await api('/state', { method: 'POST', body: JSON.stringify(partial) }))
 }
 
+export async function resetState() {
+  applyState(await api('/reset', { method: 'POST' }))
+}
+
 export async function setShape(shape) {
   await laser(`/shape/${shape}`, { method: 'POST' })
   laserState.shape = shape
@@ -121,9 +125,10 @@ export async function disconnectLaser() {
 }
 
 // ── Status polling ─────────────────────────────────────────────────────────────
-
+// Keeps this client's view of laserState in sync even when another client
+// (a different browser tab, curl, etc.) changes settings on the backend.
 let statusPoll = null
-export function startStatusPolling(intervalMs = 2000) {
+export function startStatusPolling(intervalMs = 1000) {
   if (statusPoll) return
   statusPoll = setInterval(() => fetchState().catch(() => {}), intervalMs)
 }
