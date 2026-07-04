@@ -25,24 +25,10 @@ const BEAM_LEN = 22
 const MAX_SCAN_POINTS = 20000
 
 let renderer, scene, camera, controls, laser
-let flare, flareMat, dust
+let dust
 let spokeGeo, spokePositions, spokeColors, spokeTimestamps
 let spokeWriteIndex = 0
 let animationId = 0
-
-function makeGlowTexture(size = 128) {
-  const cvs = document.createElement('canvas')
-  cvs.width = cvs.height = size
-  const ctx = cvs.getContext('2d')
-  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
-  g.addColorStop(0.0, 'rgba(255,255,255,1)')
-  g.addColorStop(0.25, 'rgba(255,255,255,0.5)')
-  g.addColorStop(0.6, 'rgba(255,255,255,0.12)')
-  g.addColorStop(1.0, 'rgba(255,255,255,0)')
-  ctx.fillStyle = g
-  ctx.fillRect(0, 0, size, size)
-  return new THREE.CanvasTexture(cvs)
-}
 
 function setupScene() {
   renderer = new THREE.WebGLRenderer({ canvas: canvasEl.value, antialias: true })
@@ -112,8 +98,6 @@ function setupScene() {
   housing.position.z = -0.36
   laser.add(housing)
 
-  const glowTex = makeGlowTexture()
-
   // The visible beam is rendered purely as a fan of lines from the source
   // (local origin) out to each actually-scanned point - there is no
   // separate flat "projected shape" outline drawn anywhere. This matches
@@ -143,14 +127,6 @@ function setupScene() {
   })
   const spokeSegments = new THREE.LineSegments(spokeGeo, spokeMat)
   laser.add(spokeSegments)
-
-  flareMat = new THREE.SpriteMaterial({
-    map: glowTex, color: 0x00ff55, transparent: true, opacity: 0.8,
-    blending: THREE.AdditiveBlending, depthWrite: false,
-  })
-  flare = new THREE.Sprite(flareMat)
-  flare.scale.setScalar(1.5)
-  laser.add(flare)
 
   const DUST_COUNT = 600
   const dustPos = new Float32Array(DUST_COUNT * 3)
@@ -261,8 +237,6 @@ const SPOKE_FAR_EXTEND = 6
 
 const spokeBaseColors = new Float32Array(MAX_SCAN_POINTS * 4 * 3)
 let lastPoint = [0, 0]
-const tmpV1 = new THREE.Vector3()
-const tmpV2 = new THREE.Vector3()
 
 function animate() {
   animationId = requestAnimationFrame(animate)
@@ -272,9 +246,6 @@ function animate() {
 
   const r = laserState.radius * WORLD_SCALE
   const color = new THREE.Color(laserState.r, laserState.g, laserState.b)
-
-  laser.getWorldPosition(tmpV1)
-  flareMat.color.copy(color)
 
   // Fade every spoke by its age — this approximates the eye's
   // flicker-fusion persistence, a fixed physiological time window (~human
@@ -297,16 +268,6 @@ function animate() {
     }
   }
   spokeGeo.attributes.color.needsUpdate = true
-
-  // "Looking into the laser" flare: brightens when the camera is inside the cone
-  tmpV2.copy(camera.position).sub(tmpV1).normalize()
-  const axis = new THREE.Vector3(0, 0, 1).applyQuaternion(laser.quaternion)
-  const viewAngle = Math.acos(THREE.MathUtils.clamp(tmpV2.dot(axis), -1, 1))
-  const halfAngle = Math.atan2(r, BEAM_LEN)
-  const inside = THREE.MathUtils.smoothstep((halfAngle + 0.25 - viewAngle) / 0.3, 0, 1)
-  const flicker = 0.9 + 0.1 * Math.sin(now * 37.0) * Math.sin(now * 23.0)
-  flare.scale.setScalar((1.2 + inside * 7.0) * flicker * laserState.intensity)
-  flareMat.opacity = 0.5 + inside * 0.5
 
   dust.rotation.y = now * 0.01
   dust.position.y = Math.sin(now * 0.1) * 0.3
