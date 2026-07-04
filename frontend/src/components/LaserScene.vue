@@ -17,8 +17,11 @@ const canvasEl = ref(null)
 // World-space scale: the backend reports x/y as a 0..1 fraction of full
 // scanner range; we map that to this many scene units for the visualisation.
 const WORLD_SCALE = 8
-const BEAM_MARGIN = 10
-const MIN_BEAM_LEN = 15
+// Fixed distance from the fixture to the projected "screen" plane. Using a
+// fixed length (instead of deriving it from the live camera distance) keeps
+// the pattern plane's world position stable, so the default camera can be
+// placed to always look straight down the beam axis at it.
+const BEAM_LEN = 22
 const MAX_SCAN_POINTS = 20000
 
 let renderer, scene, camera, controls, laser
@@ -48,17 +51,25 @@ function setupScene() {
 
   scene = new THREE.Scene()
   scene.background = new THREE.Color(0x020208)
-  scene.fog = new THREE.FogExp2(0x020208, 0.015)
+  scene.fog = new THREE.FogExp2(0x020208, 0.008)
 
+  // The laser fixture sits at (0, 4.2, -8) and shoots down its local +Z
+  // axis, so the projected pattern plane sits at world z = -8 + BEAM_LEN.
+  // Put the camera further along that same axis (same x/y as the fixture)
+  // so it looks straight down the beam at the plane face-on - this is what
+  // guarantees the shape is always fully visible and undistorted by
+  // default, matching the real DAC output point-for-point. OrbitControls
+  // still lets the viewer rotate for a more dramatic angle afterwards.
+  const planeZ = -8 + BEAM_LEN
   camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 500)
-  camera.position.set(0, 1.7, 16)
+  camera.position.set(0, 4.2, planeZ + 20)
 
   controls = new OrbitControls(camera, renderer.domElement)
-  controls.target.set(0, 3.5, 2)
+  controls.target.set(0, 4.2, planeZ)
   controls.enableDamping = true
-  controls.maxPolarAngle = Math.PI * 0.52
-  controls.minDistance = 2
-  controls.maxDistance = 80
+  controls.maxPolarAngle = Math.PI * 0.62
+  controls.minDistance = 4
+  controls.maxDistance = 90
   controls.update()
 
   const floor = new THREE.Mesh(
@@ -193,31 +204,67 @@ function setupScene() {
   scene.add(dust)
 }
 
-// Ring buffer of every recently-scanned point. `baseColors` holds the
-// undecayed emitted color; `scanColors` (the GPU-facing attribute) is
-// recomputed each frame as baseColor * exp(-age/persistence).
+// The backend sends one complete shape/frame (all points of one revolution)
+// every ~33ms - a snapshot, not a continuous point stream. A real Ether
+// Dream DAC loops that exact same point buffer continuously at rate_kpps
+// points/sec until a new buffer arrives. To make the preview point-for-point
+// faithful to that real behaviour (not just flash the whole frame in sync
+// every 33ms), we replay the latest received frame locally at the true scan
+// rate: a virtual scan head advances through `currentFrame` at
+// `rate_kpps*1000` points/sec, looping forever, exactly like the DAC does.
+let currentFrame = []      // latest [x,y,r,g,b] points from the backend
+let emitIndex = 0          // fractional read position into currentFrame
+let lastEmitTime = 0       // performance.now()/1000 of the last emitted point
+const MAX_EMIT_PER_TICK = 4000  // safety cap (e.g. tab was backgrounded)
+
 function handleIncomingPoints(msg) {
-  const now = performance.now() / 1000
-  for (const [x, y, r, g, b] of msg.pts) {
+  currentFrame = msg.pts
+}
+
+// Advances the virtual scan head and writes newly "visited" points into the
+// ring buffer with real per-point timestamps spaced 1/pointRateHz apart -
+// exactly reproducing how a physical scanner would have hit them in time.
+function emitScanPoints(now) {
+  if (currentFrame.length === 0) return
+  const pointRateHz = Math.max(1, laserState.rate_kpps * 1000)
+  const period = 1 / pointRateHz
+
+  let n = Math.floor((now - lastEmitTime) / period)
+  if (n <= 0) return
+  if (n > MAX_EMIT_PER_TICK) {
+    // Fell far behind (backgrounded tab, GC pause, ...) - skip ahead instead
+    // of trying to replay a huge backlog.
+    lastEmitTime = now - MAX_EMIT_PER_TICK * period
+    n = MAX_EMIT_PER_TICK
+  }
+
+  for (let k = 0; k < n; k++) {
+    const frame = currentFrame
+    const idx = Math.floor(emitIndex) % frame.length
+    const [x, y, r, g, b] = frame[idx]
+    const t = lastEmitTime + (k + 1) * period
+
     const idx3 = scanWriteIndex * 3
     scanPositions[idx3] = x * WORLD_SCALE
     scanPositions[idx3 + 1] = y * WORLD_SCALE
     scanPositions[idx3 + 2] = lastBeamLen
     // Daemon sends 0..1 floats; simulation sends 0..255 integers.
-    // Detect by whether any channel exceeds 1.
     const scale = (r > 1 || g > 1 || b > 1) ? 1 / 255 : 1
     baseColors[idx3] = r * scale
     baseColors[idx3 + 1] = g * scale
     baseColors[idx3 + 2] = b * scale
-    scanTimestamps[scanWriteIndex] = now
+    scanTimestamps[scanWriteIndex] = t
     scanWriteIndex = (scanWriteIndex + 1) % MAX_SCAN_POINTS
     lastPoint = [x, y]
+
+    emitIndex += 1
   }
+  lastEmitTime += n * period
   scanGeo.attributes.position.needsUpdate = true
 }
 
 const baseColors = new Float32Array(MAX_SCAN_POINTS * 3)
-let lastBeamLen = 30
+let lastBeamLen = BEAM_LEN
 let lastPoint = [0, 0]
 const tmpV1 = new THREE.Vector3()
 const tmpV2 = new THREE.Vector3()
@@ -226,12 +273,13 @@ function animate() {
   animationId = requestAnimationFrame(animate)
   const now = performance.now() / 1000
 
+  emitScanPoints(now)
+
   const r = laserState.radius * WORLD_SCALE
   const color = new THREE.Color(laserState.r, laserState.g, laserState.b)
 
   laser.getWorldPosition(tmpV1)
-  const distToCam = tmpV1.distanceTo(camera.position)
-  const len = Math.max(MIN_BEAM_LEN, distToCam + BEAM_MARGIN)
+  const len = BEAM_LEN
   lastBeamLen = len
 
   cone.scale.set(r, r, len)
@@ -296,6 +344,9 @@ function handleResize() {
 function clearPointBuffer() {
   scanTimestamps.fill(-Infinity)
   scanWriteIndex = 0
+  currentFrame = []
+  emitIndex = 0
+  lastEmitTime = performance.now() / 1000
   if (scanGeo) {
     scanGeo.attributes.position.needsUpdate = true
     scanGeo.attributes.color.needsUpdate = true
@@ -304,6 +355,7 @@ function clearPointBuffer() {
 
 onMounted(() => {
   setupScene()
+  lastEmitTime = performance.now() / 1000
   onPoints(handleIncomingPoints)
   window.addEventListener('resize', handleResize)
   animate()
