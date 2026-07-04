@@ -27,7 +27,7 @@
 import { ref, onMounted } from 'vue'
 import { cues, saveCue, recallCue, clearCue, fetchCues } from '../composables/useLaserSocket.js'
 
-const CUE_COUNT = 16
+const CUE_COUNT = 32
 const collapsed = ref(false)
 const saveArmed = ref(false)
 

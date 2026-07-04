@@ -384,7 +384,7 @@ static int json_int(const std::string& b,const std::string& k,int d){ return (in
 // so recalling a cue never drops/changes the current DAC link. Persisted to
 // a small JSON file on disk so cues survive a daemon restart, mirroring the
 // cue system from the original BeamCommander (Python edition).
-static constexpr int MAX_CUES = 16;
+static constexpr int MAX_CUES = 32;
 static std::map<int, LaserState> G_cues;
 static std::mutex                G_cues_mtx;
 static const std::string         CUES_FILE = "cues.json";
