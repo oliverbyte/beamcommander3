@@ -100,12 +100,18 @@ cd frontend && npm install && npm run dev -- --port 5173 < /dev/null
 ```
 laser_daemon.cpp
   ├── laser_thread()      single background thread:
-  │     - advances an animation clock (G_time)
+  │     - advances an animation clock (G_time) plus per-parameter phase
+  │       accumulators (G_move_phase/G_rotation_phase/G_wave_phase/
+  │       G_rainbow_phase) and a smoothed position (G_pos_x_smooth/
+  │       G_pos_y_smooth) - see "Animation phase continuity" below
   │     - generates a Frame from the current LaserState every tick
   │     - always broadcasts the frame over WebSocket at ~30fps (preview),
   │       regardless of hardware connection state
   │     - if a controller is connected + armed + ready, also sends the
   │       same frame to it via libera's core::LaserController API
+  ├── midi_thread()      optional, macOS/CoreMIDI only: auto-connects to
+  │     every MIDI source, dispatches note/CC messages into the same
+  │     LaserState - see "MIDI subsystem" below
   └── httplib::Server     REST handlers mutate a global LaserState (G)
                           under G_mtx; GET /api/state serializes it
 ```
@@ -140,6 +146,78 @@ Key design points:
   color/etc. parameters are read fresh from `G` every frame — there is no
   "restart the daemon" step anywhere, so slider drags are glitch-free.
 
+### Animation phase continuity
+
+`rotation_speed`, `move_speed`, `wave_speed`, and `rainbow_speed` are never
+used directly as `phase = speed * G_time`. That formula looks fine until a
+speed *changes*: since `G_time` has already accumulated a large elapsed
+value, multiplying it by a new speed lands on a completely different point
+in the cycle - a visible jump/reset the instant a slider or knob moves.
+
+Instead, `laser_thread()`'s main loop integrates each parameter's own phase
+accumulator (`G_move_phase`, `G_rotation_phase`, `G_wave_phase`,
+`G_rainbow_phase`) by `speed * dt` every tick, using whatever speed is
+current *right now*. Changing a speed only changes the rate of change from
+that point forward; the current position in the cycle is preserved and the
+animation stays smooth. These globals are never locked - only
+`laser_thread()` ever touches them, matching the existing `G_time` pattern.
+
+`rotation_speed`'s sign is negated at the single point where its phase is
+integrated (not in every setter) so the rotation direction is reversed
+uniformly regardless of which API set it.
+
+### Position smoothing
+
+`pos_x`/`pos_y` in `LaserState` are a *target*, reported as-is by
+`GET /api/state` (so the UI slider never lags). The value actually used
+when rendering (`G_pos_x_smooth`/`G_pos_y_smooth`) exponentially slews
+toward that target every tick via `smooth_toward()`, a direct port of the
+original BeamCommander's `ofApp.cpp` `smoothOne` lambda: tiny moves
+(<0.02 normalized) blend extra slowly (hides a MIDI knob's 128-step/7-bit
+resolution as visible stepping), while big jumps (>0.25 normalized) get a
+boosted alpha so large moves still feel responsive. `make_frame()` reads
+the smoothed globals directly, not the raw target fields.
+
+### Cue system
+
+Cues are snapshots of `LaserState` (minus `target_ip`) in
+`std::map<int, LaserState> G_cues`, guarded by its own `G_cues_mtx` and
+persisted to `backend/cues.json`. **`G_mtx` and `G_cues_mtx` are never held
+at the same time** - `do_cue_save/recall/clear()` in laser_daemon.cpp are
+the *only* functions allowed to touch `G_cues`, and each one locks at most
+one of the two mutexes at a time (lock, copy/assign, unlock - never nested).
+Both the `/api/cue/*` HTTP routes and the MIDI dispatcher's `cue:<n>` /
+`cue_momentary:<n>` actions call these same helpers instead of duplicating
+the logic, so there's exactly one place that has to get the lock order
+right. If you add a new cue-related code path, route it through these
+helpers rather than touching `G_cues` directly.
+
+### MIDI subsystem (optional, macOS/CoreMIDI)
+
+`midi_thread()` runs a `CFRunLoopRun()` forever on its own thread (required
+for CoreMIDI to deliver its read-proc callback), auto-connecting to every
+available MIDI source at startup and rescanning every 3s for hot-plugged
+devices. Bindings are loaded from `backend/midi_map.json` into
+`G_midi_bindings` (guarded by `G_midi_mtx`) rather than hard-coded, since
+exact note/CC numbers depend on the controller's firmware mode; unmapped
+messages are logged so a real device can be calibrated without recompiling.
+
+- `midi_cc_value()` implements the original BeamCommander mapper's response
+  curve (centered/gamma/deadzone/invert/scale/offset) exactly, given a raw
+  0-127 int - see README's "CC response curve" table for the field meanings.
+- Momentary button actions (`flash`, `blackout_hold`, `motion_hold`,
+  `cue_momentary:<n>`) all follow the same pattern: a `do_*_press()` /
+  `do_*_release()` pair that snapshots whatever it's about to override and
+  restores it on release. These are also called directly from REST routes
+  (e.g. `POST /flash/<0|1>`) so a momentary action behaves identically
+  whether triggered from the UI, REST, or MIDI - never implement the same
+  behavior twice.
+- A footswitch is just another input: some pedals send a note, others send
+  a CC (commonly CC64, the standard MIDI "sustain pedal" number). CC-based
+  momentary actions are handled by treating the curve-mapped value above/
+  below 0.5 as press/release inside `midi_apply_cc_action()` - this works
+  because `do_flash_press/release()` are idempotent, so calling them
+  repeatedly while a pedal holds steady at a value is harmless.
 ## Debugging a hung backend
 
 If the UI stops responding to changes but the process is still running

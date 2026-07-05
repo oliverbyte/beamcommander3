@@ -6,9 +6,12 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     proxy: {
-      '/api':   { target: 'http://localhost:8000', changeOrigin: true },
-      '/laser': { target: 'http://localhost:8000', changeOrigin: true },
-      '/ws':    { target: 'ws://localhost:8000', ws: true },
+      '/api':      { target: 'http://localhost:8000', changeOrigin: true },
+      '/laser':    { target: 'http://localhost:8000', changeOrigin: true },
+      '/blackout': { target: 'http://localhost:8000', changeOrigin: true },
+      '/flash':    { target: 'http://localhost:8000', changeOrigin: true },
+      '/move':     { target: 'http://localhost:8000', changeOrigin: true },
+      '/ws':       { target: 'ws://localhost:8000', ws: true },
     },
   },
 })
