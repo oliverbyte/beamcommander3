@@ -188,6 +188,11 @@ export async function clearCue(n) {
   await fetchCues()
 }
 
+export async function moveCue(from, to) {
+  await api(`/cue/${from}/move/${to}`, { method: 'POST' })
+  await fetchCues()
+}
+
 // ── Status polling ─────────────────────────────────────────────────────────────
 // Keeps this client's view of laserState in sync even when another client
 // (a different browser tab, curl, etc.) changes settings on the backend.
