@@ -64,8 +64,8 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow color blend / hue cycle speed |
 | `POST /blackout/<0\|1>` | Force *hardware* output dark (never affects the browser preview) |
 | `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate (affects preview + hardware): 1 = open instantly (renders the current brightness fader value), 0 = closed (fades to dark over `flash_release_ms`, or instantly if it's 0) — defaults closed until set. Never touches the `intensity` field itself |
-| `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (restores them, or starts the release fade - see `flash_release_ms`) |
-| `POST /flash/release_ms/<v>` | Flash release fade time (0-2000ms): `0` = instant restore (default), `>0` = fade brightness to 0 over this many ms on release instead of snapping back |
+| `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (always restores them instantly - `flash_release_ms` does not apply here, only to the footswitch gate above) |
+| `POST /flash/release_ms/<v>` | Footswitch gate release fade time (0-2000ms), despite the name this only affects `/brightness/gate` closing, not flash's own release: `0` = instant cut (default), `>0` = fade brightness to 0 over this many ms instead of snapping to dark |
 | `POST /mirror/x/<0\|1>` | Flip the output horizontally (mirror around center); 1 = mirrored, 0 = normal |
 | `POST /motion/hold/<0\|1>` | Momentary freeze: 1 = press (stops movement, rotation, and the rainbow hue cycle in place, remembering the prior speeds), 0 = release (restores them) |
 | `POST /rotation/reset` | Snap the rotation angle back to 0 and stop it spinning (sets `rotation_speed` to 0) |
@@ -141,6 +141,8 @@ applied, matching the original BeamCommander's MIDI mapper:
 | `invert` | `false` | Reverse direction. |
 | `scale`, `offset` | `1.0`, `0.0` | Applied before clamping, non-centered mode only. |
 | `outMin`, `outMax` | `0.0`, `1.0` | Final mapped range for the target field. |
+| `relative` | `false` | Treat raw as a two's-complement tick delta from an endless/relative encoder (e.g. the APC40's "Cue Level" knob) instead of an absolute position: `1-63` = turned up that many ticks, `65-127` = turned down `128-raw` ticks. Each tick nudges a persistent 0..1 accumulator by `step` (still passed through `gamma`/`outMin`/`outMax` afterward) rather than jumping to a position. |
+| `step` | `0.01` | (relative only) how much of the 0..1 accumulator range each single tick moves. |
 
 ### Action catalog
 
@@ -150,11 +152,12 @@ curve fields above):**
 `dot_amount`, `flicker_hz`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
 `rainbow_amount`, `rainbow_speed`, `move_size`, `move_speed`, `rate_kpps`,
 `flash_release_ms` (0-2000ms; ported from the original BeamCommander's
-`flashReleaseMs` knob - the shipped binding assumes an absolute pot, not a
-relative/endless encoder, unlike the original's config for this knob; if
-your controller's knob turns out to be a relative encoder it'll jump around
-instead of tracking smoothly - recalibrate the CC number/curve as needed,
-relative-encoder support isn't implemented)
+`flashReleaseMs` knob - the shipped binding uses `relative: true` since the
+APC40's "Cue Level" knob this is mapped to is an endless encoder, not an
+absolute pot, see "CC response curve" above. Despite the name, this only
+controls how fast the footswitch's `brightness_gate` fades to dark on
+release - it does *not* affect the `flash` action's own release, which is
+always instant)
 
 **Footswitch-style (`cc`, treated as above/below the midpoint rather than a
 continuous value):**
@@ -176,9 +179,9 @@ you want to bind extra buttons to them),
 while held — the original APC40 mapping uses `_hold`),
 `flash` (forces color to white *and* full brightness only while held - also
 forces the brightness gate open, so it's always visible even if the
-footswitch was never pressed; on release, color reverts to the prior value
-immediately and brightness either snaps back instantly or fades to 0 over
-`flash_release_ms`, see above),
+footswitch was never pressed; on release, color and brightness always
+restore to the prior values instantly - `flash_release_ms` does not apply
+here, only to the footswitch gate's own release, see above),
 `motion_hold`
 (freezes the current movement pattern, rotation, *and* rainbow hue cycle in
 place while held, resumes all three on release), `mirror_hold` (flips the

@@ -147,16 +147,6 @@ static float G_wave_speed_smooth     = 0.0f;
 // G_mtx.
 static std::atomic<bool> g_flash_active{false};
 
-// Flash release decay (ported from the original BeamCommander's
-// flashReleaseMs/flashDecaying): when flash_release_ms > 0, releasing
-// flash doesn't snap intensity back to its pre-flash value - instead it
-// fades from 1.0 down to 0 over that many ms. Declared up here so
-// laser_thread's main loop can ramp G.intensity every tick while
-// g_flash_decaying is true; do_flash_press/release (further down) start
-// and cancel the decay, always under G_mtx.
-static bool                                  g_flash_decaying = false;
-static std::chrono::steady_clock::time_point g_flash_decay_start;
-
 // Master-brightness gate for a footswitch wired as a "hold to show light"
 // pedal (CC64, the standard MIDI sustain-pedal number): while held/open,
 // output (both the browser preview *and* hardware) renders normally; while
@@ -499,25 +489,11 @@ static void laser_thread() {
             G_wave_amplitude_smooth = smooth_toward(G_wave_amplitude_smooth, G.wave_amplitude, (float)dt, 0.090f);
             G_wave_speed_smooth     = smooth_toward(G_wave_speed_smooth,     G.wave_speed,     (float)dt, 0.090f);
 
-            // Flash release decay (see g_flash_decaying's comment): ramp
-            // intensity from 1.0 down to 0 over flash_release_ms, ending
-            // exactly at 0 rather than overshooting past the deadline.
-            if (g_flash_decaying) {
-                double elapsed_ms = std::chrono::duration<double, std::milli>(now_tp - g_flash_decay_start).count();
-                double dur_ms = std::max(1.0f, G.flash_release_ms);
-                if (elapsed_ms >= dur_ms) {
-                    G.intensity = 0.0f;
-                    g_flash_decaying = false;
-                } else {
-                    G.intensity = 1.0f - (float)(elapsed_ms / dur_ms);
-                }
-            }
-
             // Brightness gate fade (see g_gate_level's comment): opening
             // the gate snaps g_gate_level to 1.0 instantly; closing it
-            // starts a decay to 0.0 over the same flash_release_ms knob
-            // flash uses (0ms = instant cut, matching this gate's original
-            // behavior before the release-time knob existed).
+            // starts a decay to 0.0 over flash_release_ms - the footswitch
+            // is the *only* thing this knob affects; flash's own release
+            // is always instant (see do_flash_release()).
             bool gate_open_now = g_brightness_gate_open.load();
             if (gate_open_now) {
                 g_gate_level = 1.0f;
@@ -835,6 +811,11 @@ struct MidiBinding {
     float offset   = 0.0f;  // applied after scale, non-centered mode only
     float outMin   = 0.0f;  // final mapped output range
     float outMax   = 1.0f;
+    // Relative/endless encoder support (some APC40 knobs, e.g. the "Cue
+    // Level" knob, send two's-complement deltas instead of an absolute
+    // position - see midi_cc_value's relative branch for the exact decode).
+    bool  relative = false;
+    float step     = 0.01f; // normalized 0..1 accumulator step per raw delta unit
 };
 static std::vector<MidiBinding> G_midi_bindings;
 static std::mutex               G_midi_mtx;
@@ -872,12 +853,20 @@ static void load_midi_map(const std::string& path) {
         b.offset   = json_float(obj, "offset", 0.0f);
         b.outMin   = json_float(obj, "outMin", 0.0f);
         b.outMax   = json_float(obj, "outMax", 1.0f);
+        b.relative = json_bool(obj, "relative", false);
+        b.step     = json_float(obj, "step", 0.01f);
         if ((b.type == "note" || b.type == "cc") && b.number >= 0 && !b.action.empty())
             G_midi_bindings.push_back(b);
         i = body.find('{', j);
     }
     std::cout << "[midi] loaded " << G_midi_bindings.size() << " binding(s) from " << path << "\n";
 }
+
+// Accumulator for relative/endless-encoder CC bindings, keyed by
+// (channel<<8 | cc number) - each key holds a normalized 0..1 running
+// position that ticks accumulate into (see midi_cc_value's relative
+// branch). Only ever touched from midi_thread, so no locking needed.
+static std::map<int, float> G_midi_relative_acc;
 
 // Converts a raw 0..127 CC value into the binding's configured output range,
 // replicating the original BeamCommander's MidiToOscMapper.h curve engine:
@@ -887,8 +876,24 @@ static void load_midi_map(const std::string& path) {
 //    centered) for a less twitchy/more natural feel on fine controls.
 //  - "deadzone" (centered only) snaps small values near center to exactly 0.
 //  - non-centered controls use the simpler invert/scale/offset/gamma chain.
-static float midi_cc_value(const MidiBinding& b, int raw) {
+//  - "relative" (endless encoders, e.g. the APC40's "Cue Level" knob):
+//    raw isn't a position at all, it's a two's-complement tick delta (1..63
+//    = turned up that many ticks, 65..127 = turned down (128-raw) ticks) -
+//    each tick nudges a persistent normalized accumulator by `step` instead
+//    of jumping to an absolute position, exactly like a real endless pot.
+static float midi_cc_value(const MidiBinding& b, int raw, int channel) {
     raw = std::clamp(raw, 0, 127);
+    if (b.relative) {
+        int delta = (raw <= 63) ? raw : (raw - 128); // e.g. 127 -> -1, 126 -> -2
+        float d = delta * b.step;
+        if (b.invert) d = -d;
+        int key = (channel << 8) | (b.number & 0xff);
+        float acc = std::clamp(G_midi_relative_acc[key] + d, 0.0f, 1.0f);
+        G_midi_relative_acc[key] = acc;
+        float norm = acc;
+        if (b.gamma > 0.0f && b.gamma != 1.0f) norm = std::pow(norm, b.gamma);
+        return b.outMin + norm * (b.outMax - b.outMin);
+    }
     if (b.centered) {
         float c = (raw >= 64) ? (float)(raw - 64) / 63.0f : (float)(raw - 63) / 63.0f;
         if (b.invert) c = -c;
@@ -961,8 +966,6 @@ static float      g_pre_motion_rainbow_speed = 0.0f;
 // can see it too.
 static float      g_pre_flash_r = 1.0f, g_pre_flash_g = 1.0f, g_pre_flash_b = 1.0f;
 static float      g_pre_flash_intensity = 1.0f;
-// g_flash_decaying/g_flash_decay_start are declared earlier too (same
-// reason - laser_thread's main loop needs them for the per-tick ramp).
 
 // Shared flash press/release - used by both the MIDI dispatcher and the
 // /flash/<0|1> HTTP route, so a flash triggered from either input behaves
@@ -971,7 +974,6 @@ static float      g_pre_flash_intensity = 1.0f;
 static void do_flash_press() {
     std::lock_guard<std::mutex> lk(G_mtx);
     if (g_flash_active) return;
-    g_flash_decaying = false; // a fresh press cancels any in-progress release fade
     g_pre_flash_r = G.r; g_pre_flash_g = G.g; g_pre_flash_b = G.b;
     g_pre_flash_intensity = G.intensity;
     G.r = G.g = G.b = 1.0f;
@@ -988,16 +990,10 @@ static void do_flash_press() {
 static void do_flash_release() {
     std::lock_guard<std::mutex> lk(G_mtx);
     if (!g_flash_active) return;
+    // Flash's own release is always instant - flash_release_ms only drives
+    // the footswitch gate's close-fade (see g_gate_level), not this.
     G.r = g_pre_flash_r; G.g = g_pre_flash_g; G.b = g_pre_flash_b;
-    if (G.flash_release_ms > 0.0f) {
-        // Start the fade-to-black decay; laser_thread's main loop ramps
-        // G.intensity from 1.0 down to 0 over flash_release_ms each tick.
-        g_flash_decay_start = std::chrono::steady_clock::now();
-        g_flash_decaying = true;
-    } else {
-        G.intensity = g_pre_flash_intensity;
-        g_flash_decaying = false;
-    }
+    G.intensity = g_pre_flash_intensity;
     g_flash_active = false;
 }
 
@@ -1208,7 +1204,7 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
                     if (isNote) {
                         midi_apply_note_action(match.action, isPress, isRelease);
                     } else {
-                        midi_apply_cc_action(match.action, midi_cc_value(match, d2));
+                        midi_apply_cc_action(match.action, midi_cc_value(match, d2, channel));
                     }
                 } else {
                     std::cout << "[midi] unmapped " << (isNote ? "note" : "cc")

@@ -2,7 +2,7 @@
   { "type": "cc", "channel": 0, "number": 14, "action": "intensity",
     "outMin": 0.0, "outMax": 1.0 },
   { "type": "cc", "channel": 0, "number": 47, "action": "flash_release_ms",
-    "gamma": 1.8, "outMin": 0.0, "outMax": 2000.0 },
+    "relative": true, "step": 0.01, "gamma": 1.8, "outMin": 0.0, "outMax": 2000.0 },
 
   { "type": "cc", "channel": 0, "number": 16, "action": "pos_x",
     "centered": true, "deadzone": 0.02, "gamma": 1.2, "outMin": -1.0, "outMax": 1.0 },
