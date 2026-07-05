@@ -154,8 +154,31 @@ and simply prints "MIDI control disabled" on other platforms instead of
 failing to compile; everything else (REST API, WebSocket preview, laser
 output, cues) works the same on Windows.
 
+The release workflow packages `laser_daemon.exe` + the bundled libusb DLL +
+`midi_map.json` + `frontend/dist` + `packaging/run_windows.bat` into a real
+installer, **`BeamCommander3-Setup.exe`**, built with
+[Inno Setup](https://jrsoftware.org/isinfo.php) (preinstalled on GitHub's
+`windows-latest` runners - no extra install step needed) via
+`packaging/windows_installer.iss`:
+
+```powershell
+& "C:/Program Files (x86)/Inno Setup 6/ISCC.exe" `
+  /DMyAppVersion=v2026.07.05-1 `
+  /DStageDir=C:/path/to/staged/files `
+  /DIconFile=packaging/AppIcon.ico `
+  packaging/windows_installer.iss
+```
+
+`StageDir` must contain everything above; see the release workflow's
+"Assemble release package (installer)" step for how it's assembled. The
+installer installs per-user (no admin rights required, via Inno Setup's
+`{autopf}`/`PrivilegesRequired=lowest`), adds Start Menu + optional desktop
+shortcuts pointing at `run.bat`, and offers to launch the app immediately
+after install.
+
 `.github/workflows/release.yml` builds both platforms in parallel jobs and
-publishes them as two assets on the same GitHub Release.
+publishes them (the macOS `.dmg` and `BeamCommander3-Setup.exe`) as two
+assets on the same GitHub Release.
 
 ## Architecture
 

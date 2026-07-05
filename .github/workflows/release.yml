@@ -192,12 +192,11 @@ jobs:
           npm ci
           npm run build
 
-      - name: Assemble release package (.zip)
+      - name: Assemble release package (installer)
         id: package
         run: |
           $version = "${{ needs.version.outputs.version }}"
-          $name = "beamcommander3-windows-x64-$version"
-          $stage = Join-Path $env:RUNNER_TEMP $name
+          $stage = Join-Path $env:RUNNER_TEMP "win_stage"
           Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $stage | Out-Null
 
@@ -213,15 +212,23 @@ jobs:
           $dllDir = "C:/libera-laser/libs/helios_dac/sdk/cpp/libusb_bin/Windows/x64/Release/dll"
           Copy-Item "$dllDir/*.dll" $stage/
 
-          $zipPath = Join-Path $env:RUNNER_TEMP "$name.zip"
-          Compress-Archive -Path $stage -DestinationPath $zipPath -Force
-          "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
+          # Build BeamCommander3-Setup.exe with Inno Setup (preinstalled on
+          # windows-latest runners) instead of shipping a bare zip - gives
+          # users a normal installer (Start Menu shortcut, optional desktop
+          # shortcut, proper uninstaller) instead of a portable folder.
+          $iscc = "C:/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          $iconFile = Join-Path $env:GITHUB_WORKSPACE "packaging/AppIcon.ico"
+          & $iscc /DMyAppVersion=$version /DStageDir=$stage /DIconFile=$iconFile packaging/windows_installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+          $setupPath = Join-Path $env:GITHUB_WORKSPACE "packaging/BeamCommander3-Setup.exe"
+          "setup_path=$setupPath" >> $env:GITHUB_OUTPUT
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: ${{ steps.package.outputs.zip_path }}
+          path: ${{ steps.package.outputs.setup_path }}
 
   release:
     needs: [version, build-macos, build-windows]
@@ -256,15 +263,16 @@ jobs:
             and choose **Open** once to approve it (only needed the first
             time).
 
-            **Windows (x64)**: download the `.zip`, extract it anywhere, and
-            run `run.bat` - it starts `laser_daemon.exe` and opens
-            http://localhost:8000 in your browser automatically. Not
-            code-signed, so SmartScreen may warn on first run - click "More
-            info" > "Run anyway".
+            **Windows (x64)**: download and run `BeamCommander3-Setup.exe`.
+            It's not code-signed, so SmartScreen may warn - click "More
+            info" > "Run anyway". Installs to your user profile (no admin
+            needed), adds Start Menu/optional desktop shortcuts, and offers
+            to launch the app right after install - it starts
+            `laser_daemon.exe` and opens http://localhost:8000 automatically.
 
             Both packages bundle the built frontend and all runtime
             dependencies - no Node.js, Xcode, or Visual Studio required to
             run them.
           files: |
             artifacts/macos/*.dmg
-            artifacts/windows/*.zip
+            artifacts/windows/*.exe

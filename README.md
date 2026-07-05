@@ -50,9 +50,12 @@ compiler, Node.js, or source checkout needed.
 
 ### Windows
 
-1. Download the `.zip` from the latest release and extract it anywhere.
-2. Run `run.bat`. It's not code-signed, so SmartScreen may warn on first
-   run — click **More info** → **Run anyway**.
+1. Download `BeamCommander3-Setup.exe` from the latest release and run it.
+   It's not code-signed, so SmartScreen may warn — click **More info** →
+   **Run anyway**.
+2. Installs to your user profile (no admin rights needed), adds Start
+   Menu/optional desktop shortcuts, and offers to launch the app right
+   after install.
 3. A browser tab opens automatically at `http://localhost:8000`.
 
 ### Manual / from source (any OS, or for development)

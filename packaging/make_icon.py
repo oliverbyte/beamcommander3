@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Generates packaging/AppIcon.icns for the BeamCommander3.app bundle: a dark
-"stage" backdrop with a multicolor laser fan, echoing the app's actual
-purpose (laser show control) and its purple brand color from the frontend
-favicon. Run once locally; the resulting .icns is committed to the repo and
-just copied into the bundle by the release workflow (no icon-generation
+Generates packaging/AppIcon.icns (macOS) and packaging/AppIcon.ico (Windows,
+used by the Inno Setup installer) for BeamCommander3: a dark "stage"
+backdrop with a multicolor laser fan, echoing the app's actual purpose
+(laser show control) and its purple brand color from the frontend favicon.
+Run once locally; the resulting files are committed to the repo and just
+copied into the packages by the release workflow (no icon-generation
 tooling needed in CI).
 
 Usage: /path/to/venv/bin/python3 packaging/make_icon.py
@@ -103,10 +104,14 @@ def main():
     icns_path = os.path.join(OUT_DIR, "AppIcon.icns")
     subprocess.run(["iconutil", "-c", "icns", iconset, "-o", icns_path], check=True)
 
+    ico_path = os.path.join(OUT_DIR, "AppIcon.ico")
+    ico_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+    img.save(ico_path, sizes=ico_sizes)
+
     preview_path = os.path.join(OUT_DIR, "AppIcon.png")
     img.save(preview_path)
 
-    print(f"Wrote {icns_path} and {preview_path}")
+    print(f"Wrote {icns_path}, {ico_path}, and {preview_path}")
 
 
 if __name__ == "__main__":
