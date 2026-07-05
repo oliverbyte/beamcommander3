@@ -63,7 +63,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /move/speed/<v>` / `/move/size/<v>` | Movement cycle speed / amplitude |
 | `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow color blend / hue cycle speed |
 | `POST /blackout/<0\|1>` | Force *hardware* output dark (never affects the browser preview) |
-| `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate for *hardware* output only: 1 = open (renders the current brightness fader value), 0 = closed (forces hardware dark regardless of the fader) — defaults closed until set |
+| `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate (affects preview + hardware): 1 = open instantly (renders the current brightness fader value), 0 = closed (fades to dark over `flash_release_ms`, or instantly if it's 0) — defaults closed until set. Never touches the `intensity` field itself |
 | `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (restores them, or starts the release fade - see `flash_release_ms`) |
 | `POST /flash/release_ms/<v>` | Flash release fade time (0-2000ms): `0` = instant restore (default), `>0` = fade brightness to 0 over this many ms on release instead of snapping back |
 | `POST /mirror/x/<0\|1>` | Flip the output horizontally (mirror around center); 1 = mirrored, 0 = normal |
@@ -102,10 +102,14 @@ configured), this subsystem simply does nothing.
    scanning every few seconds for hot-plugged devices, no restart needed).
    A footswitch plugged into the APC40's 1/4" jack works too — it sends CC64
    (the standard MIDI "sustain pedal" number), bound by default to
-   `brightness_gate`: a "hold to show light" master switch for the *real*
-   laser output only (the browser preview is never affected) — hold the
-   pedal down to let the current brightness fader value through, release it
-   to force the real beam dark, regardless of what the fader is set to.
+   `brightness_gate`: a "hold to show light" master switch for both the
+   preview and the real laser output — hold the pedal down to let the
+   current brightness fader value through instantly, release it to fade to
+   dark over `flash_release_ms` (instantly if that's 0) regardless of what
+   the fader is set to; the fader itself is never touched, so whatever it
+   was last set to takes over immediately the next time the pedal is
+   pressed. Touching the fader directly (UI/REST/MIDI) also opens the gate
+   right away, so brightness isn't stuck dark if you never use the pedal.
    Most footswitches are wired normally-closed, so they report the
    *opposite* of what you'd expect (high while up, low while pressed) — the
    shipped CC64 binding has `invert: true` set to compensate; flip it if
@@ -155,11 +159,12 @@ relative-encoder support isn't implemented)
 **Footswitch-style (`cc`, treated as above/below the midpoint rather than a
 continuous value):**
 `flash` (see below - reachable from a footswitch CC as well as note buttons),
-`brightness_gate` (the CC64 footswitch default: pedal held = *hardware*
-output shows the current brightness fader value, pedal up = hardware forced
-dark regardless of the fader - never affects the preview; doesn't touch the
-`intensity` field itself, so the fader's last value always takes over
-immediately the next time the pedal is pressed).
+`brightness_gate` (the CC64 footswitch default: pedal held = brightness
+shows the current fader value instantly, pedal up = fades to dark over
+`flash_release_ms` (instantly if 0) - affects the preview and hardware
+together, and never touches the `intensity` field itself, so the fader's
+last value always takes over immediately the next time the pedal is
+pressed).
 
 **Buttons (`note`, note-on presses / note-off or velocity-0 releases):**
 `shape:<circle|line|triangle|square|wave|staticwave>`,
@@ -169,9 +174,11 @@ you want to bind extra buttons to them),
 `rainbow_preset_slowfull` (full rainbow blend at a slow speed, one press),
 `blackout_toggle` / `blackout_hold` (dark until pressed again, vs. dark only
 while held — the original APC40 mapping uses `_hold`),
-`flash` (forces color to white *and* full brightness only while held; on
-release, color reverts to the prior value immediately and brightness either
-snaps back instantly or fades to 0 over `flash_release_ms`, see above),
+`flash` (forces color to white *and* full brightness only while held - also
+forces the brightness gate open, so it's always visible even if the
+footswitch was never pressed; on release, color reverts to the prior value
+immediately and brightness either snaps back instantly or fades to 0 over
+`flash_release_ms`, see above),
 `motion_hold`
 (freezes the current movement pattern, rotation, *and* rainbow hue cycle in
 place while held, resumes all three on release), `mirror_hold` (flips the
