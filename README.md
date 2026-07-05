@@ -62,7 +62,8 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /move/mode/<mode>` | `none`, `circle`, `pan`, `tilt`, `eight`, `random` |
 | `POST /move/speed/<v>` / `/move/size/<v>` | Movement cycle speed / amplitude |
 | `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow color blend / hue cycle speed |
-| `POST /blackout/<0\|1>` | Force output dark |
+| `POST /blackout/<0\|1>` | Force *hardware* output dark (never affects the browser preview) |
+| `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate for *hardware* output only: 1 = open (renders the current brightness fader value), 0 = closed (forces hardware dark regardless of the fader) — defaults closed until set |
 | `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (restores them) |
 | `POST /mirror/x/<0\|1>` | Flip the output horizontally (mirror around center); 1 = mirrored, 0 = normal |
 | `POST /motion/hold/<0\|1>` | Momentary freeze: 1 = press (stops movement, rotation, and the rainbow hue cycle in place, remembering the prior speeds), 0 = release (restores them) |
@@ -98,13 +99,16 @@ configured), this subsystem simply does nothing.
 1. Plug the controller in via USB, then start `laser_daemon` — it
    auto-detects and connects to every available MIDI source (and keeps
    scanning every few seconds for hot-plugged devices, no restart needed).
-   A footswitch plugged into the APC40's 1/4" jack works too — it can send
-   either a note or a CC (commonly CC64, the standard MIDI "sustain pedal"
-   number); both are supported for momentary actions like `flash`. Most
-   footswitches are wired normally-closed, so they report the *opposite* of
-   what you'd expect (high while up, low while pressed) — the shipped CC64
-   binding has `invert: true` set to compensate; flip it if your pedal is
-   normally-open instead.
+   A footswitch plugged into the APC40's 1/4" jack works too — it sends CC64
+   (the standard MIDI "sustain pedal" number), bound by default to
+   `brightness_gate`: a "hold to show light" master switch for the *real*
+   laser output only (the browser preview is never affected) — hold the
+   pedal down to let the current brightness fader value through, release it
+   to force the real beam dark, regardless of what the fader is set to.
+   Most footswitches are wired normally-closed, so they report the
+   *opposite* of what you'd expect (high while up, low while pressed) — the
+   shipped CC64 binding has `invert: true` set to compensate; flip it if
+   your pedal is normally-open instead.
 2. Bindings live in `backend/midi_map.json`, a plain JSON array of
    `{ "type": "note"|"cc", "channel": 0-15|-1, "number": 0-127, "action": "..." }`
    objects (`channel: -1` matches any channel). The shipped default is
@@ -140,6 +144,15 @@ curve fields above):**
 `r`, `g`, `b`, `intensity`, `shape_scale`, `rotation_speed`, `pos_x`, `pos_y`,
 `dot_amount`, `flicker_hz`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
 `rainbow_amount`, `rainbow_speed`, `move_size`, `move_speed`, `rate_kpps`
+
+**Footswitch-style (`cc`, treated as above/below the midpoint rather than a
+continuous value):**
+`flash` (see below - reachable from a footswitch CC as well as note buttons),
+`brightness_gate` (the CC64 footswitch default: pedal held = *hardware*
+output shows the current brightness fader value, pedal up = hardware forced
+dark regardless of the fader - never affects the preview; doesn't touch the
+`intensity` field itself, so the fader's last value always takes over
+immediately the next time the pedal is pressed).
 
 **Buttons (`note`, note-on presses / note-off or velocity-0 releases):**
 `shape:<circle|line|triangle|square|wave|staticwave>`,

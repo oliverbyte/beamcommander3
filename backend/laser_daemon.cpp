@@ -140,6 +140,20 @@ static float G_wave_speed_smooth     = 0.0f;
 // G_mtx.
 static std::atomic<bool> g_flash_active{false};
 
+// Master-brightness gate for a footswitch wired as a "hold to show light"
+// pedal (CC64, the standard MIDI sustain-pedal number): while held/open,
+// hardware output renders normally; while released/closed (including at
+// startup, before the pedal has ever been touched), the real laser output
+// is forced dark - matching `blackout`'s hardware-only scope (the preview
+// is never affected, see laser_thread()'s hardware-send step). Deliberately
+// does NOT touch LaserState.intensity itself - the fader/knob/UI/REST
+// setting it is LTP (last value counts) and keeps updating independently
+// of the gate, so whatever the fader was last set to (even while the gate
+// was closed) takes effect immediately the next time the pedal is pressed.
+// Read from laser_thread without holding G_mtx (same reasoning as
+// g_flash_active).
+static std::atomic<bool> g_brightness_gate_open{false};
+
 static float smooth_toward(float cur, float target, float dt, float tau) {
     dt = std::clamp(dt, 0.0f, 0.25f); // clamp hitches, matches the original
     float alpha = 1.0f - std::exp(-dt / std::max(0.0001f, tau));
@@ -480,12 +494,14 @@ static void laser_thread() {
         }
 
         if (hardwareReady) {
-            // Blackout only ever suppresses the *real* laser output, never
-            // the browser preview (which already got the true-color `frame`
-            // above) - so a blanked copy is what actually goes to hardware,
-            // keeping the same point positions (safety-relevant for some
-            // controllers) but zeroing every channel's color.
-            if (snap.blackout) {
+            // Blackout and the footswitch brightness gate both only ever
+            // suppress the *real* laser output, never the browser preview
+            // (which already got the true, un-gated `frame` above) - so a
+            // blanked copy is what actually goes to hardware, keeping the
+            // same point positions (safety-relevant for some controllers)
+            // but zeroing every channel's color. The gate defaults closed
+            // (pedal not pressed) until the footswitch says otherwise.
+            if (snap.blackout || !g_brightness_gate_open.load()) {
                 core::Frame blanked = frame;
                 for (auto& p : blanked.points) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
                 ctrl->sendFrame(std::move(blanked));
@@ -809,6 +825,10 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     // do_flash_press/release is idempotent, so it's safe to call on every
     // CC message without edge-detection.
     if (action=="flash") { if (out > 0.5f) do_flash_press(); else do_flash_release(); return; }
+    // Footswitch master-brightness gate (CC64): idempotent, just tracks
+    // whether the pedal is currently held above/below the midpoint - see
+    // g_brightness_gate_open's comment for the full behavior.
+    if (action=="brightness_gate") { g_brightness_gate_open.store(out > 0.5f); return; }
     if (action=="r")              { std::lock_guard<std::mutex> lk(G_mtx); G.r=std::clamp(out,0.0f,1.0f); return; }
     if (action=="g")              { std::lock_guard<std::mutex> lk(G_mtx); G.g=std::clamp(out,0.0f,1.0f); return; }
     if (action=="b")              { std::lock_guard<std::mutex> lk(G_mtx); G.b=std::clamp(out,0.0f,1.0f); return; }
@@ -1291,6 +1311,15 @@ int main(int argc, char* argv[]) {
         res.set_content(state_to_json(),"application/json");
     });
 
+    // ── POST /brightness/gate/<0|1> — footswitch master-brightness gate ───────
+    // 1 = pedal held (hardware output renders normally), 0 = pedal up
+    // (hardware output forced dark) - see g_brightness_gate_open's comment.
+    // Shared state with the MIDI "brightness_gate" CC action.
+    svr.Post(R"(/brightness/gate/([01]))",[](const httplib::Request& req,httplib::Response& res){
+        g_brightness_gate_open.store(req.matches[1]=="1");
+        res.set_content(state_to_json(),"application/json");
+    });
+
     // ── POST /flash/<0|1> — momentary white + full brightness while held ─────
     // 1 = press (forces color to white and full brightness, remembering the
     // prior values), 0 = release (restores them). Shares do_flash_press/
@@ -1392,6 +1421,7 @@ int main(int argc, char* argv[]) {
               << "  POST /move/mode/<none|circle|pan|tilt|eight|random>\n"
               << "  POST /laser/rainbow/amount/<v>  /laser/rainbow/speed/<v>\n"
               << "  POST /blackout/<0|1>  /flash/<0|1>  /mirror/x/<0|1>  /motion/hold/<0|1>\n"
+              << "  POST /brightness/gate/<0|1>  /rotation/reset\n"
               << "  POST /laser/connect/<ip>  /laser/disconnect\n"
               << "  WS   /ws/points\n"
               << "  MIDI: optional, see backend/midi_map.json (Akai APC40 mkII or any USB controller)\n";
