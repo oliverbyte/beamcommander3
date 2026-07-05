@@ -1,10 +1,74 @@
 # BeamCommander3
 
-Real-time laser show control. A single C++ backend (`laser_daemon`) drives real
-laser hardware via [libera-laser](https://github.com/sebleedelisle/libera-laser)
-and serves a Vue 3 web UI with a live Three.js preview — the preview always
-shows exactly what the backend is currently rendering, whether or not a laser
-is connected.
+A laser show controller you run on your own laptop: it drives a real laser
+projector and gives you a live web page to control shapes, colors, movement,
+color effects, and "cues" (saved looks you can jump back to instantly) —
+plus an optional USB MIDI controller or foot pedal if you want hands-on
+faders and buttons instead of a mouse.
+
+You don't need to know how to code to use it — see
+["Using the show"](#using-the-show-no-coding-needed) below. If you're
+curious how it's built, or want to modify it, the rest of this file and
+[DEVELOPER.md](DEVELOPER.md) cover the technical side.
+
+## History
+
+BeamCommander3 is the third generation of a laser-show controller originally
+built as **BeamCommander**, an [openFrameworks](https://openframeworks.cc/)
+(C++ creative-coding framework, "ofx" for short) application. That version
+worked, but every change meant recompiling a full openFrameworks project,
+and the laser output, the UI, and the MIDI/OSC control layer were all
+tangled together in one big app.
+
+This rewrite keeps the parts that worked well from the original — the exact
+Akai APC40 mkII MIDI mapping, the response-curve/smoothing math, the flash
+and cue behavior — and drops openFrameworks entirely. The laser output now
+talks directly to [libera-laser](https://github.com/sebleedelisle/libera-laser),
+a small, focused C++ library just for driving laser hardware (Ether Dream,
+Helios, LaserCube, and others). The control surface is a normal web page
+(Vue 3 + Three.js) served over plain HTTP/WebSocket, so it opens in any
+browser and can be styled or extended without touching any C++ at all. The
+result is one small backend program plus one web page — no openFrameworks
+project, no IDE-specific build system, nothing except a C++ compiler and
+Node.js.
+
+## Using the show (no coding needed)
+
+1. **Start it**: double-click/run `./start.sh` in a terminal. It opens a
+   browser tab automatically — that page *is* the remote control for your
+   laser show.
+2. **Connect your laser**: type its IP address into the "Controller" box in
+   the UI and click **Connect** (e.g. an Ether Dream is often
+   `192.168.x.x` or a fixed address like `10.10.10.4` — check your laser's
+   manual or network settings). You'll see "Laser → connected" once it's
+   linked up. No laser connected yet? Everything still works — the preview
+   on screen always shows exactly what would come out of the laser.
+3. **Play with the show**: pick a shape, drag the color picker, turn on
+   Rainbow, try a Movement pattern, adjust Speed/Size — every change is
+   instant, nothing needs to be "applied" or saved first.
+4. **Flash / Blackout**: the ⚡ Flash button punches the beam to full white
+   brightness while held, then returns to whatever it was showing before.
+   Blackout forces the real laser dark (the on-screen preview keeps
+   playing) — handy for a quick "oh no" moment without losing your settings.
+5. **Cues**: the panel on the right holds 32 save slots. Turn on "Save
+   mode", click an empty numbered slot to store the current look, then
+   click any populated (green) slot any time to instantly recall it.
+   Right-click a slot to clear it, or use "Move" to relocate a saved cue to
+   a different slot.
+6. **Optional: MIDI controller or foot pedal** — if you plug in a USB MIDI
+   controller (an Akai APC40 mkII works out of the box, matching the
+   original BeamCommander's exact layout), its knobs and buttons drive the
+   same controls as the web page. A foot pedal can be wired up as a
+   "brightness on while held" switch. None of this is required — the web
+   page alone is a complete remote control. See ["MIDI control"](#midi-control-optional)
+   below if you want to set one up.
+
+---
+
+## For developers
+
+Everything below is technical reference for building, extending, or scripting
+against BeamCommander3 — not needed just to run a show (see above).
 
 ## Architecture
 
