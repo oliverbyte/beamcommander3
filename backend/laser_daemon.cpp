@@ -914,9 +914,16 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         return;
     }
     // One-shot: snap rotation back to angle 0 and stop it spinning. Shared
-    // with the /rotation/reset REST route.
+    // with the /rotation/reset REST route. Fires on *every* MIDI message
+    // for this note (both isPress and isRelease), not just isPress - this
+    // particular pad is apparently in a toggle-style LED mode that sends
+    // alternating note-on/note-off across successive physical taps rather
+    // than an on+off pair per tap, so gating on isPress only (like the
+    // other one-shot actions above) made it fire on just every other press.
+    // Since do_rotation_reset() is idempotent, reacting to both is safe and
+    // makes it behave like a plain momentary touch button regardless of
+    // the pad's LED/toggle firmware mode.
     if (action=="rotation_reset") {
-        if (!isPress) return;
         do_rotation_reset();
         return;
     }
