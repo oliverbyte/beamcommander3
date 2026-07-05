@@ -87,6 +87,20 @@ jobs:
           cp README.md "$stage/"
           cp packaging/run.sh "$stage/run.sh"
           chmod +x "$stage/run.sh" "$stage/laser_daemon"
+
+          # laser_daemon dynamically links Homebrew's libusb, which only
+          # exists on the runner (e.g. /opt/homebrew/opt/libusb/...) - bundle
+          # the dylib next to the binary and repoint the load command at it
+          # via @executable_path, so the release doesn't require Homebrew or
+          # libusb to be pre-installed on the machine it runs on.
+          libusb_path="$(otool -L "$stage/laser_daemon" | awk '/libusb.*\.dylib/{print $1; exit}')"
+          if [[ -n "$libusb_path" ]]; then
+            cp "$libusb_path" "$stage/libusb-1.0.0.dylib"
+            chmod 644 "$stage/libusb-1.0.0.dylib"
+            install_name_tool -change "$libusb_path" "@executable_path/libusb-1.0.0.dylib" "$stage/laser_daemon"
+            codesign --force -s - "$stage/laser_daemon"
+          fi
+
           (cd /tmp && zip -r -y "$name.zip" "$name")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "zip_path=/tmp/$name.zip" >> "$GITHUB_OUTPUT"
