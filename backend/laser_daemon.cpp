@@ -44,13 +44,14 @@ struct LaserState {
     float r = 0.0f, g = 1.0f, b = 0.314f;
     float intensity       = 1.0f;     // master brightness
     // Footswitch brightness-gate release fade time (ms): 0 = instant cut
-    // to dark when the gate closes (default/legacy), >0 = fade from 1.0
-    // down to 0 over this many ms instead (see g_gate_level). This is a
+    // to dark when the gate closes, >0 = fade from 1.0 down to 0 over this
+    // many ms instead (see g_gate_level). Defaults to 200ms. This is a
     // *global* daemon setting, not part of the per-cue show state - like
     // target_ip, it's deliberately excluded from cue_state_to_json/
     // cue_state_from_json and explicitly preserved across cue recalls in
-    // do_cue_recall(), so switching cues never changes it.
-    float flash_release_ms = 0.0f;    // 0..2000
+    // do_cue_recall() and across /api/reset, so switching cues or
+    // resetting the show never changes it.
+    float flash_release_ms = 200.0f;    // 0..2000
 
     // Position -1..1
     float pos_x = 0.0f, pos_y = 0.0f;
@@ -1472,13 +1473,17 @@ int main(int argc, char* argv[]) {
 
     // ── POST /api/reset — restore all show params to defaults ─────────────────
     // Preserves the current controller connection (target_ip / armed state)
-    // so resetting the show doesn't drop the laser link.
+    // and the global flash_release_ms setting (see its comment) so resetting
+    // the show doesn't drop the laser link or change the footswitch's fade
+    // time.
     svr.Post("/api/reset",[](const httplib::Request&,httplib::Response& res){
         {
             std::lock_guard<std::mutex> lk(G_mtx);
             std::string ip = G.target_ip;
+            float flash_release_ms = G.flash_release_ms;
             G = LaserState{};
             G.target_ip = ip;
+            G.flash_release_ms = flash_release_ms;
         }
         res.set_content(state_to_json(),"application/json");
     });
