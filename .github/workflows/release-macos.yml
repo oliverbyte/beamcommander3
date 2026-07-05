@@ -85,6 +85,7 @@ jobs:
 
           sed "s/__VERSION__/${version}/g" packaging/Info.plist.template > "$app/Contents/Info.plist"
           cp packaging/launcher.sh "$app/Contents/MacOS/BeamCommander3"
+          cp packaging/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
           cp backend/laser_daemon "$app/Contents/MacOS/laser_daemon"
           cp backend/midi_map.json "$app/Contents/Resources/"
           cp -r frontend/dist "$app/Contents/Resources/frontend_dist"
