@@ -147,8 +147,8 @@ you want to bind extra buttons to them),
 while held — the original APC40 mapping uses `_hold`),
 `flash` (forces color to white *and* full brightness only while held,
 restores both the exact prior color and brightness on release), `motion_hold`
-(freezes the current movement pattern in place while held, resumes on
-release),
+(freezes the current movement pattern *and* rotation in place while held,
+resumes both on release),
 `cue_save_arm` (arm save mode — the *next* `cue:<n>` button saves instead of
 recalls) + `cue:<1-32>` (latching save/recall),
 `cue_momentary:<1-32>` (hold to preview that cue, release to snap back to
