@@ -113,12 +113,49 @@ startup and mounts it at `/` via cpp-httplib's static file server if found -
 otherwise it's a no-op (normal dev-mode usage, where Vite's dev server
 handles the frontend instead, is unaffected). This is the mechanism behind
 the packaged macOS releases published by
-`.github/workflows/release-macos.yml`: it builds `laser_daemon` and the
+`.github/workflows/release.yml`: it builds `laser_daemon` and the
 frontend, wraps them into a proper `BeamCommander3.app` bundle (with the
 Homebrew `libusb` dylib bundled + re-signed so it doesn't require Homebrew
 on the target machine), and ships a `.dmg` with a drag-to-Applications
 shortcut. See `packaging/launcher.sh` and `packaging/Info.plist.template`
 for the app bundle's launcher script and metadata.
+
+## Building for Windows
+
+macOS keeps using `build.sh` (raw `clang++`) as shown above. Windows instead
+builds through CMake, using `backend/CMakeLists.txt` (only used for this -
+not needed/used on macOS), which pulls in libera-laser via `add_subdirectory`
+so all its library requirements (libusb, Winsock, etc.) come along
+automatically instead of having to hand-list include/lib paths:
+
+```powershell
+git clone --depth=1 https://github.com/sebleedelisle/libera-laser.git C:/libera-laser
+cd C:/libera-laser
+git submodule update --init --recursive
+cd ../beamcommander3
+
+cmake -S backend -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLIBERA_DIR=C:/libera-laser
+cmake --build build
+```
+
+Needs a Ninja + MSVC environment (e.g. via `ilammy/msvc-dev-cmd` in CI, or a
+"Developer PowerShell for VS" prompt locally). Produces `build/laser_daemon.exe`.
+Windows has no system package manager for libusb, so this uses
+`-DLIBERA_USE_BUNDLED_LIBUSB=ON` internally (set automatically for `WIN32` in
+`backend/CMakeLists.txt`) - libera-laser ships a prebuilt libusb DLL in its
+vendored `helios_dac` submodule
+(`libs/helios_dac/sdk/cpp/libusb_bin/Windows/x64/Release/dll/`), which needs
+to sit next to `laser_daemon.exe` at runtime (the release workflow copies it
+into the package - see `packaging/run_windows.bat` for the launcher).
+
+CoreMIDI (and therefore the optional MIDI/footswitch control layer) is
+macOS-only - `laser_daemon.cpp` already guards this behind `#ifdef __APPLE__`
+and simply prints "MIDI control disabled" on other platforms instead of
+failing to compile; everything else (REST API, WebSocket preview, laser
+output, cues) works the same on Windows.
+
+`.github/workflows/release.yml` builds both platforms in parallel jobs and
+publishes them as two assets on the same GitHub Release.
 
 ## Architecture
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CFBundleExecutable launcher for the BeamCommander3.app bundle (built by
-# .github/workflows/release-macos.yml). Starts the bundled laser_daemon,
+# .github/workflows/release.yml). Starts the bundled laser_daemon,
 # waits for it to come up, then opens the UI in the default browser.
 # Quitting the app (Dock icon > Quit, or Cmd-Q) sends SIGTERM here, which
 # the trap below forwards to the daemon so it doesn't keep running orphaned.

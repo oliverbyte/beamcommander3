@@ -32,11 +32,48 @@ result is one small backend program plus one web page — no openFrameworks
 project, no IDE-specific build system, nothing except a C++ compiler and
 Node.js.
 
+## Installing
+
+Grab the latest build from the [Releases page](../../releases) — no
+compiler, Node.js, or source checkout needed.
+
+### macOS
+
+1. Download the `.dmg` from the latest release.
+2. Open it, drag **BeamCommander3** into **Applications**.
+3. Open it from Applications. It's not notarized (no Apple Developer ID),
+   so the first time macOS will refuse it as "from an unidentified
+   developer" — right-click the app and choose **Open** once to approve it
+   (only needed the first time).
+4. A browser tab opens automatically at `http://localhost:8000` once the
+   backend is ready — that page is the remote control.
+
+### Windows
+
+1. Download the `.zip` from the latest release and extract it anywhere.
+2. Run `run.bat`. It's not code-signed, so SmartScreen may warn on first
+   run — click **More info** → **Run anyway**.
+3. A browser tab opens automatically at `http://localhost:8000`.
+
+### Manual / from source (any OS, or for development)
+
+```sh
+git clone https://github.com/oliverbyte/beamcommander3.git
+cd beamcommander3
+./start.sh
+```
+
+This builds the backend if needed and runs both the backend and a live
+frontend dev server, opening a browser tab automatically. Requires the
+[developer prerequisites](DEVELOPER.md) (a C++ compiler, CMake, Node.js,
+and a built copy of libera-laser) — see DEVELOPER.md for the full setup and
+for how the packaged macOS/Windows builds are put together.
+
 ## Using the show (no coding needed)
 
-1. **Start it**: double-click/run `./start.sh` in a terminal. It opens a
-   browser tab automatically — that page *is* the remote control for your
-   laser show.
+1. **Start it**: use one of the options in ["Installing"](#installing)
+   above. Whichever one you pick, it opens a browser tab automatically —
+   that page *is* the remote control for your laser show.
 2. **Connect your laser**: type its IP address into the "Controller" box in
    the UI and click **Connect** (e.g. an Ether Dream is often
    `192.168.x.x` or a fixed address like `10.10.10.4` — check your laser's

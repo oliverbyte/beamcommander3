@@ -1,5 +1,7 @@
 # Compiled binaries
 backend/laser_daemon
+backend/build/
+backend/*.exe
 
 # Saved cue slots (runtime data, not source)
 backend/cues.json

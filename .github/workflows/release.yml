@@ -1,0 +1,270 @@
+name: Release
+
+# Builds standalone packages for macOS and Windows (each serves the built
+# frontend itself - see DEVELOPER.md's "Standalone / packaged builds"
+# section) and publishes both as assets on a single GitHub Release whenever
+# something is pushed to main.
+#
+# - macOS: a BeamCommander3.app bundle + .dmg (drag-to-Applications), built
+#   with clang++ via backend/build.sh, on macos-14 (Apple Silicon/arm64).
+# - Windows: a portable .zip (laser_daemon.exe + assets + a run.bat
+#   launcher), built with MSVC via CMake (backend/CMakeLists.txt - only used
+#   for this job, macOS keeps using build.sh), on windows-latest (x64).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: echo "version=v$(date -u +%Y.%m.%d)-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+  build-macos:
+    needs: version
+    runs-on: macos-14
+    env:
+      LIBERA_DIR: /tmp/libera-laser
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install build prerequisites
+        run: brew install cmake ninja libusb pkg-config
+
+      - name: Resolve libera-laser commit SHA (for cache key)
+        id: libera-sha
+        run: |
+          sha="$(git ls-remote https://github.com/sebleedelisle/libera-laser.git HEAD | cut -f1)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Cache libera-laser build
+        id: libera-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LIBERA_DIR }}
+          key: libera-laser-macos-14-${{ steps.libera-sha.outputs.sha }}
+
+      - name: Build libera-laser
+        if: steps.libera-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf "$LIBERA_DIR"
+          git clone --depth=1 https://github.com/sebleedelisle/libera-laser.git "$LIBERA_DIR"
+          cd "$LIBERA_DIR"
+          git submodule update --init --recursive
+          cmake --preset release \
+            -DLIBERA_BUILD_EXAMPLES=OFF \
+            -DLIBERA_BUILD_TESTS=OFF \
+            -DLIBERA_BUILD_LASER_TOOL=OFF
+          cmake --build --preset release
+
+      - name: Build backend (laser_daemon)
+        run: cd backend && bash build.sh
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Assemble release package (.app + .dmg)
+        id: package
+        run: |
+          version="${{ needs.version.outputs.version }}"
+          name="beamcommander3-macos-arm64-${version}"
+          app="/tmp/BeamCommander3.app"
+          rm -rf "$app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
+
+          sed "s/__VERSION__/${version}/g" packaging/Info.plist.template > "$app/Contents/Info.plist"
+          cp packaging/launcher.sh "$app/Contents/MacOS/BeamCommander3"
+          cp packaging/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+          cp backend/laser_daemon "$app/Contents/MacOS/laser_daemon"
+          cp backend/midi_map.json "$app/Contents/Resources/"
+          cp -r frontend/dist "$app/Contents/Resources/frontend_dist"
+          chmod +x "$app/Contents/MacOS/BeamCommander3" "$app/Contents/MacOS/laser_daemon"
+
+          # laser_daemon dynamically links Homebrew's libusb, which only
+          # exists on the runner (e.g. /opt/homebrew/opt/libusb/...) - bundle
+          # the dylib into Contents/Frameworks (standard app-bundle layout)
+          # and repoint the load command at it via @executable_path, so the
+          # release doesn't require Homebrew or libusb pre-installed.
+          libusb_path="$(otool -L "$app/Contents/MacOS/laser_daemon" | awk '/libusb.*\.dylib/{print $1; exit}')"
+          if [[ -n "$libusb_path" ]]; then
+            cp "$libusb_path" "$app/Contents/Frameworks/libusb-1.0.0.dylib"
+            chmod 644 "$app/Contents/Frameworks/libusb-1.0.0.dylib"
+            install_name_tool -change "$libusb_path" "@executable_path/../Frameworks/libusb-1.0.0.dylib" "$app/Contents/MacOS/laser_daemon"
+          fi
+
+          # Ad-hoc sign the whole bundle (recursively - covers the bundled
+          # dylib and laser_daemon too). Re-signing the copied dylib is what
+          # actually matters here: Homebrew's original signature doesn't
+          # survive being re-hosted inside our (differently-identified) app
+          # bundle once quarantined after download, which macOS's library
+          # validation policy then refuses to load ("library load disallowed
+          # by system policy") unless every nested binary is re-signed
+          # consistently with the app itself.
+          codesign --deep --force -s - "$app"
+          codesign --verify --deep --strict "$app"
+
+          # Package as a .dmg with a drag-to-Applications shortcut, like a
+          # normal downloadable Mac app - not just a bare zip of files.
+          dmg_stage="/tmp/dmg-stage"
+          rm -rf "$dmg_stage"; mkdir -p "$dmg_stage"
+          cp -r "$app" "$dmg_stage/"
+          ln -s /Applications "$dmg_stage/Applications"
+          dmg_path="/tmp/${name}.dmg"
+          hdiutil create -volname "BeamCommander3" -srcfolder "$dmg_stage" -ov -format UDZO "$dmg_path"
+
+          echo "dmg_path=$dmg_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: ${{ steps.package.outputs.dmg_path }}
+
+  build-windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Resolve libera-laser commit SHA (for cache key)
+        id: libera-sha
+        run: |
+          $line = git ls-remote https://github.com/sebleedelisle/libera-laser.git HEAD
+          $sha = ($line -split "\s+")[0]
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+
+      - name: Cache libera-laser checkout
+        id: libera-cache
+        uses: actions/cache@v4
+        with:
+          path: C:/libera-laser
+          key: libera-laser-windows-${{ steps.libera-sha.outputs.sha }}
+
+      - name: Clone libera-laser
+        if: steps.libera-cache.outputs.cache-hit != 'true'
+        run: |
+          Remove-Item -Recurse -Force C:/libera-laser -ErrorAction SilentlyContinue
+          git clone --depth=1 https://github.com/sebleedelisle/libera-laser.git C:/libera-laser
+          cd C:/libera-laser
+          git submodule update --init --recursive
+
+      - name: Configure backend (CMake + Ninja)
+        run: cmake -S backend -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLIBERA_DIR=C:/libera-laser
+
+      - name: Build backend (laser_daemon.exe)
+        run: cmake --build build
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Assemble release package (.zip)
+        id: package
+        run: |
+          $version = "${{ needs.version.outputs.version }}"
+          $name = "beamcommander3-windows-x64-$version"
+          $stage = Join-Path $env:RUNNER_TEMP $name
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          Copy-Item build/laser_daemon.exe $stage/
+          Copy-Item backend/midi_map.json $stage/
+          Copy-Item -Recurse frontend/dist $stage/frontend_dist
+          Copy-Item packaging/run_windows.bat $stage/run.bat
+
+          # laser_daemon.exe dynamically loads libusb, bundled as a prebuilt
+          # DLL in libera-laser's vendored helios_dac submodule (there's no
+          # Windows equivalent of Homebrew to install it system-wide) - ship
+          # it alongside the exe so the release is standalone.
+          $dllDir = "C:/libera-laser/libs/helios_dac/sdk/cpp/libusb_bin/Windows/x64/Release/dll"
+          Copy-Item "$dllDir/*.dll" $stage/
+
+          $zipPath = Join-Path $env:RUNNER_TEMP "$name.zip"
+          Compress-Archive -Path $stage -DestinationPath $zipPath -Force
+          "zip_path=$zipPath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: ${{ steps.package.outputs.zip_path }}
+
+  release:
+    needs: [version, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-release
+          path: artifacts/macos
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: artifacts/windows
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.version }}
+          name: ${{ needs.version.outputs.version }}
+          body: |
+            Automated build from `${{ github.sha }}`.
+
+            **macOS (Apple Silicon)**: download the `.dmg`, drag
+            **BeamCommander3** into **Applications**, then open it from
+            there - it starts the backend and opens http://localhost:8000 in
+            your browser automatically. Not notarized (no Apple Developer
+            ID), so on first launch macOS will refuse to open it as "from an
+            unidentified developer" - right-click the app in Applications
+            and choose **Open** once to approve it (only needed the first
+            time).
+
+            **Windows (x64)**: download the `.zip`, extract it anywhere, and
+            run `run.bat` - it starts `laser_daemon.exe` and opens
+            http://localhost:8000 in your browser automatically. Not
+            code-signed, so SmartScreen may warn on first run - click "More
+            info" > "Run anyway".
+
+            Both packages bundle the built frontend and all runtime
+            dependencies - no Node.js, Xcode, or Visual Studio required to
+            run them.
+          files: |
+            artifacts/macos/*.dmg
+            artifacts/windows/*.zip
