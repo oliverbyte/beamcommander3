@@ -96,7 +96,11 @@ configured), this subsystem simply does nothing.
    scanning every few seconds for hot-plugged devices, no restart needed).
    A footswitch plugged into the APC40's 1/4" jack works too — it can send
    either a note or a CC (commonly CC64, the standard MIDI "sustain pedal"
-   number); both are supported for momentary actions like `flash`.
+   number); both are supported for momentary actions like `flash`. Most
+   footswitches are wired normally-closed, so they report the *opposite* of
+   what you'd expect (high while up, low while pressed) — the shipped CC64
+   binding has `invert: true` set to compensate; flip it if your pedal is
+   normally-open instead.
 2. Bindings live in `backend/midi_map.json`, a plain JSON array of
    `{ "type": "note"|"cc", "channel": 0-15|-1, "number": 0-127, "action": "..." }`
    objects (`channel: -1` matches any channel). The shipped default is
