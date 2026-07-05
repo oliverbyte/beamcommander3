@@ -81,6 +81,20 @@ static std::atomic<bool> G_running{true};
 // Runtime animation clock (seconds since start, never locked — only laser thread writes)
 static double G_time = 0.0;
 
+// Phase accumulators for animated parameters (move/rotation/wave/rainbow).
+// These integrate `speed * dt` every tick instead of computing `speed *
+// G_time` fresh each frame - the latter makes the phase jump discontinuously
+// the instant a speed changes (since G_time has already accumulated a large
+// elapsed value, multiplying it by a *new* speed lands on a completely
+// different point in the cycle). Integrating incrementally means changing a
+// speed only changes the rate of change from that moment on - the current
+// position/rotation/wave/hue is preserved and the animation stays smooth.
+// Never locked - only laser_thread writes and reads these (single-threaded).
+static double G_move_phase     = 0.0; // radians
+static double G_rotation_phase = 0.0; // radians
+static double G_wave_phase     = 0.0; // radians
+static double G_rainbow_phase  = 0.0; // cycles (0..1, wraps via fmod)
+
 // ── Shape generators ───────────────────────────────────────────────────────────
 struct Pt { float x, y; };
 
@@ -114,7 +128,7 @@ static std::vector<Pt> gen_base_shape(const LaserState& s) {
             for (int i=0;i<side;++i) { float t=(float)i/side;
                 pts.push_back({cx[e]+t*(cx[nx]-cx[e]),cy[e]+t*(cy[nx]-cy[e])}); } }
     } else if (s.shape == "wave") {
-        float phase = (float)(s.wave_speed * G_time * 2 * pi);
+        float phase = (float)G_wave_phase;
         for (int i=0;i<n;++i) {
             float t=(float)i/(n-1)*tau;
             pts.push_back({(t/tau*2.0f-1.0f)*r, r*s.wave_amplitude*std::sin(s.wave_frequency*t+phase)});
@@ -137,8 +151,7 @@ static void rotate_pts(std::vector<Pt>& pts, float angle) {
 
 static Pt calc_movement(const LaserState& s) {
     if (s.move_mode == "none") return {0.0f,0.0f};
-    const float pi = std::acos(-1.0f);
-    float phase = (float)(s.move_speed * G_time * 2.0 * pi);
+    float phase = (float)G_move_phase;
     float amp   = s.move_size * 0.6f; // fraction of canvas
     if (s.move_mode=="circle")  return {amp*std::cos(phase), amp*std::sin(phase)};
     if (s.move_mode=="pan")     return {amp*std::sin(phase), 0.0f};
@@ -166,7 +179,7 @@ static core::Frame make_frame(const LaserState& s) {
 
     // Rotation
     if (s.rotation_speed != 0.0f) {
-        rotate_pts(base, (float)(s.rotation_speed * G_time * 2 * std::acos(-1.0f)));
+        rotate_pts(base, (float)G_rotation_phase);
     }
 
     // Position + movement
@@ -188,7 +201,7 @@ static core::Frame make_frame(const LaserState& s) {
     }
 
     // Rainbow phase
-    float rainbow_phase = (float)std::fmod(s.rainbow_speed * G_time, 1.0);
+    float rainbow_phase = (float)std::fmod(G_rainbow_phase, 1.0);
 
     core::Frame frame;
     int n = (int)base.size();
@@ -292,7 +305,8 @@ static void laser_thread() {
     while (G_running) {
         // Advance animation clock
         auto now_tp = Clock::now();
-        G_time += std::chrono::duration<double>(now_tp - last_tick).count();
+        double dt = std::chrono::duration<double>(now_tp - last_tick).count();
+        G_time += dt;
         last_tick = now_tp;
 
         std::string ip; float rate;
@@ -300,6 +314,19 @@ static void laser_thread() {
             std::lock_guard<std::mutex> lk(G_mtx);
             ip   = G.target_ip;
             rate = G.rate_kpps;
+
+            // Integrate each animated parameter's phase by its *current*
+            // speed - see the G_move_phase/etc. comment above for why this
+            // (rather than speed*G_time) is what keeps things smooth across
+            // a speed change instead of jumping/resetting.
+            const double tau = 2.0 * std::acos(-1.0);
+            G_move_phase     = std::fmod(G_move_phase     + G.move_speed     * dt * tau, tau);
+            // Negated here (not at every rotation_speed setter) so the
+            // reversed direction applies no matter which API set the speed
+            // (REST bulk update, /laser/rotation/speed/<v>, or MIDI).
+            G_rotation_phase = std::fmod(G_rotation_phase - G.rotation_speed * dt * tau, tau);
+            G_wave_phase     = std::fmod(G_wave_phase     + G.wave_speed     * dt * tau, tau);
+            G_rainbow_phase  = std::fmod(G_rainbow_phase  + G.rainbow_speed  * dt, 1.0);
         }
 
         // Tear down the hardware connection if disarmed/disconnected, but
@@ -658,6 +685,18 @@ static bool       g_cue_momentary_active = false;
 static bool       g_motion_held = false;        // for "motion_hold" (freeze movement while held)
 static float      g_pre_motion_speed = 0.0f;
 
+// Shared flash press/release - used by both the MIDI dispatcher and the
+// /flash/<0|1> HTTP route, so a flash triggered from either input behaves
+// identically: full brightness only while held, restored on release.
+static void do_flash_press() {
+    std::lock_guard<std::mutex> lk(G_mtx);
+    if (g_pre_flash_intensity < 0.0f) { g_pre_flash_intensity = G.intensity; G.intensity = 1.0f; }
+}
+static void do_flash_release() {
+    std::lock_guard<std::mutex> lk(G_mtx);
+    if (g_pre_flash_intensity >= 0.0f) { G.intensity = g_pre_flash_intensity; g_pre_flash_intensity = -1.0f; }
+}
+
 // Applies one note-triggered (button) action. `isPress`/`isRelease`
 // describe note-on/note-off.
 static void midi_apply_note_action(const std::string& action, bool isPress, bool isRelease) {
@@ -690,7 +729,14 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         else if (c=="magenta") { cr=1.0f; cg=0.0f;  cb=1.0f; }
         else if (c=="white")   { cr=1.0f; cg=1.0f;  cb=1.0f; }
         else return;
-        std::lock_guard<std::mutex> lk(G_mtx); G.r=cr; G.g=cg; G.b=cb;
+        std::lock_guard<std::mutex> lk(G_mtx);
+        G.r=cr; G.g=cg; G.b=cb;
+        // A plain color-select button is mutually exclusive with the
+        // rainbow preset (matches the original mapping's "colors" exclusive
+        // group, which included both) - picking a solid color should always
+        // show that color immediately, not stay hidden behind a still-active
+        // rainbow blend.
+        G.rainbow_amount = 0.0f;
         return;
     }
     if (action=="blackout_toggle") {
@@ -723,13 +769,8 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         return;
     }
     if (action=="flash") {
-        if (isPress) {
-            std::lock_guard<std::mutex> lk(G_mtx);
-            if (g_pre_flash_intensity < 0.0f) { g_pre_flash_intensity = G.intensity; G.intensity = 1.0f; }
-        } else if (isRelease) {
-            std::lock_guard<std::mutex> lk(G_mtx);
-            if (g_pre_flash_intensity >= 0.0f) { G.intensity = g_pre_flash_intensity; g_pre_flash_intensity = -1.0f; }
-        }
+        if (isPress) do_flash_press();
+        else if (isRelease) do_flash_release();
         return;
     }
     if (action=="cue_save_arm") {
@@ -1004,6 +1045,15 @@ int main(int argc, char* argv[]) {
         res.set_content(state_to_json(),"application/json");
     });
 
+    // ── POST /flash/<0|1> — momentary full brightness while held ──────────────
+    // 1 = press (force full brightness, remembering the prior value), 0 =
+    // release (restore it). Shares do_flash_press/release with the MIDI
+    // dispatcher so a flash button behaves identically from either input.
+    svr.Post(R"(/flash/([01]))",[](const httplib::Request& req,httplib::Response& res){
+        if (req.matches[1]=="1") do_flash_press(); else do_flash_release();
+        res.set_content(state_to_json(),"application/json");
+    });
+
     // ── POST /api/reset — restore all show params to defaults ─────────────────
     // Preserves the current controller connection (target_ip / armed state)
     // so resetting the show doesn't drop the laser link.
@@ -1084,7 +1134,7 @@ int main(int argc, char* argv[]) {
               << "  POST /laser/position/<x>/<y>  /laser/rotation/speed/<v>\n"
               << "  POST /move/mode/<none|circle|pan|tilt|eight|random>\n"
               << "  POST /laser/rainbow/amount/<v>  /laser/rainbow/speed/<v>\n"
-              << "  POST /blackout/<0|1>  /laser/connect/<ip>  /laser/disconnect\n"
+              << "  POST /blackout/<0|1>  /flash/<0|1>  /laser/connect/<ip>  /laser/disconnect\n"
               << "  WS   /ws/points\n"
               << "  MIDI: optional, see backend/midi_map.json (Akai APC40 mkII or any USB controller)\n";
 

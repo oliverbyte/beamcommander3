@@ -16,6 +16,13 @@
     <button class="blackout-btn" :class="{ active: laserState.blackout }" @click="push({ blackout: !laserState.blackout })">
       {{ laserState.blackout ? '◼ BLACKOUT' : '◻ Blackout' }}
     </button>
+    <button
+      class="flash-btn"
+      @pointerdown="onFlashDown"
+      @pointerup="onFlashUp"
+      @pointerleave="onFlashUp"
+      @pointercancel="onFlashUp"
+    >⚡ Flash (hold)</button>
     <button class="reset-btn" @click="reset">↺ Reset to defaults</button>
 
     <hr />
@@ -93,13 +100,13 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { laserState, updateState, resetState, connectLaser, disconnectLaser, markLocalChange } from '../composables/useLaserSocket.js'
+import { laserState, updateState, resetState, connectLaser, disconnectLaser, markLocalChange, flashPress, flashRelease } from '../composables/useLaserSocket.js'
 
 const emit = defineEmits(['update:persistence'])
 
 const SHAPES = ['circle','line','triangle','square','wave','staticwave']
 const MOVES  = ['none','circle','pan','tilt','eight','random']
-const persistenceMs = ref(25)
+const persistenceMs = ref(5)
 const ipInput = ref('10.10.10.4')
 const collapsed = ref(false)
 
@@ -110,6 +117,21 @@ const hexColor = computed(() => {
 function onColor(e) {
   const h = e.target.value
   push({ r: parseInt(h.slice(1,3),16)/255, g: parseInt(h.slice(3,5),16)/255, b: parseInt(h.slice(5,7),16)/255 })
+}
+
+// pointerdown/up (not click) so the flash lasts exactly as long as the
+// button is actually held - pointerleave/cancel too, so dragging off the
+// button (or losing the pointer) still releases it instead of latching on.
+let flashHeld = false
+function onFlashDown() {
+  if (flashHeld) return
+  flashHeld = true
+  flashPress().catch(console.error)
+}
+function onFlashUp() {
+  if (!flashHeld) return
+  flashHeld = false
+  flashRelease().catch(console.error)
 }
 function fmt(v) { return typeof v === 'boolean' ? String(v) : Number(v).toFixed(2) }
 function onPersist(v) { persistenceMs.value = v; emit('update:persistence', v) }
@@ -165,6 +187,8 @@ button.active { background:rgba(72,224,122,0.18); border-color:#48e07a; color:#4
 .btn-stop { border-color:rgba(255,100,100,0.5); color:#ff8080; }
 .blackout-btn { width:100%; margin-top:6px; padding:6px; font-size:12px; letter-spacing:1px; }
 .blackout-btn.active { background:rgba(255,50,50,0.28); border-color:#ff4040; color:#ff8080; }
+.flash-btn { width:100%; margin-top:6px; padding:6px; font-size:12px; letter-spacing:1px; user-select:none; touch-action:none; }
+.flash-btn:active { background:rgba(255,220,80,0.3); border-color:#ffdc50; color:#ffe98a; }
 .reset-btn { width:100%; margin-top:6px; padding:5px; font-size:11px; }
 hr { border:none; border-top:1px solid rgba(255,255,255,0.1); margin:8px 0; }
 .status-row { display:flex; align-items:center; gap:6px; font-size:11px; margin-bottom:3px; }

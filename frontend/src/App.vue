@@ -5,7 +5,7 @@ import ControlPanel from './components/ControlPanel.vue'
 import CuePanel from './components/CuePanel.vue'
 import { connectSocket, fetchState, startStatusPolling } from './composables/useLaserSocket.js'
 
-const persistenceMs = ref(25)
+const persistenceMs = ref(5)
 
 onMounted(() => {
   connectSocket()

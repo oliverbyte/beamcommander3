@@ -9,7 +9,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { laserState, onPoints } from '../composables/useLaserSocket.js'
 
 const props = defineProps({
-  persistenceMs: { type: Number, default: 25 },
+  persistenceMs: { type: Number, default: 5 },
 })
 
 const canvasEl = ref(null)

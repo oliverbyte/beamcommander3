@@ -148,6 +148,19 @@ export async function disconnectLaser() {
   applyState(await laser('/disconnect', { method: 'POST' }))
 }
 
+// Momentary flash: full brightness only while held, restored on release -
+// mirrors the MIDI "flash" button so it behaves identically from either
+// input. Not routed through /api/state since it's a transient action, not
+// a persisted field.
+export async function flashPress() {
+  markLocalChange()
+  applyState(await (await fetch('/flash/1', { method: 'POST' })).json())
+}
+export async function flashRelease() {
+  markLocalChange()
+  applyState(await (await fetch('/flash/0', { method: 'POST' })).json())
+}
+
 // ── Cue save/recall ─────────────────────────────────────────────────────────────
 
 function applyCues(data) {
