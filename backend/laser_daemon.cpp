@@ -152,8 +152,12 @@ static std::atomic<bool> g_flash_active{false};
 // setting it is LTP (last value counts) and keeps updating independently
 // of the gate, so whatever the fader was last set to (even while the gate
 // was closed) takes effect immediately the next time the pedal is pressed.
-// Read from laser_thread without holding G_mtx (same reasoning as
-// g_flash_active).
+// LTP goes both ways: touching the intensity fader directly (MIDI CC,
+// REST /api/state, /laser/brightness) also opens the gate immediately, so
+// brightness shows right away even if the pedal was never pressed - the
+// footswitch only needs to be used at all if you actually want it to be
+// able to force things dark on release. Read from laser_thread without
+// holding G_mtx (same reasoning as g_flash_active).
 static std::atomic<bool> g_brightness_gate_open{false};
 
 static float smooth_toward(float cur, float target, float dt, float tau) {
@@ -843,7 +847,7 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     if (action=="r")              { std::lock_guard<std::mutex> lk(G_mtx); G.r=std::clamp(out,0.0f,1.0f); return; }
     if (action=="g")              { std::lock_guard<std::mutex> lk(G_mtx); G.g=std::clamp(out,0.0f,1.0f); return; }
     if (action=="b")              { std::lock_guard<std::mutex> lk(G_mtx); G.b=std::clamp(out,0.0f,1.0f); return; }
-    if (action=="intensity")      { std::lock_guard<std::mutex> lk(G_mtx); G.intensity=std::clamp(out,0.0f,1.0f); return; }
+    if (action=="intensity")      { std::lock_guard<std::mutex> lk(G_mtx); G.intensity=std::clamp(out,0.0f,1.0f); g_brightness_gate_open.store(true); return; }
     if (action=="shape_scale")    { std::lock_guard<std::mutex> lk(G_mtx); G.shape_scale=std::clamp(out,-1.0f,1.0f); return; }
     if (action=="rotation_speed") { std::lock_guard<std::mutex> lk(G_mtx); G.rotation_speed=out; return; }
     if (action=="pos_x")          { std::lock_guard<std::mutex> lk(G_mtx); G.pos_x=std::clamp(out,-1.0f,1.0f); return; }
@@ -1196,6 +1200,11 @@ int main(int argc, char* argv[]) {
         APPLY_F("radius",radius)  APPLY_CLAMP("radius",radius,0,1)
         APPLY_F("rate_kpps",rate_kpps)  APPLY_CLAMP("rate_kpps",rate_kpps,1,100)
         APPLY_F("intensity",intensity)  APPLY_CLAMP("intensity",intensity,0,1)
+        // Directly setting the brightness fader (any source: UI, REST, MIDI)
+        // implicitly opens the footswitch gate too, so it's visible right
+        // away without needing the pedal held - see g_brightness_gate_open's
+        // comment for the full footswitch/fader interaction.
+        if (json_float(req.body,"intensity",-9999) != -9999) g_brightness_gate_open.store(true);
         APPLY_F("r",r) APPLY_CLAMP("r",r,0,1)
         APPLY_F("g",g) APPLY_CLAMP("g",g,0,1)
         APPLY_F("b",b) APPLY_CLAMP("b",b,0,1)
@@ -1232,7 +1241,9 @@ int main(int argc, char* argv[]) {
     svr.Post(R"(/laser/brightness/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
         try{float v=std::stof(std::string(req.matches[1]));
             std::lock_guard<std::mutex> lk(G_mtx);
-            G.intensity=std::clamp(v>1.0f?v/255.0f:v,0.0f,1.0f);}catch(...){}
+            G.intensity=std::clamp(v>1.0f?v/255.0f:v,0.0f,1.0f);
+            g_brightness_gate_open.store(true); // touching the fader directly opens the gate too
+            }catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
 
