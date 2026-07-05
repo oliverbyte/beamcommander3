@@ -73,6 +73,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /api/cue/<n>/save` | Snapshot current show params into slot `n` |
 | `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the current connection) |
 | `POST /api/cue/<n>/clear` | Delete slot `n` |
+| `POST /api/cue/<from>/move/<to>` | Move slot `from`'s cue into slot `to` (overwriting it), clearing `from`. 404 if `from` is empty or `from == to` |
 | `WS /ws/points` | Live preview stream, `{"pts":[[x,y,r,g,b],...]}` at ~30fps |
 
 `POST /api/state` accepts a JSON body with any of: `shape`, `radius`, `points`,

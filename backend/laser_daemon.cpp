@@ -675,6 +675,20 @@ static void do_cue_clear(int n) {
     { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues.erase(n); }
     save_cues_to_disk();
 }
+// Moves a saved cue from slot `from` to slot `to`, overwriting whatever was
+// in `to` (if anything) and clearing `from`. No-op (returns false) if
+// `from` has no saved cue, either number is out of range, or from == to.
+static bool do_cue_move(int from, int to) {
+    if (from < 1 || from > MAX_CUES || to < 1 || to > MAX_CUES || from == to) return false;
+    bool found = false; LaserState snap;
+    { std::lock_guard<std::mutex> lk(G_cues_mtx);
+      auto it = G_cues.find(from);
+      if (it != G_cues.end()) { snap = it->second; found = true; } }
+    if (!found) return false;
+    { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[to] = snap; G_cues.erase(from); }
+    save_cues_to_disk();
+    return true;
+}
 
 // ── MIDI control (optional) ─────────────────────────────────────────────────
 // Lets an external MIDI controller (e.g. an Akai APC40 mkII connected via
@@ -1352,6 +1366,15 @@ int main(int argc, char* argv[]) {
         res.set_content("{\"cleared\":"+std::to_string(n)+"}","application/json");
     });
 
+    // ── POST /api/cue/<from>/move/<to> — relocate a saved cue, overwriting <to> ─
+    svr.Post(R"(/api/cue/(\d+)/move/(\d+))",[](const httplib::Request& req,httplib::Response& res){
+        int from=std::stoi(std::string(req.matches[1]));
+        int to  =std::stoi(std::string(req.matches[2]));
+        if(from<1||from>MAX_CUES||to<1||to>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
+        if(!do_cue_move(from,to)){res.status=404;res.set_content("{\"error\":\"empty source cue, or from == to\"}","application/json");return;}
+        res.set_content("{\"moved\":"+std::to_string(from)+",\"to\":"+std::to_string(to)+"}","application/json");
+    });
+
     // ── WebSocket /ws/points ───────────────────────────────────────────────────
     svr.WebSocket("/ws/points",[](const httplib::Request&,httplib::ws::WebSocket& ws){
         {std::lock_guard<std::mutex> lk(G_ws_mtx);G_ws_clients.insert(&ws);}
@@ -1362,7 +1385,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "[laser_daemon] Listening on :" << http_port << "\n"
               << "  GET/POST /api/state   POST /api/reset\n"
-              << "  GET /api/cues   POST /api/cue/<1-" << MAX_CUES << ">/save|recall|clear\n"
+              << "  GET /api/cues   POST /api/cue/<1-" << MAX_CUES << ">/save|recall|clear|move/<n>\n"
               << "  POST /laser/shape/<circle|line|triangle|square|wave|staticwave>\n"
               << "  POST /laser/brightness/<0-1>  /laser/color/<r>/<g>/<b>\n"
               << "  POST /laser/position/<x>/<y>  /laser/rotation/speed/<v>\n"
