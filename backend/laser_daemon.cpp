@@ -142,10 +142,12 @@ static std::atomic<bool> g_flash_active{false};
 
 // Master-brightness gate for a footswitch wired as a "hold to show light"
 // pedal (CC64, the standard MIDI sustain-pedal number): while held/open,
-// hardware output renders normally; while released/closed (including at
-// startup, before the pedal has ever been touched), the real laser output
-// is forced dark - matching `blackout`'s hardware-only scope (the preview
-// is never affected, see laser_thread()'s hardware-send step). Deliberately
+// output (both the browser preview *and* hardware) renders normally; while
+// released/closed (including at startup, before the pedal has ever been
+// touched), output is forced dark - baked directly into make_frame()'s
+// `bri` computation so preview and hardware always show it together (per
+// explicit request, unlike `blackout` which stays hardware-only so the
+// preview keeps working while blacked out on the real beam). Deliberately
 // does NOT touch LaserState.intensity itself - the fader/knob/UI/REST
 // setting it is LTP (last value counts) and keeps updating independently
 // of the gate, so whatever the fader was last set to (even while the gate
@@ -323,7 +325,14 @@ static core::Frame make_frame(const LaserState& s) {
             hsv_to_rgb(hue, 1.0f, 1.0f, fr, fg, fb);
         }
 
-        float bri = frame_blank ? 0.0f : s.intensity;
+        // Footswitch master-brightness gate: applied to the shared frame
+        // (so the preview shows it too, per explicit request - unlike
+        // `blackout`, which stays hardware-only) - pedal up (closed,
+        // including before it's ever been pressed) forces 0 regardless of
+        // s.intensity; pedal held renders the fader's current value
+        // normally. Doesn't touch s.intensity itself, so the fader keeps
+        // whatever it was last set to (LTP) even while the gate is closed.
+        float bri = (frame_blank || !g_brightness_gate_open.load()) ? 0.0f : s.intensity;
         frame.points.emplace_back(core::LaserPoint{
             mirror_sign * (base[i].x + ox),
             base[i].y + oy,
@@ -373,6 +382,7 @@ static std::string state_to_json() {
        << "\"blackout\":"      << (G.blackout?"true":"false") << ","
        << "\"dot_amount\":"    << G.dot_amount     << ","
        << "\"flicker_hz\":"    << G.flicker_hz     << ","
+       << "\"brightness_gate_open\":" << (g_brightness_gate_open.load()?"true":"false") << ","
        << "\"armed\":"         << (G_armed.load()?"true":"false") << ","
        << "\"ip\":\""          << G.target_ip      << "\""
        << "}";
@@ -494,14 +504,15 @@ static void laser_thread() {
         }
 
         if (hardwareReady) {
-            // Blackout and the footswitch brightness gate both only ever
-            // suppress the *real* laser output, never the browser preview
-            // (which already got the true, un-gated `frame` above) - so a
-            // blanked copy is what actually goes to hardware, keeping the
-            // same point positions (safety-relevant for some controllers)
-            // but zeroing every channel's color. The gate defaults closed
-            // (pedal not pressed) until the footswitch says otherwise.
-            if (snap.blackout || !g_brightness_gate_open.load()) {
+            // Blackout only ever suppresses the *real* laser output, never
+            // the browser preview (which already got the true-color `frame`
+            // above) - so a blanked copy is what actually goes to hardware,
+            // keeping the same point positions (safety-relevant for some
+            // controllers) but zeroing every channel's color. The
+            // footswitch brightness gate is *not* handled here - it's
+            // baked into `frame` itself (see make_frame()'s `bri`
+            // computation) so both preview and hardware see it together.
+            if (snap.blackout) {
                 core::Frame blanked = frame;
                 for (auto& p : blanked.points) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
                 ctrl->sendFrame(std::move(blanked));
