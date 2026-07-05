@@ -1,0 +1,107 @@
+name: Release (macOS)
+
+# Builds a standalone macOS package (laser_daemon + the built frontend,
+# served statically by the daemon itself - see DEVELOPER.md's "Standalone /
+# packaged builds" section) and publishes it as a GitHub Release whenever
+# something is pushed to main.
+#
+# Runner: macos-14 is Apple Silicon (arm64). If you need an Intel build too,
+# add another job with `runs-on: macos-13` and repeat the same steps under a
+# different artifact/asset name - kept to one architecture for now to keep
+# this workflow simple.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-macos
+  cancel-in-progress: false
+
+env:
+  LIBERA_DIR: /tmp/libera-laser
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install build prerequisites
+        run: brew install cmake ninja libusb pkg-config
+
+      - name: Resolve libera-laser commit SHA (for cache key)
+        id: libera-sha
+        run: |
+          sha="$(git ls-remote https://github.com/sebleedelisle/libera-laser.git HEAD | cut -f1)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Cache libera-laser build
+        id: libera-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LIBERA_DIR }}
+          key: libera-laser-macos-14-${{ steps.libera-sha.outputs.sha }}
+
+      - name: Build libera-laser
+        if: steps.libera-cache.outputs.cache-hit != 'true'
+        run: |
+          rm -rf "$LIBERA_DIR"
+          git clone --depth=1 https://github.com/sebleedelisle/libera-laser.git "$LIBERA_DIR"
+          cd "$LIBERA_DIR"
+          git submodule update --init --recursive
+          cmake --preset release \
+            -DLIBERA_BUILD_EXAMPLES=OFF \
+            -DLIBERA_BUILD_TESTS=OFF \
+            -DLIBERA_BUILD_LASER_TOOL=OFF
+          cmake --build --preset release
+
+      - name: Build backend (laser_daemon)
+        run: cd backend && bash build.sh
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Assemble release package
+        id: package
+        run: |
+          version="v$(date -u +%Y.%m.%d)-${GITHUB_RUN_NUMBER}"
+          name="beamcommander3-macos-arm64-${version}"
+          stage="/tmp/$name"
+          mkdir -p "$stage"
+          cp backend/laser_daemon "$stage/"
+          cp backend/midi_map.json "$stage/"
+          cp -r frontend/dist "$stage/frontend_dist"
+          cp README.md "$stage/"
+          cp packaging/run.sh "$stage/run.sh"
+          chmod +x "$stage/run.sh" "$stage/laser_daemon"
+          (cd /tmp && zip -r -y "$name.zip" "$name")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "zip_path=/tmp/$name.zip" >> "$GITHUB_OUTPUT"
+          echo "zip_name=$name.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.version }}
+          name: ${{ steps.package.outputs.version }}
+          body: |
+            Automated macOS (Apple Silicon) build from `${{ github.sha }}`.
+
+            Download the zip, unzip it, then run `./run.sh` (or `./laser_daemon`
+            directly) and open http://localhost:8000 in your browser. No Node.js
+            or Xcode required at runtime - the frontend is bundled and served by
+            the daemon itself.
+          files: ${{ steps.package.outputs.zip_path }}
