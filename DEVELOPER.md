@@ -95,6 +95,33 @@ cd frontend && npm install && npm run dev -- --port 5173 < /dev/null
 > `< /dev/null` on the Vite command prevents it from suspending waiting for
 > keyboard input when run detached/backgrounded.
 
+## Persistent user data (midi_map.json, cues.json)
+
+`laser_daemon` never reads/writes these two files at whatever relative path
+happens to be current - it always resolves them to a per-OS, per-user
+app-data directory, completely independent of cwd or where the binary/app
+itself lives:
+
+- macOS: `~/Library/Application Support/BeamCommander3/`
+- Windows: `%APPDATA%\BeamCommander3\`
+- Linux: `$XDG_CONFIG_HOME/BeamCommander3/` (or `~/.config/BeamCommander3/`)
+
+It prints this directory on every startup (`[laser_daemon] User data
+directory: ...`), so it's always obvious where settings/cues are actually
+coming from. On first run, if a file doesn't exist yet there, it's seeded
+by copying a same-named default shipped alongside the app (checks next to
+the executable, and - for the macOS `.app` bundle layout specifically,
+where `Contents/MacOS/laser_daemon` and `Contents/Resources/midi_map.json`
+aren't in the same directory - a sibling `Resources/` folder too). `cues.json`
+has no meaningful default, so a fresh install just starts with none.
+
+This replaced an earlier CWD-relative-path approach that had a real bug:
+`start.sh` used to launch `laser_daemon` from the repo root instead of
+`backend/`, which silently disabled MIDI mapping (`"no mapping file...
+MIDI control disabled"`) and could've read/written a stray `cues.json` in
+the wrong directory - with no obvious error. See `exe_dir()`,
+`app_data_dir()`, and `resolve_data_file()` in `laser_daemon.cpp`.
+
 ## Standalone / packaged builds
 
 `laser_daemon` can serve the built frontend itself, so a packaged release

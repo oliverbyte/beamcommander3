@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -26,8 +27,101 @@
 #include <string>
 #include <thread>
 
+// Used only to locate the running executable's own directory (to seed a
+// per-user data file from a same-named default shipped alongside the
+// binary on first run) - see exe_dir() below.
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 using namespace std::chrono_literals;
 using namespace libera;
+
+// ── Persistent per-user data files (midi_map.json, cues.json, ...) ─────────
+// These used to be read/written via plain relative paths, which only work
+// if the daemon happens to be launched with its cwd set to backend/ - a
+// real bug (start.sh once launched it from the repo root instead, which
+// silently disabled MIDI mapping and cue persistence with no obvious
+// error). Instead, always resolve them to a per-OS, per-user app-data
+// directory, completely independent of cwd and of where the app/binary
+// itself lives (so moving, reinstalling, or launching it differently never
+// loses saved cues or the MIDI map again):
+//   macOS:   ~/Library/Application Support/BeamCommander3/
+//   Windows: %APPDATA%\BeamCommander3\
+//   Linux:   $XDG_CONFIG_HOME/BeamCommander3/ (or ~/.config/BeamCommander3/)
+
+// Directory containing the running executable itself (NOT cwd) - used only
+// to find a same-named "seed" default (e.g. the midi_map.json shipped next
+// to the binary in the repo/release package) to copy from on first run.
+static std::string exe_dir() {
+#if defined(__APPLE__)
+    char buf[4096]; uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) != 0) return ".";
+    std::string p(buf);
+#elif defined(_WIN32)
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (n == 0) return ".";
+    std::string p(buf, n);
+#else
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return ".";
+    buf[n] = 0;
+    std::string p(buf);
+#endif
+    auto pos = p.find_last_of("/\\");
+    return pos == std::string::npos ? "." : p.substr(0, pos);
+}
+
+static std::string app_data_dir() {
+    std::string dir;
+#if defined(__APPLE__)
+    const char* home = std::getenv("HOME");
+    dir = std::string(home ? home : ".") + "/Library/Application Support/BeamCommander3";
+#elif defined(_WIN32)
+    const char* appdata = std::getenv("APPDATA");
+    dir = std::string(appdata ? appdata : ".") + "/BeamCommander3";
+#else
+    const char* xdg = std::getenv("XDG_CONFIG_HOME");
+    const char* home = std::getenv("HOME");
+    dir = xdg ? (std::string(xdg) + "/BeamCommander3")
+              : (std::string(home ? home : ".") + "/.config/BeamCommander3");
+#endif
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+
+// Resolves the persistent path for a data file: always
+// <app_data_dir>/<filename>. If it doesn't exist there yet, seeds it by
+// copying a same-named default file shipped alongside the app, if one
+// exists - otherwise the caller just creates it fresh on first save (e.g.
+// cues.json, which has no meaningful default). Checks two candidate seed
+// locations: right next to the executable (dev builds, Windows release
+// package - laser_daemon.exe and midi_map.json sit side by side), and a
+// sibling Resources/ directory (the macOS .app bundle layout, where
+// Contents/MacOS/laser_daemon and Contents/Resources/midi_map.json are
+// NOT in the same directory).
+static std::string resolve_data_file(const std::string& filename) {
+    namespace fs = std::filesystem;
+    std::string target = app_data_dir() + "/" + filename;
+    if (!fs::exists(target)) {
+        std::error_code ec;
+        for (const std::string& seed : {exe_dir() + "/" + filename,
+                                         exe_dir() + "/../Resources/" + filename}) {
+            if (fs::exists(seed)) {
+                fs::copy_file(seed, target, ec);
+                if (!ec) { std::cout << "[data] seeded " << filename << " from " << seed << "\n"; break; }
+            }
+        }
+    }
+    return target;
+}
 
 // ── Laser state — full BeamCommander feature set ───────────────────────────────
 struct LaserState {
@@ -623,7 +717,7 @@ static int json_int(const std::string& b,const std::string& k,int d){ return (in
 static constexpr int MAX_CUES = 32;
 static std::map<int, LaserState> G_cues;
 static std::mutex                G_cues_mtx;
-static const std::string         CUES_FILE = "cues.json";
+static const std::string         CUES_FILE = resolve_data_file("cues.json");
 
 static std::string cue_state_to_json(const LaserState& s) {
     std::ostringstream ss; ss << std::fixed << std::setprecision(4);
@@ -1232,7 +1326,7 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
 // deliver read-proc callbacks). Periodically rescans for newly-connected
 // sources so plugging in the controller after the daemon starts still works.
 static void midi_thread() {
-    load_midi_map("midi_map.json");
+    load_midi_map(resolve_data_file("midi_map.json"));
 
     OSStatus st = MIDIClientCreate(CFSTR("BeamCommander3"), nullptr, nullptr, &g_midi_client);
     if (st != noErr) { std::cout << "[midi] MIDIClientCreate failed (" << st << ")\n"; return; }
@@ -1285,6 +1379,11 @@ int main(int argc, char* argv[]) {
         else if (!strcmp(argv[i],"-h")||!strcmp(argv[i],"--help")){ std::cout<<"Usage: laser_daemon [--port 8000]\n"; return 0; }
     }
     std::signal(SIGINT,on_signal); std::signal(SIGTERM,on_signal);
+
+    // Settings/cues persist here regardless of cwd or where the app is
+    // installed - print it so it's obvious (e.g. in start.sh's terminal
+    // output) where midi_map.json/cues.json actually live.
+    std::cout << "[laser_daemon] User data directory: " << app_data_dir() << "\n";
 
     load_cues_from_disk();
 

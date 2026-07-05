@@ -26,7 +26,12 @@ if [[ ! -x "$DAEMON_BIN" ]] || [[ "$ROOT/backend/laser_daemon.cpp" -nt "$DAEMON_
 fi
 
 # --- Start laser_daemon (HTTP :8000 + WS) ---
-"$DAEMON_BIN" >"$DAEMON_LOG" 2>&1 &
+# Must run with cwd=backend/ - it loads midi_map.json and cues.json via
+# relative paths, so launching it from anywhere else silently breaks both
+# (MIDI falls back to "no mapping file... MIDI control disabled", and cues
+# read/write to a stray cues.json in the wrong directory instead of the
+# real one).
+(cd "$ROOT/backend" && exec "$DAEMON_BIN" >"$DAEMON_LOG" 2>&1) &
 DAEMON_PID=$!
 echo "[start.sh] laser_daemon started (pid $DAEMON_PID) — log: $DAEMON_LOG"
 
