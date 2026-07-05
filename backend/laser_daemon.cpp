@@ -43,12 +43,13 @@ struct LaserState {
     // Color (0..1)
     float r = 0.0f, g = 1.0f, b = 0.314f;
     float intensity       = 1.0f;     // master brightness
-    // Flash release time (ms): 0 = instant restore of the pre-flash color
-    // and brightness (default/legacy), >0 = ported from the original
-    // BeamCommander's flashReleaseMs - on release, brightness fades from
-    // 1.0 down to 0 over this many ms (not back to the pre-flash value;
-    // matches the original's "punch then fade to black" behavior) while
-    // color reverts to the pre-flash value immediately.
+    // Footswitch brightness-gate release fade time (ms): 0 = instant cut
+    // to dark when the gate closes (default/legacy), >0 = fade from 1.0
+    // down to 0 over this many ms instead (see g_gate_level). This is a
+    // *global* daemon setting, not part of the per-cue show state - like
+    // target_ip, it's deliberately excluded from cue_state_to_json/
+    // cue_state_from_json and explicitly preserved across cue recalls in
+    // do_cue_recall(), so switching cues never changes it.
     float flash_release_ms = 0.0f;    // 0..2000
 
     // Position -1..1
@@ -630,7 +631,6 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"points\":"        << s.points        << ","
        << "\"rate_kpps\":"     << s.rate_kpps     << ","
        << "\"intensity\":"     << s.intensity     << ","
-       << "\"flash_release_ms\":" << s.flash_release_ms << ","
        << "\"r\":"             << s.r             << ","
        << "\"g\":"             << s.g             << ","
        << "\"b\":"             << s.b             << ","
@@ -662,7 +662,6 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.points          = json_int(obj,"points",s.points);
     s.rate_kpps       = json_float(obj,"rate_kpps",s.rate_kpps);
     s.intensity       = json_float(obj,"intensity",s.intensity);
-    s.flash_release_ms = json_float(obj,"flash_release_ms",s.flash_release_ms);
     s.r               = json_float(obj,"r",s.r);
     s.g               = json_float(obj,"g",s.g);
     s.b               = json_float(obj,"b",s.b);
@@ -755,7 +754,17 @@ static bool do_cue_recall(int n) {
       auto it = G_cues.find(n);
       if (it != G_cues.end()) { snap = it->second; found = true; } }
     if (!found) return false;
-    { std::lock_guard<std::mutex> lk(G_mtx); std::string ip = G.target_ip; G = snap; G.target_ip = ip; }
+    {
+        std::lock_guard<std::mutex> lk(G_mtx);
+        std::string ip = G.target_ip;
+        // flash_release_ms is a global daemon setting, not part of the
+        // per-cue show state - preserve whatever it's currently set to
+        // across the recall, same treatment as target_ip.
+        float flash_release_ms = G.flash_release_ms;
+        G = snap;
+        G.target_ip = ip;
+        G.flash_release_ms = flash_release_ms;
+    }
     // Restore the rotation angle the cue was saved at (see do_cue_save).
     G_rotation_phase.store(snap.rotation_phase);
     return true;

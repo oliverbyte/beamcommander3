@@ -73,7 +73,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /laser/disconnect` | Disarm and disconnect |
 | `GET /api/cues` | List all populated cue slots (1-32) |
 | `POST /api/cue/<n>/save` | Snapshot current show params into slot `n` |
-| `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the current connection) |
+| `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the current connection and the global `flash_release_ms` setting - see below) |
 | `POST /api/cue/<n>/clear` | Delete slot `n` |
 | `POST /api/cue/<from>/move/<to>` | Move slot `from`'s cue into slot `to` (overwriting it), clearing `from`. 404 if `from` is empty or `from == to` |
 | `WS /ws/points` | Live preview stream, `{"pts":[[x,y,r,g,b],...]}` at ~30fps |
@@ -83,6 +83,11 @@ All parameter changes take effect on the next frame — nothing restarts.
 `pos_x`, `pos_y`, `rotation_speed`, `mirror_x`, `move_mode`, `move_speed`,
 `move_size`, `wave_frequency`, `wave_amplitude`, `wave_speed`, `rainbow_amount`,
 `rainbow_speed`, `blackout`, `dot_amount`, `flicker_hz`, `ip`.
+
+`flash_release_ms` (like `ip`/the controller connection) is a *global* daemon
+setting, not part of a cue's show state: saving a cue never captures it and
+recalling one never changes it, no matter what it was set to when the cue
+was saved.
 
 ## Multi-client sync
 
