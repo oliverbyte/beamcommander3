@@ -49,6 +49,13 @@ struct LaserState {
 
     // Rotation
     float rotation_speed  = 0.0f;     // rotations/sec
+    // Current rotation angle (radians), used *only* as cue save/recall
+    // payload - see do_cue_save/do_cue_recall. Not part of the live
+    // /api/state contract (deliberately excluded from state_to_json and
+    // the /api/state bulk update), since the true live angle lives in the
+    // G_rotation_phase global and changes every frame; this field just
+    // carries that value into and out of a saved cue.
+    double rotation_phase = 0.0;
 
     // Mirror: flips the final output x-axis around center when true.
     // Matches the original BeamCommander's invertX/holdInvertX (there just
@@ -95,11 +102,14 @@ static double G_time = 0.0;
 // different point in the cycle). Integrating incrementally means changing a
 // speed only changes the rate of change from that moment on - the current
 // position/rotation/wave/hue is preserved and the animation stays smooth.
-// Never locked - only laser_thread writes and reads these (single-threaded).
-static double G_move_phase     = 0.0; // radians
-static double G_rotation_phase = 0.0; // radians
-static double G_wave_phase     = 0.0; // radians
-static double G_rainbow_phase  = 0.0; // cycles (0..1, wraps via fmod)
+// Never locked - only laser_thread writes and reads these (single-threaded),
+// *except* G_rotation_phase: cue recall also needs to set it (so recalling a
+// cue restores the exact rotation angle it was saved at, not just the speed/
+// direction), so it's atomic to make that cross-thread write safe.
+static double             G_move_phase     = 0.0; // radians
+static std::atomic<double> G_rotation_phase{0.0}; // radians
+static double             G_wave_phase     = 0.0; // radians
+static double             G_rainbow_phase  = 0.0; // cycles (0..1, wraps via fmod)
 
 // Exponential position smoothing (ported from the original BeamCommander's
 // ofApp.cpp `smoothOne`): pos_x/pos_y are treated as a *target*, and the
@@ -524,6 +534,7 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"pos_x\":"         << s.pos_x         << ","
        << "\"pos_y\":"         << s.pos_y         << ","
        << "\"rotation_speed\":" << s.rotation_speed << ","
+       << "\"rotation_phase\":" << s.rotation_phase << ","
        << "\"mirror_x\":"      << (s.mirror_x?"true":"false") << ","
        << "\"move_mode\":\""   << s.move_mode     << "\","
        << "\"move_speed\":"    << s.move_speed    << ","
@@ -554,6 +565,7 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.pos_x           = json_float(obj,"pos_x",s.pos_x);
     s.pos_y           = json_float(obj,"pos_y",s.pos_y);
     s.rotation_speed  = json_float(obj,"rotation_speed",s.rotation_speed);
+    s.rotation_phase  = json_float(obj,"rotation_phase",(float)s.rotation_phase);
     s.mirror_x        = json_bool(obj,"mirror_x",s.mirror_x);
     auto mv = json_str(obj,"move_mode");  if(!mv.empty()) s.move_mode = mv;
     s.move_speed      = json_float(obj,"move_speed",s.move_speed);
@@ -624,6 +636,10 @@ static void load_cues_from_disk() {
 static void do_cue_save(int n) {
     if (n < 1 || n > MAX_CUES) return;
     LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap = G; }
+    // Rotation angle lives outside LaserState (see G_rotation_phase's
+    // comment) - stash the live value into the snapshot's transport field
+    // so recalling this cue restores the exact angle, not just the speed.
+    snap.rotation_phase = G_rotation_phase.load();
     { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[n] = snap; }
     save_cues_to_disk();
 }
@@ -635,6 +651,8 @@ static bool do_cue_recall(int n) {
       if (it != G_cues.end()) { snap = it->second; found = true; } }
     if (!found) return false;
     { std::lock_guard<std::mutex> lk(G_mtx); std::string ip = G.target_ip; G = snap; G.target_ip = ip; }
+    // Restore the rotation angle the cue was saved at (see do_cue_save).
+    G_rotation_phase.store(snap.rotation_phase);
     return true;
 }
 static void do_cue_clear(int n) {
