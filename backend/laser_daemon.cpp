@@ -229,10 +229,16 @@ static void hsv_to_rgb(float h, float s, float v, float& r, float& g, float& b) 
 static core::Frame make_frame(const LaserState& s) {
     auto base = gen_base_shape(s);
 
-    // Rotation
-    if (s.rotation_speed != 0.0f) {
-        rotate_pts(base, (float)G_rotation_phase);
-    }
+    // Rotation - always applied at the current phase, even when
+    // rotation_speed is currently 0 (e.g. motion_hold is pressed, or the
+    // speed knob itself is at 0). Previously this was gated on
+    // `rotation_speed != 0.0f`, so the instant speed hit 0 the shape
+    // snapped back to its unrotated base orientation instead of holding
+    // whatever angle it had reached - G_rotation_phase itself was already
+    // frozen correctly (integrates by speed*dt, so 0 speed = no further
+    // change), it just wasn't being drawn. Rotating by phase 0 is a no-op,
+    // so applying it unconditionally is always safe.
+    rotate_pts(base, (float)G_rotation_phase);
 
     // Position + movement. Uses the smoothed position (see G_pos_x_smooth
     // above), not the raw target s.pos_x/s.pos_y directly, so manual moves
