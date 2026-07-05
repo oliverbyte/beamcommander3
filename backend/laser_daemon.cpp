@@ -95,6 +95,33 @@ static double G_rotation_phase = 0.0; // radians
 static double G_wave_phase     = 0.0; // radians
 static double G_rainbow_phase  = 0.0; // cycles (0..1, wraps via fmod)
 
+// Exponential position smoothing (ported from the original BeamCommander's
+// ofApp.cpp `smoothOne`): pos_x/pos_y are treated as a *target*, and the
+// value actually used for rendering slews toward it with an adaptive time
+// constant - finer/slower blending for tiny moves (hides MIDI's 7-bit/
+// 128-step resolution as visible stepping) and a boost for big jumps so
+// large moves still feel responsive instead of sluggish. Never locked -
+// only laser_thread writes and reads these (single-threaded).
+static float G_pos_x_smooth = 0.0f;
+static float G_pos_y_smooth = 0.0f;
+
+static float smooth_toward(float cur, float target, float dt, float tau) {
+    dt = std::clamp(dt, 0.0f, 0.25f); // clamp hitches, matches the original
+    float alpha = 1.0f - std::exp(-dt / std::max(0.0001f, tau));
+    float dist = std::fabs(target - cur);
+    if (dist < 0.02f) {
+        float t = std::clamp(dist / 0.02f, 0.0f, 1.0f);
+        alpha *= 0.15f + t * 0.85f; // map(dist, 0, 0.02, 0.15, 1.0, clamped)
+    }
+    if (dist > 0.25f) {
+        float dc = std::clamp(dist, 0.25f, 2.0f);
+        float t = (dc - 0.25f) / (2.0f - 0.25f);
+        float boost = 1.0f + t * 2.0f; // map(dist, 0.25, 2.0, 1.0, 3.0, clamped)
+        alpha = 1.0f - std::pow(1.0f - alpha, boost);
+    }
+    return cur + (target - cur) * alpha;
+}
+
 // ── Shape generators ───────────────────────────────────────────────────────────
 struct Pt { float x, y; };
 
@@ -182,10 +209,13 @@ static core::Frame make_frame(const LaserState& s) {
         rotate_pts(base, (float)G_rotation_phase);
     }
 
-    // Position + movement
+    // Position + movement. Uses the smoothed position (see G_pos_x_smooth
+    // above), not the raw target s.pos_x/s.pos_y directly, so manual moves
+    // - especially MIDI, whose 7-bit knobs would otherwise visibly step -
+    // glide instead of jumping.
     Pt mv = calc_movement(s);
-    float ox = s.pos_x + mv.x;
-    float oy = s.pos_y + mv.y;
+    float ox = G_pos_x_smooth + mv.x;
+    float oy = G_pos_y_smooth + mv.y;
 
     // Dot amount
     int step = 1;
@@ -327,6 +357,11 @@ static void laser_thread() {
             G_rotation_phase = std::fmod(G_rotation_phase - G.rotation_speed * dt * tau, tau);
             G_wave_phase     = std::fmod(G_wave_phase     + G.wave_speed     * dt * tau, tau);
             G_rainbow_phase  = std::fmod(G_rainbow_phase  + G.rainbow_speed  * dt, 1.0);
+
+            // Slew the rendered position toward the latest pos_x/pos_y
+            // target (see smooth_toward's comment above).
+            G_pos_x_smooth = smooth_toward(G_pos_x_smooth, G.pos_x, (float)dt, 0.090f);
+            G_pos_y_smooth = smooth_toward(G_pos_y_smooth, G.pos_y, (float)dt, 0.090f);
         }
 
         // Tear down the hardware connection if disarmed/disconnected, but
