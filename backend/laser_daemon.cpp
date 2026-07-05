@@ -856,6 +856,16 @@ static void do_motion_hold_release() {
     g_motion_held = false;
 }
 
+// One-shot rotation reset - used by both the MIDI "rotation_reset" note
+// action and the /rotation/reset REST route: snaps the rotation angle back
+// to 0 and stops it from spinning further (rotation_speed to 0), rather
+// than the momentary hold/restore pattern the other do_* helpers use.
+static void do_rotation_reset() {
+    G_rotation_phase.store(0.0);
+    std::lock_guard<std::mutex> lk(G_mtx);
+    G.rotation_speed = 0.0f;
+}
+
 // Applies one note-triggered (button) action. `isPress`/`isRelease`
 // describe note-on/note-off.
 static void midi_apply_note_action(const std::string& action, bool isPress, bool isRelease) {
@@ -901,6 +911,13 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
     if (action=="blackout_toggle") {
         if (!isPress) return;
         std::lock_guard<std::mutex> lk(G_mtx); G.blackout = !G.blackout;
+        return;
+    }
+    // One-shot: snap rotation back to angle 0 and stop it spinning. Shared
+    // with the /rotation/reset REST route.
+    if (action=="rotation_reset") {
+        if (!isPress) return;
+        do_rotation_reset();
         return;
     }
     // Preset button from the original mapping (rainbow/preset/slowfull):
@@ -1176,6 +1193,13 @@ int main(int argc, char* argv[]) {
     // ── POST /laser/rotation/speed/<val> ───────────────────────────────────────
     svr.Post(R"(/laser/rotation/speed/(-?[\d.]+))",[](const httplib::Request& req,httplib::Response& res){
         try{std::lock_guard<std::mutex> lk(G_mtx);G.rotation_speed=std::stof(std::string(req.matches[1]));}catch(...){}
+        res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── POST /rotation/reset — snap angle back to 0 and stop spinning ──────────
+    // Shares do_rotation_reset with the MIDI "rotation_reset" note action.
+    svr.Post("/rotation/reset",[](const httplib::Request&,httplib::Response& res){
+        do_rotation_reset();
         res.set_content(state_to_json(),"application/json");
     });
 

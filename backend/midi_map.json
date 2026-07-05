@@ -50,6 +50,7 @@
   { "type": "note", "channel": 0, "number": 27, "action": "color:white" },
   { "type": "note", "channel": 0, "number": 83, "action": "flash" },
   { "type": "note", "channel": 0, "number": 31, "action": "rainbow_preset_slowfull" },
+  { "type": "note", "channel": 0, "number": 61, "action": "rotation_reset" },
 
   { "type": "note", "channel": 0, "number": 21, "action": "move:none" },
   { "type": "note", "channel": 0, "number": 16, "action": "move:circle" },

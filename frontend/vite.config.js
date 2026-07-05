@@ -12,6 +12,7 @@ export default defineConfig({
       '/flash':    { target: 'http://localhost:8000', changeOrigin: true },
       '/mirror':   { target: 'http://localhost:8000', changeOrigin: true },
       '/motion':   { target: 'http://localhost:8000', changeOrigin: true },
+      '/rotation': { target: 'http://localhost:8000', changeOrigin: true },
       '/move':     { target: 'http://localhost:8000', changeOrigin: true },
       '/ws':       { target: 'ws://localhost:8000', ws: true },
     },
