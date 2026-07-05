@@ -74,37 +74,56 @@ jobs:
           npm ci
           npm run build
 
-      - name: Assemble release package
+      - name: Assemble release package (.app + .dmg)
         id: package
         run: |
           version="v$(date -u +%Y.%m.%d)-${GITHUB_RUN_NUMBER}"
           name="beamcommander3-macos-arm64-${version}"
-          stage="/tmp/$name"
-          mkdir -p "$stage"
-          cp backend/laser_daemon "$stage/"
-          cp backend/midi_map.json "$stage/"
-          cp -r frontend/dist "$stage/frontend_dist"
-          cp README.md "$stage/"
-          cp packaging/run.sh "$stage/run.sh"
-          chmod +x "$stage/run.sh" "$stage/laser_daemon"
+          app="/tmp/BeamCommander3.app"
+          rm -rf "$app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
+
+          sed "s/__VERSION__/${version}/g" packaging/Info.plist.template > "$app/Contents/Info.plist"
+          cp packaging/launcher.sh "$app/Contents/MacOS/BeamCommander3"
+          cp backend/laser_daemon "$app/Contents/MacOS/laser_daemon"
+          cp backend/midi_map.json "$app/Contents/Resources/"
+          cp -r frontend/dist "$app/Contents/Resources/frontend_dist"
+          chmod +x "$app/Contents/MacOS/BeamCommander3" "$app/Contents/MacOS/laser_daemon"
 
           # laser_daemon dynamically links Homebrew's libusb, which only
           # exists on the runner (e.g. /opt/homebrew/opt/libusb/...) - bundle
-          # the dylib next to the binary and repoint the load command at it
-          # via @executable_path, so the release doesn't require Homebrew or
-          # libusb to be pre-installed on the machine it runs on.
-          libusb_path="$(otool -L "$stage/laser_daemon" | awk '/libusb.*\.dylib/{print $1; exit}')"
+          # the dylib into Contents/Frameworks (standard app-bundle layout)
+          # and repoint the load command at it via @executable_path, so the
+          # release doesn't require Homebrew or libusb pre-installed.
+          libusb_path="$(otool -L "$app/Contents/MacOS/laser_daemon" | awk '/libusb.*\.dylib/{print $1; exit}')"
           if [[ -n "$libusb_path" ]]; then
-            cp "$libusb_path" "$stage/libusb-1.0.0.dylib"
-            chmod 644 "$stage/libusb-1.0.0.dylib"
-            install_name_tool -change "$libusb_path" "@executable_path/libusb-1.0.0.dylib" "$stage/laser_daemon"
-            codesign --force -s - "$stage/laser_daemon"
+            cp "$libusb_path" "$app/Contents/Frameworks/libusb-1.0.0.dylib"
+            chmod 644 "$app/Contents/Frameworks/libusb-1.0.0.dylib"
+            install_name_tool -change "$libusb_path" "@executable_path/../Frameworks/libusb-1.0.0.dylib" "$app/Contents/MacOS/laser_daemon"
           fi
 
-          (cd /tmp && zip -r -y "$name.zip" "$name")
+          # Ad-hoc sign the whole bundle (recursively - covers the bundled
+          # dylib and laser_daemon too). Re-signing the copied dylib is what
+          # actually matters here: Homebrew's original signature doesn't
+          # survive being re-hosted inside our (differently-identified) app
+          # bundle once quarantined after download, which macOS's library
+          # validation policy then refuses to load ("library load disallowed
+          # by system policy") unless every nested binary is re-signed
+          # consistently with the app itself.
+          codesign --deep --force -s - "$app"
+          codesign --verify --deep --strict "$app"
+
+          # Package as a .dmg with a drag-to-Applications shortcut, like a
+          # normal downloadable Mac app - not just a bare zip of files.
+          dmg_stage="/tmp/dmg-stage"
+          rm -rf "$dmg_stage"; mkdir -p "$dmg_stage"
+          cp -r "$app" "$dmg_stage/"
+          ln -s /Applications "$dmg_stage/Applications"
+          dmg_path="/tmp/${name}.dmg"
+          hdiutil create -volname "BeamCommander3" -srcfolder "$dmg_stage" -ov -format UDZO "$dmg_path"
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "zip_path=/tmp/$name.zip" >> "$GITHUB_OUTPUT"
-          echo "zip_name=$name.zip" >> "$GITHUB_OUTPUT"
+          echo "dmg_path=$dmg_path" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -114,8 +133,14 @@ jobs:
           body: |
             Automated macOS (Apple Silicon) build from `${{ github.sha }}`.
 
-            Download the zip, unzip it, then run `./run.sh` (or `./laser_daemon`
-            directly) and open http://localhost:8000 in your browser. No Node.js
-            or Xcode required at runtime - the frontend is bundled and served by
-            the daemon itself.
-          files: ${{ steps.package.outputs.zip_path }}
+            Download the .dmg, drag **BeamCommander3** into **Applications**,
+            then open it from there - it starts the backend and opens
+            http://localhost:8000 in your browser automatically. No Node.js
+            or Xcode required at runtime - the frontend is bundled and served
+            by the app itself.
+
+            This build isn't notarized (no Apple Developer ID), so on first
+            launch macOS will refuse to open it as "from an unidentified
+            developer" - right-click the app in Applications and choose
+            **Open** once to approve it (only needed the first time).
+          files: ${{ steps.package.outputs.dmg_path }}

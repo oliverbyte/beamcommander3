@@ -111,8 +111,14 @@ cd backend && ./laser_daemon             # now serves the UI at :8000 too
 current working directory, override with the `FRONTEND_DIST` env var) at
 startup and mounts it at `/` via cpp-httplib's static file server if found -
 otherwise it's a no-op (normal dev-mode usage, where Vite's dev server
-handles the frontend instead, is unaffected). This is what the macOS release
-GitHub Action packages up - see `.github/workflows/release-macos.yml`.
+handles the frontend instead, is unaffected). This is the mechanism behind
+the packaged macOS releases published by
+`.github/workflows/release-macos.yml`: it builds `laser_daemon` and the
+frontend, wraps them into a proper `BeamCommander3.app` bundle (with the
+Homebrew `libusb` dylib bundled + re-signed so it doesn't require Homebrew
+on the target machine), and ships a `.dmg` with a drag-to-Applications
+shortcut. See `packaging/launcher.sh` and `packaging/Info.plist.template`
+for the app bundle's launcher script and metadata.
 
 ## Architecture
 
