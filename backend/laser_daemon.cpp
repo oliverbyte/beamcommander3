@@ -43,6 +43,13 @@ struct LaserState {
     // Color (0..1)
     float r = 0.0f, g = 1.0f, b = 0.314f;
     float intensity       = 1.0f;     // master brightness
+    // Flash release time (ms): 0 = instant restore of the pre-flash color
+    // and brightness (default/legacy), >0 = ported from the original
+    // BeamCommander's flashReleaseMs - on release, brightness fades from
+    // 1.0 down to 0 over this many ms (not back to the pre-flash value;
+    // matches the original's "punch then fade to black" behavior) while
+    // color reverts to the pre-flash value immediately.
+    float flash_release_ms = 0.0f;    // 0..2000
 
     // Position -1..1
     float pos_x = 0.0f, pos_y = 0.0f;
@@ -139,6 +146,16 @@ static float G_wave_speed_smooth     = 0.0f;
 // it from whichever thread (HTTP or MIDI) triggered the flash, under
 // G_mtx.
 static std::atomic<bool> g_flash_active{false};
+
+// Flash release decay (ported from the original BeamCommander's
+// flashReleaseMs/flashDecaying): when flash_release_ms > 0, releasing
+// flash doesn't snap intensity back to its pre-flash value - instead it
+// fades from 1.0 down to 0 over that many ms. Declared up here so
+// laser_thread's main loop can ramp G.intensity every tick while
+// g_flash_decaying is true; do_flash_press/release (further down) start
+// and cancel the decay, always under G_mtx.
+static bool                                  g_flash_decaying = false;
+static std::chrono::steady_clock::time_point g_flash_decay_start;
 
 // Master-brightness gate for a footswitch wired as a "hold to show light"
 // pedal (CC64, the standard MIDI sustain-pedal number): while held/open,
@@ -367,6 +384,7 @@ static std::string state_to_json() {
        << "\"points\":"        << G.points         << ","
        << "\"rate_kpps\":"     << G.rate_kpps      << ","
        << "\"intensity\":"     << G.intensity      << ","
+       << "\"flash_release_ms\":" << G.flash_release_ms << ","
        << "\"r\":"             << G.r              << ","
        << "\"g\":"             << G.g              << ","
        << "\"b\":"             << G.b              << ","
@@ -462,6 +480,20 @@ static void laser_thread() {
             G_wave_frequency_smooth = smooth_toward(G_wave_frequency_smooth, G.wave_frequency, (float)dt, 0.090f);
             G_wave_amplitude_smooth = smooth_toward(G_wave_amplitude_smooth, G.wave_amplitude, (float)dt, 0.090f);
             G_wave_speed_smooth     = smooth_toward(G_wave_speed_smooth,     G.wave_speed,     (float)dt, 0.090f);
+
+            // Flash release decay (see g_flash_decaying's comment): ramp
+            // intensity from 1.0 down to 0 over flash_release_ms, ending
+            // exactly at 0 rather than overshooting past the deadline.
+            if (g_flash_decaying) {
+                double elapsed_ms = std::chrono::duration<double, std::milli>(now_tp - g_flash_decay_start).count();
+                double dur_ms = std::max(1.0f, G.flash_release_ms);
+                if (elapsed_ms >= dur_ms) {
+                    G.intensity = 0.0f;
+                    g_flash_decaying = false;
+                } else {
+                    G.intensity = 1.0f - (float)(elapsed_ms / dur_ms);
+                }
+            }
         }
 
         // Tear down the hardware connection if disarmed/disconnected, but
@@ -573,6 +605,7 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"points\":"        << s.points        << ","
        << "\"rate_kpps\":"     << s.rate_kpps     << ","
        << "\"intensity\":"     << s.intensity     << ","
+       << "\"flash_release_ms\":" << s.flash_release_ms << ","
        << "\"r\":"             << s.r             << ","
        << "\"g\":"             << s.g             << ","
        << "\"b\":"             << s.b             << ","
@@ -604,6 +637,7 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.points          = json_int(obj,"points",s.points);
     s.rate_kpps       = json_float(obj,"rate_kpps",s.rate_kpps);
     s.intensity       = json_float(obj,"intensity",s.intensity);
+    s.flash_release_ms = json_float(obj,"flash_release_ms",s.flash_release_ms);
     s.r               = json_float(obj,"r",s.r);
     s.g               = json_float(obj,"g",s.g);
     s.b               = json_float(obj,"b",s.b);
@@ -848,6 +882,7 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     if (action=="g")              { std::lock_guard<std::mutex> lk(G_mtx); G.g=std::clamp(out,0.0f,1.0f); return; }
     if (action=="b")              { std::lock_guard<std::mutex> lk(G_mtx); G.b=std::clamp(out,0.0f,1.0f); return; }
     if (action=="intensity")      { std::lock_guard<std::mutex> lk(G_mtx); G.intensity=std::clamp(out,0.0f,1.0f); g_brightness_gate_open.store(true); return; }
+    if (action=="flash_release_ms") { std::lock_guard<std::mutex> lk(G_mtx); G.flash_release_ms=std::clamp(out,0.0f,2000.0f); return; }
     if (action=="shape_scale")    { std::lock_guard<std::mutex> lk(G_mtx); G.shape_scale=std::clamp(out,-1.0f,1.0f); return; }
     if (action=="rotation_speed") { std::lock_guard<std::mutex> lk(G_mtx); G.rotation_speed=out; return; }
     if (action=="pos_x")          { std::lock_guard<std::mutex> lk(G_mtx); G.pos_x=std::clamp(out,-1.0f,1.0f); return; }
@@ -877,6 +912,8 @@ static float      g_pre_motion_rainbow_speed = 0.0f;
 // can see it too.
 static float      g_pre_flash_r = 1.0f, g_pre_flash_g = 1.0f, g_pre_flash_b = 1.0f;
 static float      g_pre_flash_intensity = 1.0f;
+// g_flash_decaying/g_flash_decay_start are declared earlier too (same
+// reason - laser_thread's main loop needs them for the per-tick ramp).
 
 // Shared flash press/release - used by both the MIDI dispatcher and the
 // /flash/<0|1> HTTP route, so a flash triggered from either input behaves
@@ -885,6 +922,7 @@ static float      g_pre_flash_intensity = 1.0f;
 static void do_flash_press() {
     std::lock_guard<std::mutex> lk(G_mtx);
     if (g_flash_active) return;
+    g_flash_decaying = false; // a fresh press cancels any in-progress release fade
     g_pre_flash_r = G.r; g_pre_flash_g = G.g; g_pre_flash_b = G.b;
     g_pre_flash_intensity = G.intensity;
     G.r = G.g = G.b = 1.0f;
@@ -895,7 +933,15 @@ static void do_flash_release() {
     std::lock_guard<std::mutex> lk(G_mtx);
     if (!g_flash_active) return;
     G.r = g_pre_flash_r; G.g = g_pre_flash_g; G.b = g_pre_flash_b;
-    G.intensity = g_pre_flash_intensity;
+    if (G.flash_release_ms > 0.0f) {
+        // Start the fade-to-black decay; laser_thread's main loop ramps
+        // G.intensity from 1.0 down to 0 over flash_release_ms each tick.
+        g_flash_decay_start = std::chrono::steady_clock::now();
+        g_flash_decaying = true;
+    } else {
+        G.intensity = g_pre_flash_intensity;
+        g_flash_decaying = false;
+    }
     g_flash_active = false;
 }
 
@@ -1205,6 +1251,7 @@ int main(int argc, char* argv[]) {
         // away without needing the pedal held - see g_brightness_gate_open's
         // comment for the full footswitch/fader interaction.
         if (json_float(req.body,"intensity",-9999) != -9999) g_brightness_gate_open.store(true);
+        APPLY_F("flash_release_ms",flash_release_ms) APPLY_CLAMP("flash_release_ms",flash_release_ms,0,2000)
         APPLY_F("r",r) APPLY_CLAMP("r",r,0,1)
         APPLY_F("g",g) APPLY_CLAMP("g",g,0,1)
         APPLY_F("b",b) APPLY_CLAMP("b",b,0,1)
@@ -1350,6 +1397,15 @@ int main(int argc, char* argv[]) {
     // behave identically.
     svr.Post(R"(/flash/([01]))",[](const httplib::Request& req,httplib::Response& res){
         if (req.matches[1]=="1") do_flash_press(); else do_flash_release();
+        res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── POST /flash/release_ms/<v> — flash release fade time (0..2000ms) ──────
+    // 0 = instant restore (default), >0 = fade brightness to 0 over this
+    // many ms on release instead of snapping back - ported from the
+    // original BeamCommander's flashReleaseMs knob.
+    svr.Post(R"(/flash/release_ms/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
+        try{std::lock_guard<std::mutex> lk(G_mtx);G.flash_release_ms=std::clamp(std::stof(std::string(req.matches[1])),0.0f,2000.0f);}catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
 

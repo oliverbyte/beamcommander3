@@ -41,7 +41,7 @@
       <input type="color" :value="hexColor" @input="onColor" />
       <label>Beam color</label>
     </div>
-    <div v-for="[lbl,key,mn,mx,st] in [['Brightness','intensity',0,1,0.01],['Rainbow','rainbow_amount',0,1,0.01],['Rainbow speed','rainbow_speed',0,4,0.1]]" :key="key">
+    <div v-for="[lbl,key,mn,mx,st] in [['Brightness','intensity',0,1,0.01],['Rainbow','rainbow_amount',0,1,0.01],['Rainbow speed','rainbow_speed',0,4,0.1],['Flash release (ms)','flash_release_ms',0,2000,10]]" :key="key">
       <label>{{ lbl }} <span class="val">{{ fmt(laserState[key]) }}</span></label>
       <input type="range" :min="mn" :max="mx" :step="st" :value="laserState[key]" @input="push({[key]:+$event.target.value})" />
     </div>

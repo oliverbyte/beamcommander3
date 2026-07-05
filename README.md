@@ -64,7 +64,8 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow color blend / hue cycle speed |
 | `POST /blackout/<0\|1>` | Force *hardware* output dark (never affects the browser preview) |
 | `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate for *hardware* output only: 1 = open (renders the current brightness fader value), 0 = closed (forces hardware dark regardless of the fader) — defaults closed until set |
-| `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (restores them) |
+| `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (restores them, or starts the release fade - see `flash_release_ms`) |
+| `POST /flash/release_ms/<v>` | Flash release fade time (0-2000ms): `0` = instant restore (default), `>0` = fade brightness to 0 over this many ms on release instead of snapping back |
 | `POST /mirror/x/<0\|1>` | Flip the output horizontally (mirror around center); 1 = mirrored, 0 = normal |
 | `POST /motion/hold/<0\|1>` | Momentary freeze: 1 = press (stops movement, rotation, and the rainbow hue cycle in place, remembering the prior speeds), 0 = release (restores them) |
 | `POST /rotation/reset` | Snap the rotation angle back to 0 and stop it spinning (sets `rotation_speed` to 0) |
@@ -78,9 +79,9 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `WS /ws/points` | Live preview stream, `{"pts":[[x,y,r,g,b],...]}` at ~30fps |
 
 `POST /api/state` accepts a JSON body with any of: `shape`, `radius`, `points`,
-`rate_kpps`, `intensity`, `r`, `g`, `b`, `shape_scale`, `pos_x`, `pos_y`,
-`rotation_speed`, `mirror_x`, `move_mode`, `move_speed`, `move_size`,
-`wave_frequency`, `wave_amplitude`, `wave_speed`, `rainbow_amount`,
+`rate_kpps`, `intensity`, `flash_release_ms`, `r`, `g`, `b`, `shape_scale`,
+`pos_x`, `pos_y`, `rotation_speed`, `mirror_x`, `move_mode`, `move_speed`,
+`move_size`, `wave_frequency`, `wave_amplitude`, `wave_speed`, `rainbow_amount`,
 `rainbow_speed`, `blackout`, `dot_amount`, `flicker_hz`, `ip`.
 
 ## Multi-client sync
@@ -143,7 +144,13 @@ applied, matching the original BeamCommander's MIDI mapper:
 curve fields above):**
 `r`, `g`, `b`, `intensity`, `shape_scale`, `rotation_speed`, `pos_x`, `pos_y`,
 `dot_amount`, `flicker_hz`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
-`rainbow_amount`, `rainbow_speed`, `move_size`, `move_speed`, `rate_kpps`
+`rainbow_amount`, `rainbow_speed`, `move_size`, `move_speed`, `rate_kpps`,
+`flash_release_ms` (0-2000ms; ported from the original BeamCommander's
+`flashReleaseMs` knob - the shipped binding assumes an absolute pot, not a
+relative/endless encoder, unlike the original's config for this knob; if
+your controller's knob turns out to be a relative encoder it'll jump around
+instead of tracking smoothly - recalibrate the CC number/curve as needed,
+relative-encoder support isn't implemented)
 
 **Footswitch-style (`cc`, treated as above/below the midpoint rather than a
 continuous value):**
@@ -162,8 +169,10 @@ you want to bind extra buttons to them),
 `rainbow_preset_slowfull` (full rainbow blend at a slow speed, one press),
 `blackout_toggle` / `blackout_hold` (dark until pressed again, vs. dark only
 while held — the original APC40 mapping uses `_hold`),
-`flash` (forces color to white *and* full brightness only while held,
-restores both the exact prior color and brightness on release), `motion_hold`
+`flash` (forces color to white *and* full brightness only while held; on
+release, color reverts to the prior value immediately and brightness either
+snaps back instantly or fades to 0 over `flash_release_ms`, see above),
+`motion_hold`
 (freezes the current movement pattern, rotation, *and* rainbow hue cycle in
 place while held, resumes all three on release), `mirror_hold` (flips the
 output horizontally while held, un-flips on release),

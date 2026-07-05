@@ -14,6 +14,7 @@ export const laserState = reactive({
   // Color
   r: 0.0, g: 1.0, b: 0.314,
   intensity:       1.0,
+  flash_release_ms: 0.0,
   // Position & rotation
   pos_x:           0.0,
   pos_y:           0.0,
