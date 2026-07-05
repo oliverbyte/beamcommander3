@@ -50,6 +50,12 @@ struct LaserState {
     // Rotation
     float rotation_speed  = 0.0f;     // rotations/sec
 
+    // Mirror: flips the final output x-axis around center when true.
+    // Matches the original BeamCommander's invertX/holdInvertX (there just
+    // one bool here since nothing else drives a separate persistent toggle
+    // yet - a hold button sets this true on press, false on release).
+    bool  mirror_x        = false;
+
     // Movement
     std::string move_mode = "none";   // none circle pan tilt eight random
     float move_speed      = 0.30f;    // cycles/sec
@@ -217,6 +223,12 @@ static core::Frame make_frame(const LaserState& s) {
     float ox = G_pos_x_smooth + mv.x;
     float oy = G_pos_y_smooth + mv.y;
 
+    // Mirror is applied last (matches the original app's transform order:
+    // scale/rotate/translate, *then* mirror), so it flips the fully
+    // transformed output around the canvas center (x=0), not just the base
+    // shape before it's positioned.
+    float mirror_sign = s.mirror_x ? -1.0f : 1.0f;
+
     // Dot amount
     int step = 1;
     if (s.dot_amount < 1.0f && s.dot_amount > 0.0f)
@@ -251,7 +263,7 @@ static core::Frame make_frame(const LaserState& s) {
 
         float bri = frame_blank ? 0.0f : s.intensity;
         frame.points.emplace_back(core::LaserPoint{
-            base[i].x + ox,
+            mirror_sign * (base[i].x + ox),
             base[i].y + oy,
             fr * bri, fg * bri, fb * bri, 1.0f
         });
@@ -287,6 +299,7 @@ static std::string state_to_json() {
        << "\"pos_x\":"         << G.pos_x          << ","
        << "\"pos_y\":"         << G.pos_y          << ","
        << "\"rotation_speed\":" << G.rotation_speed << ","
+       << "\"mirror_x\":"      << (G.mirror_x?"true":"false") << ","
        << "\"move_mode\":\""   << G.move_mode      << "\","
        << "\"move_speed\":"    << G.move_speed     << ","
        << "\"move_size\":"     << G.move_size      << ","
@@ -466,6 +479,7 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"pos_x\":"         << s.pos_x         << ","
        << "\"pos_y\":"         << s.pos_y         << ","
        << "\"rotation_speed\":" << s.rotation_speed << ","
+       << "\"mirror_x\":"      << (s.mirror_x?"true":"false") << ","
        << "\"move_mode\":\""   << s.move_mode     << "\","
        << "\"move_speed\":"    << s.move_speed    << ","
        << "\"move_size\":"     << s.move_size     << ","
@@ -495,6 +509,7 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.pos_x           = json_float(obj,"pos_x",s.pos_x);
     s.pos_y           = json_float(obj,"pos_y",s.pos_y);
     s.rotation_speed  = json_float(obj,"rotation_speed",s.rotation_speed);
+    s.mirror_x        = json_bool(obj,"mirror_x",s.mirror_x);
     auto mv = json_str(obj,"move_mode");  if(!mv.empty()) s.move_mode = mv;
     s.move_speed      = json_float(obj,"move_speed",s.move_speed);
     s.move_size       = json_float(obj,"move_size",s.move_size);
@@ -755,6 +770,24 @@ static void do_flash_release() {
     g_flash_active = false;
 }
 
+// Shared motion_hold press/release - used by both the MIDI dispatcher and
+// the /motion/hold/<0|1> HTTP route: stops the movement pattern *and*
+// rotation in place while held, resumes both on release.
+static void do_motion_hold_press() {
+    std::lock_guard<std::mutex> lk(G_mtx);
+    if (g_motion_held) return;
+    g_pre_motion_speed = G.move_speed; G.move_speed = 0.0f;
+    g_pre_motion_rotation_speed = G.rotation_speed; G.rotation_speed = 0.0f;
+    g_motion_held = true;
+}
+static void do_motion_hold_release() {
+    std::lock_guard<std::mutex> lk(G_mtx);
+    if (!g_motion_held) return;
+    G.move_speed = g_pre_motion_speed;
+    G.rotation_speed = g_pre_motion_rotation_speed;
+    g_motion_held = false;
+}
+
 // Applies one note-triggered (button) action. `isPress`/`isRelease`
 // describe note-on/note-off.
 static void midi_apply_note_action(const std::string& action, bool isPress, bool isRelease) {
@@ -811,18 +844,10 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
     }
     // Momentary movement freeze (motion/hold in the original mapping):
     // stops the movement pattern *and* rotation in place while held,
-    // resumes both on release.
+    // resumes both on release. Shared with the /motion/hold/<0|1> REST route.
     if (action=="motion_hold") {
-        std::lock_guard<std::mutex> lk(G_mtx);
-        if (isPress && !g_motion_held) {
-            g_pre_motion_speed = G.move_speed; G.move_speed = 0.0f;
-            g_pre_motion_rotation_speed = G.rotation_speed; G.rotation_speed = 0.0f;
-            g_motion_held = true;
-        } else if (isRelease && g_motion_held) {
-            G.move_speed = g_pre_motion_speed;
-            G.rotation_speed = g_pre_motion_rotation_speed;
-            g_motion_held = false;
-        }
+        if (isPress) do_motion_hold_press();
+        else if (isRelease) do_motion_hold_release();
         return;
     }
     // "Hold" blackout (matches the original BeamCommander's Blackout button):
@@ -832,6 +857,14 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         std::lock_guard<std::mutex> lk(G_mtx);
         if (isPress) G.blackout = true;
         else if (isRelease) G.blackout = false;
+        return;
+    }
+    // Momentary mirror (matches the original BeamCommander's invert/x/hold):
+    // flips the output horizontally while held, un-flips on release.
+    if (action=="mirror_hold") {
+        std::lock_guard<std::mutex> lk(G_mtx);
+        if (isPress) G.mirror_x = true;
+        else if (isRelease) G.mirror_x = false;
         return;
     }
     if (action=="flash") {
@@ -1017,6 +1050,7 @@ int main(int argc, char* argv[]) {
         APPLY_F("pos_x",pos_x) APPLY_CLAMP("pos_x",pos_x,-1,1)
         APPLY_F("pos_y",pos_y) APPLY_CLAMP("pos_y",pos_y,-1,1)
         APPLY_F("rotation_speed",rotation_speed)
+        APPLY_B("mirror_x",mirror_x)
         APPLY_F("move_speed",move_speed)
         APPLY_F("move_size",move_size) APPLY_CLAMP("move_size",move_size,0,2)
         APPLY_F("wave_frequency",wave_frequency)
@@ -1111,6 +1145,23 @@ int main(int argc, char* argv[]) {
         res.set_content(state_to_json(),"application/json");
     });
 
+    // ── POST /mirror/x/<0|1> — momentary (or toggled) horizontal flip ─────────
+    // Same shared-state pattern as /blackout/<0|1>: 1 = mirrored, 0 = normal.
+    // Used identically by the UI, REST, and the MIDI "mirror_hold" action
+    // (a hold button flips while held, un-flips on release).
+    svr.Post(R"(/mirror/x/([01]))",[](const httplib::Request& req,httplib::Response& res){
+        {std::lock_guard<std::mutex> lk(G_mtx);G.mirror_x=(req.matches[1]=="1");}
+        res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── POST /motion/hold/<0|1> — momentary movement+rotation freeze ──────────
+    // Shares do_motion_hold_press/release with the MIDI "motion_hold" action
+    // so triggering it from the UI/REST or a controller behaves identically.
+    svr.Post(R"(/motion/hold/([01]))",[](const httplib::Request& req,httplib::Response& res){
+        if (req.matches[1]=="1") do_motion_hold_press(); else do_motion_hold_release();
+        res.set_content(state_to_json(),"application/json");
+    });
+
     // ── POST /flash/<0|1> — momentary white + full brightness while held ─────
     // 1 = press (forces color to white and full brightness, remembering the
     // prior values), 0 = release (restores them). Shares do_flash_press/
@@ -1202,7 +1253,8 @@ int main(int argc, char* argv[]) {
               << "  POST /laser/position/<x>/<y>  /laser/rotation/speed/<v>\n"
               << "  POST /move/mode/<none|circle|pan|tilt|eight|random>\n"
               << "  POST /laser/rainbow/amount/<v>  /laser/rainbow/speed/<v>\n"
-              << "  POST /blackout/<0|1>  /flash/<0|1>  /laser/connect/<ip>  /laser/disconnect\n"
+              << "  POST /blackout/<0|1>  /flash/<0|1>  /mirror/x/<0|1>  /motion/hold/<0|1>\n"
+              << "  POST /laser/connect/<ip>  /laser/disconnect\n"
               << "  WS   /ws/points\n"
               << "  MIDI: optional, see backend/midi_map.json (Akai APC40 mkII or any USB controller)\n";
 

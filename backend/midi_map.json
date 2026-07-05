@@ -55,6 +55,7 @@
   { "type": "note", "channel": 0, "number": 64,  "action": "flash" },
   { "type": "note", "channel": 0, "number": 102, "action": "blackout_hold" },
   { "type": "note", "channel": 0, "number": 84,  "action": "motion_hold" },
+  { "type": "note", "channel": 0, "number": 82,  "action": "mirror_hold" },
 
   { "type": "note", "channel": 0, "number": 39, "action": "cue_momentary:1" },
   { "type": "note", "channel": 0, "number": 40, "action": "cue_momentary:2" },
