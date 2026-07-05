@@ -111,6 +111,17 @@ static double G_rainbow_phase  = 0.0; // cycles (0..1, wraps via fmod)
 static float G_pos_x_smooth = 0.0f;
 static float G_pos_y_smooth = 0.0f;
 
+// Whether a momentary white flash (REST /flash, MIDI note/CC "flash") is
+// currently held. Declared up here (ahead of its do_flash_press/release
+// definitions further down) so make_frame() can suppress the rainbow
+// effect while flashing - otherwise a flash would just get immediately
+// overwritten by the rainbow's full-saturation color whenever
+// rainbow_amount > 0. Atomic because make_frame() reads it from
+// laser_thread without holding G_mtx, while do_flash_press/release write
+// it from whichever thread (HTTP or MIDI) triggered the flash, under
+// G_mtx.
+static std::atomic<bool> g_flash_active{false};
+
 static float smooth_toward(float cur, float target, float dt, float tau) {
     dt = std::clamp(dt, 0.0f, 0.25f); // clamp hitches, matches the original
     float alpha = 1.0f - std::exp(-dt / std::max(0.0001f, tau));
@@ -259,8 +270,10 @@ static core::Frame make_frame(const LaserState& s) {
         // controls how many color bands repeat across the shape (0 =
         // dense rainbow stripes, 1 = the whole shape is a single solid
         // hue), while rainbow_speed animates that hue over time via
-        // rainbow_phase.
-        if (s.rainbow_amount > 0.0f) {
+        // rainbow_phase. Skipped while a white flash is held so flash
+        // always wins - matches the original app's whiteFlash check,
+        // which short-circuits colorForX the same way.
+        if (s.rainbow_amount > 0.0f && !g_flash_active) {
             float x_norm = n > 1 ? (float)i / (float)(n - 1) : 0.0f;
             float cycles_across = (1.0f - s.rainbow_amount) * 24.0f;
             float hue = std::fmod(rainbow_phase + x_norm * cycles_across, 1.0f);
@@ -752,7 +765,8 @@ static bool       g_cue_momentary_active = false;
 static bool       g_motion_held = false;        // for "motion_hold" (freeze movement while held)
 static float      g_pre_motion_speed = 0.0f;
 static float      g_pre_motion_rotation_speed = 0.0f;
-static bool       g_flash_active = false;       // <0 replaced by this flag: flash currently held
+// g_flash_active is declared earlier (near G_pos_x_smooth) so make_frame()
+// can see it too.
 static float      g_pre_flash_r = 1.0f, g_pre_flash_g = 1.0f, g_pre_flash_b = 1.0f;
 static float      g_pre_flash_intensity = 1.0f;
 
