@@ -7,6 +7,7 @@ backend/cues.json
 # Frontend build output and dependencies
 frontend/node_modules/
 frontend/dist/
+backend/frontend_dist/
 
 # Logs
 *.log

@@ -15,6 +15,7 @@
 #include <cmath>
 #include <csignal>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -1294,6 +1295,21 @@ int main(int argc, char* argv[]) {
 
     svr.set_default_headers({{"Access-Control-Allow-Origin","*"},{"Access-Control-Allow-Methods","GET,POST,OPTIONS"},{"Access-Control-Allow-Headers","Content-Type"}});
     svr.Options(".*",[](const httplib::Request&,httplib::Response& r){r.status=204;});
+
+    // ── Serve the built frontend (frontend/dist), if present ───────────────────
+    // Lets a packaged release run standalone (just start laser_daemon and open
+    // the browser) without needing `npm run dev` from source. In normal dev
+    // usage the Vite dev server handles the frontend instead and this
+    // directory won't exist, so it's a harmless no-op then. Override the
+    // path via the FRONTEND_DIST env var (e.g. if packaged differently).
+    {
+        const char* envDir = std::getenv("FRONTEND_DIST");
+        std::string wwwDir = envDir ? envDir : "./frontend_dist";
+        if (std::filesystem::is_directory(wwwDir)) {
+            svr.set_mount_point("/", wwwDir);
+            std::cout << "[laser_daemon] Serving frontend from " << wwwDir << "\n";
+        }
+    }
 
     // ── GET /api/state ──────────────────────────────────────────────────────────
     svr.Get("/api/state",[](const httplib::Request&,httplib::Response& res){

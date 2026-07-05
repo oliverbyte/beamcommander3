@@ -95,6 +95,25 @@ cd frontend && npm install && npm run dev -- --port 5173 < /dev/null
 > `< /dev/null` on the Vite command prevents it from suspending waiting for
 > keyboard input when run detached/backgrounded.
 
+## Standalone / packaged builds
+
+`laser_daemon` can serve the built frontend itself, so a packaged release
+doesn't need Node.js or `npm run dev` at all - just the compiled binary plus
+a static asset folder:
+
+```sh
+cd frontend && npm ci && npm run build   # produces frontend/dist
+cp -r frontend/dist backend/frontend_dist
+cd backend && ./laser_daemon             # now serves the UI at :8000 too
+```
+
+`laser_daemon` checks for a `./frontend_dist` directory (relative to the
+current working directory, override with the `FRONTEND_DIST` env var) at
+startup and mounts it at `/` via cpp-httplib's static file server if found -
+otherwise it's a no-op (normal dev-mode usage, where Vite's dev server
+handles the frontend instead, is unaffected). This is what the macOS release
+GitHub Action packages up - see `.github/workflows/release-macos.yml`.
+
 ## Architecture
 
 ```
