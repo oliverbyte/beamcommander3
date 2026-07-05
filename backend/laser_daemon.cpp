@@ -59,7 +59,7 @@ struct LaserState {
     // Movement
     std::string move_mode = "none";   // none circle pan tilt eight random
     float move_speed      = 0.30f;    // cycles/sec
-    float move_size       = 0.50f;    // 0..2
+    float move_size       = 0.50f;    // 0..6
 
     // Wave shape params
     float wave_frequency  = 1.0f;     // cycles across width
@@ -252,13 +252,20 @@ static core::Frame make_frame(const LaserState& s) {
     for (int i = 0; i < n; i += step) {
         float fr = s.r, fg = s.g, fb = s.b;
 
+        // Spatial rainbow, ported from the original BeamCommander's
+        // colorForX(): once rainbow_amount > 0, points get a *full*
+        // saturated HSV rainbow color (fully replacing the selected beam
+        // color, not a washed-out lerp blend with it) - amount only
+        // controls how many color bands repeat across the shape (0 =
+        // dense rainbow stripes, 1 = the whole shape is a single solid
+        // hue), while rainbow_speed animates that hue over time via
+        // rainbow_phase.
         if (s.rainbow_amount > 0.0f) {
-            float hue = std::fmod(rainbow_phase + (float)i/n * s.rainbow_amount, 1.0f);
-            float rr, rg, rb;
-            hsv_to_rgb(hue, 1.0f, 1.0f, rr, rg, rb);
-            fr = fr*(1-s.rainbow_amount) + rr*s.rainbow_amount;
-            fg = fg*(1-s.rainbow_amount) + rg*s.rainbow_amount;
-            fb = fb*(1-s.rainbow_amount) + rb*s.rainbow_amount;
+            float x_norm = n > 1 ? (float)i / (float)(n - 1) : 0.0f;
+            float cycles_across = (1.0f - s.rainbow_amount) * 24.0f;
+            float hue = std::fmod(rainbow_phase + x_norm * cycles_across, 1.0f);
+            if (hue < 0.0f) hue += 1.0f;
+            hsv_to_rgb(hue, 1.0f, 1.0f, fr, fg, fb);
         }
 
         float bri = frame_blank ? 0.0f : s.intensity;
@@ -732,7 +739,7 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     if (action=="wave_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.wave_speed=out; return; }
     if (action=="rainbow_amount") { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_amount=std::clamp(out,0.0f,1.0f); return; }
     if (action=="rainbow_speed")  { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_speed=out; return; }
-    if (action=="move_size")      { std::lock_guard<std::mutex> lk(G_mtx); G.move_size=std::clamp(out,0.0f,2.0f); return; }
+    if (action=="move_size")      { std::lock_guard<std::mutex> lk(G_mtx); G.move_size=std::clamp(out,0.0f,6.0f); return; }
     if (action=="move_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.move_speed=std::max(0.0f,out); return; }
     if (action=="rate_kpps")      { std::lock_guard<std::mutex> lk(G_mtx); G.rate_kpps=std::clamp(out,1.0f,100.0f); return; }
 }
@@ -1052,7 +1059,7 @@ int main(int argc, char* argv[]) {
         APPLY_F("rotation_speed",rotation_speed)
         APPLY_B("mirror_x",mirror_x)
         APPLY_F("move_speed",move_speed)
-        APPLY_F("move_size",move_size) APPLY_CLAMP("move_size",move_size,0,2)
+        APPLY_F("move_size",move_size) APPLY_CLAMP("move_size",move_size,0,6)
         APPLY_F("wave_frequency",wave_frequency)
         APPLY_F("wave_amplitude",wave_amplitude) APPLY_CLAMP("wave_amplitude",wave_amplitude,0,1)
         APPLY_F("wave_speed",wave_speed)
@@ -1125,7 +1132,7 @@ int main(int argc, char* argv[]) {
         res.set_content(state_to_json(),"application/json");
     });
     svr.Post(R"(/move/size/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
-        try{std::lock_guard<std::mutex> lk(G_mtx);G.move_size=std::clamp(std::stof(std::string(req.matches[1])),0.0f,2.0f);}catch(...){}
+        try{std::lock_guard<std::mutex> lk(G_mtx);G.move_size=std::clamp(std::stof(std::string(req.matches[1])),0.0f,6.0f);}catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
 

@@ -18,11 +18,11 @@
   { "type": "cc", "channel": 0, "number": 50, "action": "b", "outMin": 0.0, "outMax": 1.0 },
 
   { "type": "cc", "channel": 0, "number": 51, "action": "rainbow_speed",
-    "centered": true, "outMin": -1.0, "outMax": 1.0 },
+    "centered": true, "outMin": -3.0, "outMax": 3.0 },
   { "type": "cc", "channel": 0, "number": 52, "action": "rainbow_amount", "outMin": 0.0, "outMax": 1.0 },
 
   { "type": "cc", "channel": 0, "number": 7, "action": "move_size",
-    "gamma": 1.2, "outMin": 0.0, "outMax": 2.0 },
+    "gamma": 1.2, "outMin": 0.0, "outMax": 6.0 },
   { "type": "cc", "channel": 1, "number": 7, "action": "move_speed",
     "gamma": 1.5, "outMin": 0.0, "outMax": 6.0 },
   { "type": "cc", "channel": 6, "number": 7, "action": "dot_amount", "outMin": 0.0, "outMax": 1.0 },

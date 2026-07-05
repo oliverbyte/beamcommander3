@@ -58,7 +58,7 @@
     <div class="btn-grid">
       <button v-for="m in MOVES" :key="m" :class="{ active: laserState.move_mode === m }" @click="push({ move_mode: m })">{{ m }}</button>
     </div>
-    <div v-for="[lbl,key,mn,mx,st] in [['Speed','move_speed',0,4,0.05],['Size','move_size',0,2,0.01]]" :key="key">
+    <div v-for="[lbl,key,mn,mx,st] in [['Speed','move_speed',0,4,0.05],['Size','move_size',0,6,0.01]]" :key="key">
       <label>{{ lbl }} <span class="val">{{ fmt(laserState[key]) }}</span></label>
       <input type="range" :min="mn" :max="mx" :step="st" :value="laserState[key]" @input="push({[key]:+$event.target.value})" />
     </div>
