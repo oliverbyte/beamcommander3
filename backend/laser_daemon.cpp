@@ -269,9 +269,13 @@ static core::Frame make_frame(const LaserState& s) {
     if (s.dot_amount < 1.0f && s.dot_amount > 0.0f)
         step = std::max(1, (int)(1.0f / std::max(0.01f, s.dot_amount)));
 
-    // Flicker/strobe blackout
-    bool frame_blank = s.blackout;
-    if (!frame_blank && s.flicker_hz > 0.0f) {
+    // Flicker/strobe (still affects the generated frame directly, so both
+    // preview and hardware strobe together - only `blackout` is treated
+    // differently, see laser_thread()'s hardware-send step below, which
+    // blanks a *copy* of the frame for hardware only, leaving this one -
+    // used for the WS preview broadcast - showing the true colors).
+    bool frame_blank = false;
+    if (s.flicker_hz > 0.0f) {
         double period = 1.0 / s.flicker_hz;
         double phase  = std::fmod(G_time, period);
         frame_blank = (phase > period * 0.5);
@@ -476,7 +480,18 @@ static void laser_thread() {
         }
 
         if (hardwareReady) {
-            ctrl->sendFrame(std::move(frame));
+            // Blackout only ever suppresses the *real* laser output, never
+            // the browser preview (which already got the true-color `frame`
+            // above) - so a blanked copy is what actually goes to hardware,
+            // keeping the same point positions (safety-relevant for some
+            // controllers) but zeroing every channel's color.
+            if (snap.blackout) {
+                core::Frame blanked = frame;
+                for (auto& p : blanked.points) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
+                ctrl->sendFrame(std::move(blanked));
+            } else {
+                ctrl->sendFrame(std::move(frame));
+            }
         }
     }
     if (ctrl) ctrl->setArmed(false);
