@@ -177,6 +177,24 @@ static std::chrono::steady_clock::time_point g_flash_decay_start;
 // holding G_mtx (same reasoning as g_flash_active).
 static std::atomic<bool> g_brightness_gate_open{false};
 
+// Fade multiplier driven by the gate's *closing* transition, reusing
+// flash_release_ms as a shared "how fast should brightness fall to 0"
+// knob: opening the gate snaps this to 1.0 instantly (matching the
+// original design - pressing the pedal shows light right away), but
+// closing it starts a decay from 1.0 to 0.0 over flash_release_ms instead
+// of an instant cut (0ms = instant, same as before this existed). Applied
+// as a multiplier on top of s.intensity in make_frame() - never touches
+// LaserState.intensity itself, so the fader's LTP value is untouched by
+// how quickly the gate happens to be closing. g_prev_gate_open detects the
+// open->closed edge (the atomic bool alone carries no timestamp). Not
+// atomic themselves, but always touched under G_mtx - both by
+// laser_thread's per-tick update and by do_flash_press() forcing the gate
+// open (see its comment).
+static bool                                  g_prev_gate_open = false;
+static bool                                  g_gate_decaying = false;
+static std::chrono::steady_clock::time_point g_gate_decay_start;
+static float                                 g_gate_level = 0.0f;
+
 static float smooth_toward(float cur, float target, float dt, float tau) {
     dt = std::clamp(dt, 0.0f, 0.25f); // clamp hitches, matches the original
     float alpha = 1.0f - std::exp(-dt / std::max(0.0001f, tau));
@@ -348,12 +366,12 @@ static core::Frame make_frame(const LaserState& s) {
 
         // Footswitch master-brightness gate: applied to the shared frame
         // (so the preview shows it too, per explicit request - unlike
-        // `blackout`, which stays hardware-only) - pedal up (closed,
-        // including before it's ever been pressed) forces 0 regardless of
-        // s.intensity; pedal held renders the fader's current value
-        // normally. Doesn't touch s.intensity itself, so the fader keeps
-        // whatever it was last set to (LTP) even while the gate is closed.
-        float bri = (frame_blank || !g_brightness_gate_open.load()) ? 0.0f : s.intensity;
+        // `blackout`, which stays hardware-only) via g_gate_level, a 0..1
+        // multiplier that's 1.0 while the gate is open and fades to 0.0
+        // over flash_release_ms once it closes (see g_gate_level's
+        // comment). Doesn't touch s.intensity itself, so the fader keeps
+        // whatever it was last set to (LTP) regardless of the gate.
+        float bri = frame_blank ? 0.0f : s.intensity * g_gate_level;
         frame.points.emplace_back(core::LaserPoint{
             mirror_sign * (base[i].x + ox),
             base[i].y + oy,
@@ -494,6 +512,37 @@ static void laser_thread() {
                     G.intensity = 1.0f - (float)(elapsed_ms / dur_ms);
                 }
             }
+
+            // Brightness gate fade (see g_gate_level's comment): opening
+            // the gate snaps g_gate_level to 1.0 instantly; closing it
+            // starts a decay to 0.0 over the same flash_release_ms knob
+            // flash uses (0ms = instant cut, matching this gate's original
+            // behavior before the release-time knob existed).
+            bool gate_open_now = g_brightness_gate_open.load();
+            if (gate_open_now) {
+                g_gate_level = 1.0f;
+                g_gate_decaying = false;
+            } else if (g_prev_gate_open) {
+                // Just closed this tick.
+                if (G.flash_release_ms > 0.0f) {
+                    g_gate_decay_start = now_tp;
+                    g_gate_decaying = true;
+                } else {
+                    g_gate_level = 0.0f;
+                    g_gate_decaying = false;
+                }
+            }
+            if (g_gate_decaying) {
+                double elapsed_ms = std::chrono::duration<double, std::milli>(now_tp - g_gate_decay_start).count();
+                double dur_ms = std::max(1.0f, G.flash_release_ms);
+                if (elapsed_ms >= dur_ms) {
+                    g_gate_level = 0.0f;
+                    g_gate_decaying = false;
+                } else {
+                    g_gate_level = 1.0f - (float)(elapsed_ms / dur_ms);
+                }
+            }
+            g_prev_gate_open = gate_open_now;
         }
 
         // Tear down the hardware connection if disarmed/disconnected, but
@@ -927,6 +976,13 @@ static void do_flash_press() {
     g_pre_flash_intensity = G.intensity;
     G.r = G.g = G.b = 1.0f;
     G.intensity = 1.0f;
+    // Flash must always be visible regardless of the footswitch gate -
+    // force it open (and instantly at full level, bypassing any close
+    // decay in progress) so pressing flash works even if the pedal was
+    // never touched, or is currently up.
+    g_brightness_gate_open.store(true);
+    g_gate_level = 1.0f;
+    g_gate_decaying = false;
     g_flash_active = true;
 }
 static void do_flash_release() {
