@@ -11,7 +11,7 @@
     "outMin": -1.0, "outMax": 1.0 },
 
   { "type": "cc", "channel": 0, "number": 23, "action": "rotation_speed",
-    "centered": true, "deadzone": 0.02, "outMin": -1.0, "outMax": 1.0 },
+    "centered": true, "deadzone": 0.001, "gamma": 3.0, "outMin": -1.0, "outMax": 1.0 },
 
   { "type": "cc", "channel": 0, "number": 48, "action": "r", "outMin": 0.0, "outMax": 1.0 },
   { "type": "cc", "channel": 0, "number": 49, "action": "g", "outMin": 0.0, "outMax": 1.0 },
