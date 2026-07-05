@@ -729,6 +729,7 @@ static LaserState g_cue_momentary_snapshot;
 static bool       g_cue_momentary_active = false;
 static bool       g_motion_held = false;        // for "motion_hold" (freeze movement while held)
 static float      g_pre_motion_speed = 0.0f;
+static float      g_pre_motion_rotation_speed = 0.0f;
 static bool       g_flash_active = false;       // <0 replaced by this flag: flash currently held
 static float      g_pre_flash_r = 1.0f, g_pre_flash_g = 1.0f, g_pre_flash_b = 1.0f;
 static float      g_pre_flash_intensity = 1.0f;
@@ -809,11 +810,19 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         return;
     }
     // Momentary movement freeze (motion/hold in the original mapping):
-    // stops the movement pattern in place while held, resumes on release.
+    // stops the movement pattern *and* rotation in place while held,
+    // resumes both on release.
     if (action=="motion_hold") {
         std::lock_guard<std::mutex> lk(G_mtx);
-        if (isPress && !g_motion_held) { g_pre_motion_speed = G.move_speed; G.move_speed = 0.0f; g_motion_held = true; }
-        else if (isRelease && g_motion_held) { G.move_speed = g_pre_motion_speed; g_motion_held = false; }
+        if (isPress && !g_motion_held) {
+            g_pre_motion_speed = G.move_speed; G.move_speed = 0.0f;
+            g_pre_motion_rotation_speed = G.rotation_speed; G.rotation_speed = 0.0f;
+            g_motion_held = true;
+        } else if (isRelease && g_motion_held) {
+            G.move_speed = g_pre_motion_speed;
+            G.rotation_speed = g_pre_motion_rotation_speed;
+            g_motion_held = false;
+        }
         return;
     }
     // "Hold" blackout (matches the original BeamCommander's Blackout button):
