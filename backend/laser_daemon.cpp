@@ -719,6 +719,9 @@ static LaserState g_cue_momentary_snapshot;
 static bool       g_cue_momentary_active = false;
 static bool       g_motion_held = false;        // for "motion_hold" (freeze movement while held)
 static float      g_pre_motion_speed = 0.0f;
+static bool       g_flash_white_active = false; // for "flash_white" (color forced white while held)
+static float      g_pre_flash_white_r = 1.0f, g_pre_flash_white_g = 1.0f, g_pre_flash_white_b = 1.0f;
+static float      g_pre_flash_white_intensity = 1.0f;
 
 // Shared flash press/release - used by both the MIDI dispatcher and the
 // /flash/<0|1> HTTP route, so a flash triggered from either input behaves
@@ -806,6 +809,25 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
     if (action=="flash") {
         if (isPress) do_flash_press();
         else if (isRelease) do_flash_release();
+        return;
+    }
+    // Momentary "flash to white": forces the beam color to white at full
+    // brightness only while held, then jumps back to whatever color and
+    // brightness were showing before - fixes the button that used to call
+    // the permanent "color:white" preset (which never reverted).
+    if (action=="flash_white") {
+        std::lock_guard<std::mutex> lk(G_mtx);
+        if (isPress && !g_flash_white_active) {
+            g_pre_flash_white_r = G.r; g_pre_flash_white_g = G.g; g_pre_flash_white_b = G.b;
+            g_pre_flash_white_intensity = G.intensity;
+            G.r = G.g = G.b = 1.0f;
+            G.intensity = 1.0f;
+            g_flash_white_active = true;
+        } else if (isRelease && g_flash_white_active) {
+            G.r = g_pre_flash_white_r; G.g = g_pre_flash_white_g; G.b = g_pre_flash_white_b;
+            G.intensity = g_pre_flash_white_intensity;
+            g_flash_white_active = false;
+        }
         return;
     }
     if (action=="cue_save_arm") {

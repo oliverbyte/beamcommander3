@@ -39,7 +39,7 @@
   { "type": "note", "channel": 0, "number": 25, "action": "color:green" },
   { "type": "note", "channel": 0, "number": 26, "action": "color:blue" },
   { "type": "note", "channel": 0, "number": 27, "action": "color:white" },
-  { "type": "note", "channel": 0, "number": 83, "action": "color:white" },
+  { "type": "note", "channel": 0, "number": 83, "action": "flash_white" },
   { "type": "note", "channel": 0, "number": 31, "action": "rainbow_preset_slowfull" },
 
   { "type": "note", "channel": 0, "number": 21, "action": "move:none" },
