@@ -65,7 +65,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /blackout/<0\|1>` | Force output dark |
 | `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (restores them) |
 | `POST /mirror/x/<0\|1>` | Flip the output horizontally (mirror around center); 1 = mirrored, 0 = normal |
-| `POST /motion/hold/<0\|1>` | Momentary freeze: 1 = press (stops movement + rotation in place, remembering the prior speeds), 0 = release (restores them) |
+| `POST /motion/hold/<0\|1>` | Momentary freeze: 1 = press (stops movement, rotation, and the rainbow hue cycle in place, remembering the prior speeds), 0 = release (restores them) |
 | `POST /laser/connect/<ip>` | Connect + arm a controller at this IP |
 | `POST /laser/disconnect` | Disarm and disconnect |
 | `GET /api/cues` | List all populated cue slots (1-32) |
@@ -149,9 +149,9 @@ you want to bind extra buttons to them),
 while held — the original APC40 mapping uses `_hold`),
 `flash` (forces color to white *and* full brightness only while held,
 restores both the exact prior color and brightness on release), `motion_hold`
-(freezes the current movement pattern *and* rotation in place while held,
-resumes both on release), `mirror_hold` (flips the output horizontally while
-held, un-flips on release),
+(freezes the current movement pattern, rotation, *and* rainbow hue cycle in
+place while held, resumes all three on release), `mirror_hold` (flips the
+output horizontally while held, un-flips on release),
 `cue_save_arm` (arm save mode — the *next* `cue:<n>` button saves instead of
 recalls) + `cue:<1-32>` (latching save/recall),
 `cue_momentary:<1-32>` (hold to preview that cue, release to snap back to

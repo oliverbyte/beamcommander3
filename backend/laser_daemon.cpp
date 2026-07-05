@@ -111,6 +111,14 @@ static double G_rainbow_phase  = 0.0; // cycles (0..1, wraps via fmod)
 static float G_pos_x_smooth = 0.0f;
 static float G_pos_y_smooth = 0.0f;
 
+// Same treatment for the wave shape's three MIDI-driven knobs (frequency,
+// amplitude, speed): each is a *target*, and the smoothed value below is
+// what's actually used for rendering / phase integration, so a coarse
+// 7-bit MIDI knob glides instead of visibly stepping - same as pos_x/pos_y.
+static float G_wave_frequency_smooth = 1.0f;
+static float G_wave_amplitude_smooth = 0.45f;
+static float G_wave_speed_smooth     = 0.0f;
+
 // Whether a momentary white flash (REST /flash, MIDI note/CC "flash") is
 // currently held. Declared up here (ahead of its do_flash_press/release
 // definitions further down) so make_frame() can suppress the rainbow
@@ -175,12 +183,12 @@ static std::vector<Pt> gen_base_shape(const LaserState& s) {
         float phase = (float)G_wave_phase;
         for (int i=0;i<n;++i) {
             float t=(float)i/(n-1)*tau;
-            pts.push_back({(t/tau*2.0f-1.0f)*r, r*s.wave_amplitude*std::sin(s.wave_frequency*t+phase)});
+            pts.push_back({(t/tau*2.0f-1.0f)*r, r*G_wave_amplitude_smooth*std::sin(G_wave_frequency_smooth*t+phase)});
         }
     } else if (s.shape == "staticwave") {
         for (int i=0;i<n;++i) {
             float t=(float)i/(n-1)*tau;
-            pts.push_back({(t/tau*2.0f-1.0f)*r, r*s.wave_amplitude*std::sin(s.wave_frequency*t)});
+            pts.push_back({(t/tau*2.0f-1.0f)*r, r*G_wave_amplitude_smooth*std::sin(G_wave_frequency_smooth*t)});
         }
     } else {
         for (int i=0;i<n;++i) pts.push_back({0.0f,0.0f});
@@ -388,13 +396,24 @@ static void laser_thread() {
             // reversed direction applies no matter which API set the speed
             // (REST bulk update, /laser/rotation/speed/<v>, or MIDI).
             G_rotation_phase = std::fmod(G_rotation_phase - G.rotation_speed * dt * tau, tau);
-            G_wave_phase     = std::fmod(G_wave_phase     + G.wave_speed     * dt * tau, tau);
+            // Uses the *smoothed* wave speed (updated below) rather than
+            // G.wave_speed directly, so a MIDI knob jump changes the wave's
+            // animation rate gradually instead of snapping to a new speed
+            // instantly - matching the same glide the value knobs get.
+            G_wave_phase     = std::fmod(G_wave_phase     + G_wave_speed_smooth * dt * tau, tau);
             G_rainbow_phase  = std::fmod(G_rainbow_phase  + G.rainbow_speed  * dt, 1.0);
 
             // Slew the rendered position toward the latest pos_x/pos_y
             // target (see smooth_toward's comment above).
             G_pos_x_smooth = smooth_toward(G_pos_x_smooth, G.pos_x, (float)dt, 0.090f);
             G_pos_y_smooth = smooth_toward(G_pos_y_smooth, G.pos_y, (float)dt, 0.090f);
+
+            // Same glide for the wave knobs (see G_wave_frequency_smooth's
+            // comment above) - identical tau to pos_x/pos_y per the request
+            // that these transition "as smooth as x/y changes".
+            G_wave_frequency_smooth = smooth_toward(G_wave_frequency_smooth, G.wave_frequency, (float)dt, 0.090f);
+            G_wave_amplitude_smooth = smooth_toward(G_wave_amplitude_smooth, G.wave_amplitude, (float)dt, 0.090f);
+            G_wave_speed_smooth     = smooth_toward(G_wave_speed_smooth,     G.wave_speed,     (float)dt, 0.090f);
         }
 
         // Tear down the hardware connection if disarmed/disconnected, but
@@ -765,6 +784,7 @@ static bool       g_cue_momentary_active = false;
 static bool       g_motion_held = false;        // for "motion_hold" (freeze movement while held)
 static float      g_pre_motion_speed = 0.0f;
 static float      g_pre_motion_rotation_speed = 0.0f;
+static float      g_pre_motion_rainbow_speed = 0.0f;
 // g_flash_active is declared earlier (near G_pos_x_smooth) so make_frame()
 // can see it too.
 static float      g_pre_flash_r = 1.0f, g_pre_flash_g = 1.0f, g_pre_flash_b = 1.0f;
@@ -792,13 +812,15 @@ static void do_flash_release() {
 }
 
 // Shared motion_hold press/release - used by both the MIDI dispatcher and
-// the /motion/hold/<0|1> HTTP route: stops the movement pattern *and*
-// rotation in place while held, resumes both on release.
+// the /motion/hold/<0|1> HTTP route: stops the movement pattern, rotation,
+// *and* the rainbow hue cycle in place while held, resumes all three on
+// release.
 static void do_motion_hold_press() {
     std::lock_guard<std::mutex> lk(G_mtx);
     if (g_motion_held) return;
     g_pre_motion_speed = G.move_speed; G.move_speed = 0.0f;
     g_pre_motion_rotation_speed = G.rotation_speed; G.rotation_speed = 0.0f;
+    g_pre_motion_rainbow_speed = G.rainbow_speed; G.rainbow_speed = 0.0f;
     g_motion_held = true;
 }
 static void do_motion_hold_release() {
@@ -806,6 +828,7 @@ static void do_motion_hold_release() {
     if (!g_motion_held) return;
     G.move_speed = g_pre_motion_speed;
     G.rotation_speed = g_pre_motion_rotation_speed;
+    G.rainbow_speed = g_pre_motion_rainbow_speed;
     g_motion_held = false;
 }
 
@@ -864,8 +887,9 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         return;
     }
     // Momentary movement freeze (motion/hold in the original mapping):
-    // stops the movement pattern *and* rotation in place while held,
-    // resumes both on release. Shared with the /motion/hold/<0|1> REST route.
+    // stops the movement pattern, rotation, *and* the rainbow hue cycle in
+    // place while held, resumes all three on release. Shared with the
+    // /motion/hold/<0|1> REST route.
     if (action=="motion_hold") {
         if (isPress) do_motion_hold_press();
         else if (isRelease) do_motion_hold_release();
@@ -1175,7 +1199,7 @@ int main(int argc, char* argv[]) {
         res.set_content(state_to_json(),"application/json");
     });
 
-    // ── POST /motion/hold/<0|1> — momentary movement+rotation freeze ──────────
+    // ── POST /motion/hold/<0|1> — momentary movement+rotation+rainbow freeze ──
     // Shares do_motion_hold_press/release with the MIDI "motion_hold" action
     // so triggering it from the UI/REST or a controller behaves identically.
     svr.Post(R"(/motion/hold/([01]))",[](const httplib::Request& req,httplib::Response& res){
