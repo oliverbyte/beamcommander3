@@ -53,7 +53,7 @@ struct LaserState {
     // Movement
     std::string move_mode = "none";   // none circle pan tilt eight random
     float move_speed      = 0.30f;    // cycles/sec
-    float move_size       = 0.50f;    // 0..1
+    float move_size       = 0.50f;    // 0..2
 
     // Wave shape params
     float wave_frequency  = 1.0f;     // cycles across width
@@ -671,7 +671,7 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     if (action=="wave_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.wave_speed=out; return; }
     if (action=="rainbow_amount") { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_amount=std::clamp(out,0.0f,1.0f); return; }
     if (action=="rainbow_speed")  { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_speed=out; return; }
-    if (action=="move_size")      { std::lock_guard<std::mutex> lk(G_mtx); G.move_size=std::clamp(out,0.0f,1.0f); return; }
+    if (action=="move_size")      { std::lock_guard<std::mutex> lk(G_mtx); G.move_size=std::clamp(out,0.0f,2.0f); return; }
     if (action=="move_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.move_speed=std::max(0.0f,out); return; }
     if (action=="rate_kpps")      { std::lock_guard<std::mutex> lk(G_mtx); G.rate_kpps=std::clamp(out,1.0f,100.0f); return; }
 }
@@ -952,7 +952,7 @@ int main(int argc, char* argv[]) {
         APPLY_F("pos_y",pos_y) APPLY_CLAMP("pos_y",pos_y,-1,1)
         APPLY_F("rotation_speed",rotation_speed)
         APPLY_F("move_speed",move_speed)
-        APPLY_F("move_size",move_size) APPLY_CLAMP("move_size",move_size,0,1)
+        APPLY_F("move_size",move_size) APPLY_CLAMP("move_size",move_size,0,2)
         APPLY_F("wave_frequency",wave_frequency)
         APPLY_F("wave_amplitude",wave_amplitude) APPLY_CLAMP("wave_amplitude",wave_amplitude,0,1)
         APPLY_F("wave_speed",wave_speed)
@@ -1025,7 +1025,7 @@ int main(int argc, char* argv[]) {
         res.set_content(state_to_json(),"application/json");
     });
     svr.Post(R"(/move/size/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
-        try{std::lock_guard<std::mutex> lk(G_mtx);G.move_size=std::clamp(std::stof(std::string(req.matches[1])),0.0f,1.0f);}catch(...){}
+        try{std::lock_guard<std::mutex> lk(G_mtx);G.move_size=std::clamp(std::stof(std::string(req.matches[1])),0.0f,2.0f);}catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
 
