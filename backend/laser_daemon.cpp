@@ -538,6 +538,17 @@ static void laser_thread() {
     using Clock = std::chrono::steady_clock;
     auto last_preview = Clock::now() - 1s;
     auto last_tick    = Clock::now();
+    // Paces hardware sendFrame() calls (see hardwareReady below) - without
+    // this, the loop would call sendFrame() every time
+    // ctrl->isReadyForNewFrame() allows (which can be much more often than
+    // a frame's actual physical draw time of points/rate_kpps), enqueueing
+    // new frames faster than the hardware can drain them. That builds an
+    // ever-growing backlog/delay on the real laser output while the
+    // preview (throttled separately to 33ms via last_preview/previewDue,
+    // and not subject to any hardware queue) stays near-instant - exactly
+    // the "preview has zero delay, real output has massive delay" bug this
+    // fixes.
+    auto last_hw_send = Clock::now() - 1s;
 
     std::shared_ptr<core::LaserController> ctrl;
     std::string connected_ip;
@@ -645,7 +656,7 @@ static void laser_thread() {
         }
 
 
-        bool hardwareReady = ctrl && ctrl->isReadyForNewFrame();
+        bool hardwareReady = ctrl && ctrl->isReadyForNewFrame() && (now_tp - last_hw_send) >= 20ms;
         bool previewDue     = (now_tp - last_preview) >= 33ms;
 
         if (!hardwareReady && !previewDue) {
@@ -662,6 +673,7 @@ static void laser_thread() {
         }
 
         if (hardwareReady) {
+            last_hw_send = now_tp;
             // Blackout only ever suppresses the *real* laser output, never
             // the browser preview (which already got the true-color `frame`
             // above) - so a blanked copy is what actually goes to hardware,
