@@ -28,6 +28,9 @@
   { "type": "cc", "channel": 6, "number": 7, "action": "dot_amount", "outMin": 0.0, "outMax": 1.0 },
   { "type": "cc", "channel": 7, "number": 7, "action": "rate_kpps", "outMin": 1.0, "outMax": 100.0 },
 
+  { "type": "cc", "channel": -1, "number": 64, "action": "flash",
+    "outMin": 0.0, "outMax": 1.0 },
+
   { "type": "note", "channel": 0, "number": 32, "action": "shape:circle" },
   { "type": "note", "channel": 0, "number": 33, "action": "shape:line" },
   { "type": "note", "channel": 0, "number": 34, "action": "shape:square" },
@@ -39,7 +42,7 @@
   { "type": "note", "channel": 0, "number": 25, "action": "color:green" },
   { "type": "note", "channel": 0, "number": 26, "action": "color:blue" },
   { "type": "note", "channel": 0, "number": 27, "action": "color:white" },
-  { "type": "note", "channel": 0, "number": 83, "action": "flash_white" },
+  { "type": "note", "channel": 0, "number": 83, "action": "flash" },
   { "type": "note", "channel": 0, "number": 31, "action": "rainbow_preset_slowfull" },
 
   { "type": "note", "channel": 0, "number": 21, "action": "move:none" },

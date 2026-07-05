@@ -148,10 +148,11 @@ export async function disconnectLaser() {
   applyState(await laser('/disconnect', { method: 'POST' }))
 }
 
-// Momentary flash: full brightness only while held, restored on release -
-// mirrors the MIDI "flash" button so it behaves identically from either
-// input. Not routed through /api/state since it's a transient action, not
-// a persisted field.
+// Momentary flash: forces color to white *and* full brightness only while
+// held, restores the exact prior color and brightness on release - mirrors
+// the MIDI "flash" button (including a footswitch) so it behaves
+// identically from any input. Not routed through /api/state since it's a
+// transient action, not a persisted field.
 export async function flashPress() {
   markLocalChange()
   applyState(await (await fetch('/flash/1', { method: 'POST' })).json())

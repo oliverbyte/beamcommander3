@@ -690,7 +690,18 @@ static float midi_cc_value(const MidiBinding& b, int raw) {
 // binding's configured output range (see midi_cc_value above), so each
 // branch just clamps to the field's valid range and assigns - no further
 // scaling here.
+// (Forward-declared: a footswitch's momentary press/release can arrive as a
+// CC rather than a note - e.g. the APC40's 1/4" footswitch jack sends CC64 -
+// so "flash" needs to be reachable from CC too, not just notes.)
+static void do_flash_press();
+static void do_flash_release();
+
 static void midi_apply_cc_action(const std::string& action, float out) {
+    // Footswitch-style momentary controls sent as CC (e.g. a sustain-pedal
+    // jack sending CC64): treat above/below the midpoint as press/release.
+    // do_flash_press/release is idempotent, so it's safe to call on every
+    // CC message without edge-detection.
+    if (action=="flash") { if (out > 0.5f) do_flash_press(); else do_flash_release(); return; }
     if (action=="r")              { std::lock_guard<std::mutex> lk(G_mtx); G.r=std::clamp(out,0.0f,1.0f); return; }
     if (action=="g")              { std::lock_guard<std::mutex> lk(G_mtx); G.g=std::clamp(out,0.0f,1.0f); return; }
     if (action=="b")              { std::lock_guard<std::mutex> lk(G_mtx); G.b=std::clamp(out,0.0f,1.0f); return; }
@@ -713,26 +724,34 @@ static void midi_apply_cc_action(const std::string& action, float out) {
 
 // State for the momentary (hold-to-preview) cue buttons and the momentary
 // flash button - both need to remember what to restore on release.
-static float     g_pre_flash_intensity = -1.0f; // <0 = flash not currently held
 static bool      g_midi_cue_save_armed = false;
 static LaserState g_cue_momentary_snapshot;
 static bool       g_cue_momentary_active = false;
 static bool       g_motion_held = false;        // for "motion_hold" (freeze movement while held)
 static float      g_pre_motion_speed = 0.0f;
-static bool       g_flash_white_active = false; // for "flash_white" (color forced white while held)
-static float      g_pre_flash_white_r = 1.0f, g_pre_flash_white_g = 1.0f, g_pre_flash_white_b = 1.0f;
-static float      g_pre_flash_white_intensity = 1.0f;
+static bool       g_flash_active = false;       // <0 replaced by this flag: flash currently held
+static float      g_pre_flash_r = 1.0f, g_pre_flash_g = 1.0f, g_pre_flash_b = 1.0f;
+static float      g_pre_flash_intensity = 1.0f;
 
 // Shared flash press/release - used by both the MIDI dispatcher and the
 // /flash/<0|1> HTTP route, so a flash triggered from either input behaves
-// identically: full brightness only while held, restored on release.
+// identically: forces color to white *and* full brightness only while
+// held, restores the exact prior color and brightness on release.
 static void do_flash_press() {
     std::lock_guard<std::mutex> lk(G_mtx);
-    if (g_pre_flash_intensity < 0.0f) { g_pre_flash_intensity = G.intensity; G.intensity = 1.0f; }
+    if (g_flash_active) return;
+    g_pre_flash_r = G.r; g_pre_flash_g = G.g; g_pre_flash_b = G.b;
+    g_pre_flash_intensity = G.intensity;
+    G.r = G.g = G.b = 1.0f;
+    G.intensity = 1.0f;
+    g_flash_active = true;
 }
 static void do_flash_release() {
     std::lock_guard<std::mutex> lk(G_mtx);
-    if (g_pre_flash_intensity >= 0.0f) { G.intensity = g_pre_flash_intensity; g_pre_flash_intensity = -1.0f; }
+    if (!g_flash_active) return;
+    G.r = g_pre_flash_r; G.g = g_pre_flash_g; G.b = g_pre_flash_b;
+    G.intensity = g_pre_flash_intensity;
+    g_flash_active = false;
 }
 
 // Applies one note-triggered (button) action. `isPress`/`isRelease`
@@ -809,25 +828,6 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
     if (action=="flash") {
         if (isPress) do_flash_press();
         else if (isRelease) do_flash_release();
-        return;
-    }
-    // Momentary "flash to white": forces the beam color to white at full
-    // brightness only while held, then jumps back to whatever color and
-    // brightness were showing before - fixes the button that used to call
-    // the permanent "color:white" preset (which never reverted).
-    if (action=="flash_white") {
-        std::lock_guard<std::mutex> lk(G_mtx);
-        if (isPress && !g_flash_white_active) {
-            g_pre_flash_white_r = G.r; g_pre_flash_white_g = G.g; g_pre_flash_white_b = G.b;
-            g_pre_flash_white_intensity = G.intensity;
-            G.r = G.g = G.b = 1.0f;
-            G.intensity = 1.0f;
-            g_flash_white_active = true;
-        } else if (isRelease && g_flash_white_active) {
-            G.r = g_pre_flash_white_r; G.g = g_pre_flash_white_g; G.b = g_pre_flash_white_b;
-            G.intensity = g_pre_flash_white_intensity;
-            g_flash_white_active = false;
-        }
         return;
     }
     if (action=="cue_save_arm") {
@@ -1102,10 +1102,12 @@ int main(int argc, char* argv[]) {
         res.set_content(state_to_json(),"application/json");
     });
 
-    // ── POST /flash/<0|1> — momentary full brightness while held ──────────────
-    // 1 = press (force full brightness, remembering the prior value), 0 =
-    // release (restore it). Shares do_flash_press/release with the MIDI
-    // dispatcher so a flash button behaves identically from either input.
+    // ── POST /flash/<0|1> — momentary white + full brightness while held ─────
+    // 1 = press (forces color to white and full brightness, remembering the
+    // prior values), 0 = release (restores them). Shares do_flash_press/
+    // release with the MIDI dispatcher so a flash triggered from the UI,
+    // REST, or MIDI (including a footswitch sending note or CC64) all
+    // behave identically.
     svr.Post(R"(/flash/([01]))",[](const httplib::Request& req,httplib::Response& res){
         if (req.matches[1]=="1") do_flash_press(); else do_flash_release();
         res.set_content(state_to_json(),"application/json");

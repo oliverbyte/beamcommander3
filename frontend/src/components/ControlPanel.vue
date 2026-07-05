@@ -188,7 +188,7 @@ button.active { background:rgba(72,224,122,0.18); border-color:#48e07a; color:#4
 .blackout-btn { width:100%; margin-top:6px; padding:6px; font-size:12px; letter-spacing:1px; }
 .blackout-btn.active { background:rgba(255,50,50,0.28); border-color:#ff4040; color:#ff8080; }
 .flash-btn { width:100%; margin-top:6px; padding:6px; font-size:12px; letter-spacing:1px; user-select:none; touch-action:none; }
-.flash-btn:active { background:rgba(255,220,80,0.3); border-color:#ffdc50; color:#ffe98a; }
+.flash-btn:active { background:rgba(255,255,255,0.35); border-color:#ffffff; color:#ffffff; }
 .reset-btn { width:100%; margin-top:6px; padding:5px; font-size:11px; }
 hr { border:none; border-top:1px solid rgba(255,255,255,0.1); margin:8px 0; }
 .status-row { display:flex; align-items:center; gap:6px; font-size:11px; margin-bottom:3px; }

@@ -63,6 +63,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /move/speed/<v>` / `/move/size/<v>` | Movement cycle speed / amplitude |
 | `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow color blend / hue cycle speed |
 | `POST /blackout/<0\|1>` | Force output dark |
+| `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (restores them) |
 | `POST /laser/connect/<ip>` | Connect + arm a controller at this IP |
 | `POST /laser/disconnect` | Disarm and disconnect |
 | `GET /api/cues` | List all populated cue slots (1-32) |
@@ -93,6 +94,9 @@ configured), this subsystem simply does nothing.
 1. Plug the controller in via USB, then start `laser_daemon` — it
    auto-detects and connects to every available MIDI source (and keeps
    scanning every few seconds for hot-plugged devices, no restart needed).
+   A footswitch plugged into the APC40's 1/4" jack works too — it can send
+   either a note or a CC (commonly CC64, the standard MIDI "sustain pedal"
+   number); both are supported for momentary actions like `flash`.
 2. Bindings live in `backend/midi_map.json`, a plain JSON array of
    `{ "type": "note"|"cc", "channel": 0-15|-1, "number": 0-127, "action": "..." }`
    objects (`channel: -1` matches any channel). The shipped default is
@@ -137,10 +141,10 @@ you want to bind extra buttons to them),
 `rainbow_preset_slowfull` (full rainbow blend at a slow speed, one press),
 `blackout_toggle` / `blackout_hold` (dark until pressed again, vs. dark only
 while held — the original APC40 mapping uses `_hold`),
-`flash` (full brightness while held, restores previous brightness on
-release), `flash_white` (forces color to white *and* full brightness while
-held, restores both on release), `motion_hold` (freezes the current
-movement pattern in place while held, resumes on release),
+`flash` (forces color to white *and* full brightness only while held,
+restores both the exact prior color and brightness on release), `motion_hold`
+(freezes the current movement pattern in place while held, resumes on
+release),
 `cue_save_arm` (arm save mode — the *next* `cue:<n>` button saves instead of
 recalls) + `cue:<1-32>` (latching save/recall),
 `cue_momentary:<1-32>` (hold to preview that cue, release to snap back to
