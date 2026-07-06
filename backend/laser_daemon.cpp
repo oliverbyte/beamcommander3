@@ -128,6 +128,14 @@ struct LaserState {
     // Controller
     std::string target_ip;
     float rate_kpps       = 30.0f;
+    // Upper bound (and initial default value, above) for rate_kpps - a
+    // venue/hardware setting ("how fast can this scanner safely run"), not
+    // a per-look show parameter, so - like target_ip/flash_release_ms - it's
+    // deliberately excluded from cue_state_to_json/cue_state_from_json and
+    // preserved across cue recalls (do_cue_recall()) and /api/reset. The
+    // scan-rate fader/REST/MIDI input is clamped to this value everywhere
+    // it's applied, so turning it down here also lowers the fader's max.
+    float max_rate_kpps   = 30.0f;
 
     // Shape
     std::string shape     = "circle";
@@ -137,6 +145,13 @@ struct LaserState {
 
     // Color (0..1)
     float r = 0.0f, g = 1.0f, b = 0.314f;
+    // Master brightness. Like target_ip and flash_release_ms below, this is
+    // a *global* daemon setting, not part of the per-cue show state - it's
+    // deliberately excluded from cue_state_to_json/cue_state_from_json and
+    // explicitly preserved across cue recalls in do_cue_recall(), so
+    // switching cues (manually or via MIDI) never changes the fader's
+    // current position - the operator's live brightness setting always
+    // stays valid regardless of which cue/look is showing.
     float intensity       = 1.0f;     // master brightness
     // Footswitch brightness-gate release fade time (ms): 0 = instant cut
     // to dark when the gate closes, >0 = fade from 1.0 down to 0 over this
@@ -182,6 +197,12 @@ struct LaserState {
     float rainbow_speed   = 0.0f;     // hue cycles/sec
 
     // FX
+    // Blackout is a global daemon safety setting, not part of the per-cue
+    // show state - like intensity/master brightness, it's deliberately
+    // excluded from cue_state_to_json/cue_state_from_json and preserved
+    // across cue recalls (do_cue_recall()) and /api/reset, so recalling or
+    // resetting a look can never silently un-blank the laser (or blank it)
+    // behind the operator's back.
     bool  blackout        = false;
     float dot_amount      = 1.0f;     // 0..1 fraction of points shown
     float flicker_hz      = 0.0f;     // strobe frequency
@@ -407,9 +428,54 @@ static core::Frame make_frame(const LaserState& s) {
     float mirror_sign = s.mirror_x ? -1.0f : 1.0f;
 
     // Dot amount
-    int step = 1;
+    int n0 = (int)base.size();
+    // Number of dots to keep, spaced *evenly* around the full point set
+    // (not by an integer stride - see numDots loop below). Rounding to the
+    // nearest whole dot count means the actual kept fraction can differ
+    // very slightly from dot_amount, which is inaudible/invisible in
+    // practice and far preferable to the alternative (a fixed integer
+    // stride leaves an uneven remainder in the last gap - see next
+    // comment).
+    int numDots = n0;
     if (s.dot_amount < 1.0f && s.dot_amount > 0.0f)
-        step = std::max(1, (int)(1.0f / std::max(0.01f, s.dot_amount)));
+        numDots = std::clamp((int)std::lround(s.dot_amount * n0), 1, n0);
+    bool dotted = numDots < n0;
+
+    // A DAC (Ether Dream / Helios) plays a frame's points back-to-back at a
+    // fixed point rate, moving the galvo in a straight line between
+    // consecutive buffer entries - it does NOT teleport, and the mirror
+    // itself has real inertia/settling time. Just thinning the point list
+    // (the old fixed-integer-stride subsampling alone) kept every kept
+    // point fully lit, so the beam travelled *lit* from one kept point
+    // straight to the next, redrawing the original solid outline instead
+    // of separate dots. A fixed integer stride also picked kept indices
+    // as 0, step, 2*step, ... up to the largest multiple of step below n -
+    // whenever step didn't evenly divide n (the overwhelmingly common
+    // case), the final wrap-around gap (last kept dot back to index 0) was
+    // shorter than every other gap, so on a circle the dots visibly
+    // bunched up unevenly instead of sitting at equal angular spacing all
+    // the way around. Picking `numDots` indices by evenly dividing the
+    // full point count in floating point (below) spreads the rounding
+    // error out over every gap instead of dumping it all into one, so
+    // consecutive dots - including the wrap-around pair - end up the same
+    // distance apart.
+    // A *fixed* number of blanked settle points wasn't enough either: a
+    // small jump (dense dots, e.g. neighbouring points on a tight circle)
+    // settles almost instantly, but a large jump (sparse dots - worst case
+    // the "line" shape at low dot_amount, where only a couple of widely
+    // spaced points survive, sometimes clear across the whole canvas)
+    // needs far more settle time than that - with a fixed small constant,
+    // those big jumps still showed up as short streaks/dashes right where
+    // the beam was still catching up when it lit back up. Fix: scale the
+    // number of blanked settle points by how far this dot actually is from
+    // the previous one (in normalised -1..1 space), so nearby dots settle
+    // fast and far-apart dots get proportionally longer to actually stop
+    // moving before the beam turns back on.
+    const float kBlankPerUnitDistance = 24.0f; // blanked points per unit of jump distance
+    const int   kBlankMin  = 4;    // floor, even for a zero-distance jump
+    const int   kBlankMax  = 80;   // ceiling, so a full-canvas jump can't stall the frame
+    const int   kDotDwell  = 4;    // lit points held once settled
+    const int   kBlankTrail = 2;   // blanked points held before leaving
 
     // Flicker/strobe (still affects the generated frame directly, so both
     // preview and hardware strobe together - only `blackout` is treated
@@ -427,10 +493,23 @@ static core::Frame make_frame(const LaserState& s) {
     float rainbow_phase = (float)std::fmod(G_rainbow_phase, 1.0);
 
     core::Frame frame;
-    int n = (int)base.size();
-    frame.points.reserve((n + step - 1) / step);
+    int n = n0;
+    frame.points.reserve(dotted ? numDots * (kBlankMin + kDotDwell + kBlankTrail + 8) : n);
 
-    for (int i = 0; i < n; i += step) {
+    // The DAC loops the frame continuously, so the "incoming" jump into the
+    // very first kept dot is really the wrap-around travel from the *last*
+    // kept dot back to it - seed prev{x,y} with that last dot's position
+    // (rather than e.g. 0,0) so that wrap-around segment gets the correct
+    // settle time too, not an arbitrary one based on a fake start point.
+    float prevx = 0.0f, prevy = 0.0f;
+    if (dotted) {
+        int lastKept = (int)((double)(numDots - 1) * n / numDots + 0.5) % n;
+        prevx = mirror_sign * (base[lastKept].x + ox);
+        prevy = base[lastKept].y + oy;
+    }
+
+    for (int d = 0; d < numDots; ++d) {
+        int i = dotted ? (int)((double)d * n / numDots + 0.5) % n : d;
         float fr = s.r, fg = s.g, fb = s.b;
 
         // Spatial rainbow, ported from the original BeamCommander's
@@ -458,12 +537,48 @@ static core::Frame make_frame(const LaserState& s) {
         // over flash_release_ms once it closes (see g_gate_level's
         // comment). Doesn't touch s.intensity itself, so the fader keeps
         // whatever it was last set to (LTP) regardless of the gate.
-        float bri = frame_blank ? 0.0f : s.intensity * g_gate_level;
-        frame.points.emplace_back(core::LaserPoint{
-            mirror_sign * (base[i].x + ox),
-            base[i].y + oy,
-            fr * bri, fg * bri, fb * bri, 1.0f
-        });
+        float px = mirror_sign * (base[i].x + ox);
+        float py = base[i].y + oy;
+        // Screen-edge safety: whatever we send downstream, the DAC encoder
+        // still clamps each axis independently to the hardware's physical
+        // +-1 range at the final output boundary (see LaserPoint.hpp's
+        // sanitizer comment) - we can't change that (it's in libera, not
+        // here). Left alone, that clamp pins any out-of-range point to the
+        // nearest edge and keeps it lit, so a shape that's scaled/moved
+        // past the safe range gets flattened against the screen boundary
+        // instead of clipped away - worst case, an oversized circle ends
+        // up with almost its whole outline pinned to all four edges,
+        // degenerating into a plain rectangle. Blank (not clamp) instead:
+        // fully blank any point that would land outside +-1 on either
+        // axis, so the figure simply fades out before reaching the edge
+        // rather than being disturbed/squashed against it.
+        bool offScreen = std::fabs(px) > 1.0f || std::fabs(py) > 1.0f;
+        float bri = (frame_blank || offScreen) ? 0.0f : s.intensity * g_gate_level;
+
+        if (dotted) {
+            // Arrive blanked and hold for a distance-scaled number of
+            // settle points (see kBlankPerUnitDistance comment above), then
+            // hold lit for kDotDwell, then blank again for kBlankTrail
+            // before the beam is allowed to move off.
+            float dx = px - prevx, dy = py - prevy;
+            float dist = std::sqrt(dx * dx + dy * dy);
+            int blankSettle = std::clamp((int)std::round(dist * kBlankPerUnitDistance) + kBlankMin,
+                                          kBlankMin, kBlankMax);
+            for (int d = 0; d < blankSettle; ++d)
+                frame.points.emplace_back(core::LaserPoint{px, py, 0.0f, 0.0f, 0.0f, 1.0f});
+            for (int d = 0; d < kDotDwell; ++d) {
+                frame.points.emplace_back(core::LaserPoint{
+                    px, py, fr * bri, fg * bri, fb * bri, 1.0f
+                });
+            }
+            for (int d = 0; d < kBlankTrail; ++d)
+                frame.points.emplace_back(core::LaserPoint{px, py, 0.0f, 0.0f, 0.0f, 1.0f});
+            prevx = px; prevy = py;
+        } else {
+            frame.points.emplace_back(core::LaserPoint{
+                px, py, fr * bri, fg * bri, fb * bri, 1.0f
+            });
+        }
     }
     return frame;
 }
@@ -488,6 +603,7 @@ static std::string state_to_json() {
        << "\"radius\":"        << G.radius         << ","
        << "\"points\":"        << G.points         << ","
        << "\"rate_kpps\":"     << G.rate_kpps      << ","
+       << "\"max_rate_kpps\":" << G.max_rate_kpps  << ","
        << "\"intensity\":"     << G.intensity      << ","
        << "\"flash_release_ms\":" << G.flash_release_ms << ","
        << "\"r\":"             << G.r              << ","
@@ -738,7 +854,6 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"radius\":"        << s.radius        << ","
        << "\"points\":"        << s.points        << ","
        << "\"rate_kpps\":"     << s.rate_kpps     << ","
-       << "\"intensity\":"     << s.intensity     << ","
        << "\"r\":"             << s.r             << ","
        << "\"g\":"             << s.g             << ","
        << "\"b\":"             << s.b             << ","
@@ -756,7 +871,6 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"wave_speed\":"    << s.wave_speed    << ","
        << "\"rainbow_amount\":" << s.rainbow_amount << ","
        << "\"rainbow_speed\":" << s.rainbow_speed << ","
-       << "\"blackout\":"      << (s.blackout?"true":"false") << ","
        << "\"dot_amount\":"    << s.dot_amount    << ","
        << "\"flicker_hz\":"    << s.flicker_hz
        << "}";
@@ -769,7 +883,6 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.radius          = json_float(obj,"radius",s.radius);
     s.points          = json_int(obj,"points",s.points);
     s.rate_kpps       = json_float(obj,"rate_kpps",s.rate_kpps);
-    s.intensity       = json_float(obj,"intensity",s.intensity);
     s.r               = json_float(obj,"r",s.r);
     s.g               = json_float(obj,"g",s.g);
     s.b               = json_float(obj,"b",s.b);
@@ -787,7 +900,6 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.wave_speed      = json_float(obj,"wave_speed",s.wave_speed);
     s.rainbow_amount  = json_float(obj,"rainbow_amount",s.rainbow_amount);
     s.rainbow_speed   = json_float(obj,"rainbow_speed",s.rainbow_speed);
-    s.blackout        = json_bool(obj,"blackout",s.blackout);
     s.dot_amount      = json_float(obj,"dot_amount",s.dot_amount);
     s.flicker_hz      = json_float(obj,"flicker_hz",s.flicker_hz);
     return s;
@@ -865,13 +977,21 @@ static bool do_cue_recall(int n) {
     {
         std::lock_guard<std::mutex> lk(G_mtx);
         std::string ip = G.target_ip;
-        // flash_release_ms is a global daemon setting, not part of the
-        // per-cue show state - preserve whatever it's currently set to
-        // across the recall, same treatment as target_ip.
+        // flash_release_ms, intensity (master brightness), max_rate_kpps
+        // and blackout are global daemon settings, not part of the per-cue
+        // show state - preserve whatever they're currently set to across
+        // the recall, same treatment as target_ip.
         float flash_release_ms = G.flash_release_ms;
+        float intensity = G.intensity;
+        float max_rate_kpps = G.max_rate_kpps;
+        bool blackout = G.blackout;
         G = snap;
         G.target_ip = ip;
         G.flash_release_ms = flash_release_ms;
+        G.intensity = intensity;
+        G.max_rate_kpps = max_rate_kpps;
+        G.rate_kpps = std::clamp(G.rate_kpps, 0.0f, G.max_rate_kpps);
+        G.blackout = blackout;
     }
     // Restore the rotation angle the cue was saved at (see do_cue_save).
     G_rotation_phase.store(snap.rotation_phase);
@@ -1067,7 +1187,7 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     if (action=="rainbow_speed")  { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_speed=out; return; }
     if (action=="move_size")      { std::lock_guard<std::mutex> lk(G_mtx); G.move_size=std::clamp(out,0.0f,6.0f); return; }
     if (action=="move_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.move_speed=std::max(0.0f,out); return; }
-    if (action=="rate_kpps")      { std::lock_guard<std::mutex> lk(G_mtx); G.rate_kpps=std::clamp(out,1.0f,100.0f); return; }
+    if (action=="rate_kpps")      { std::lock_guard<std::mutex> lk(G_mtx); G.rate_kpps=std::clamp(out,0.0f,G.max_rate_kpps); return; }
 }
 
 // State for the momentary (hold-to-preview) cue buttons and the momentary
@@ -1433,7 +1553,8 @@ int main(int argc, char* argv[]) {
         std::lock_guard<std::mutex> lk(G_mtx);
         APPLY_S("shape",shape)  APPLY_S("ip",target_ip)  APPLY_S("move_mode",move_mode)
         APPLY_F("radius",radius)  APPLY_CLAMP("radius",radius,0,1)
-        APPLY_F("rate_kpps",rate_kpps)  APPLY_CLAMP("rate_kpps",rate_kpps,1,100)
+        APPLY_F("max_rate_kpps",max_rate_kpps)  APPLY_CLAMP("max_rate_kpps",max_rate_kpps,1,100)
+        APPLY_F("rate_kpps",rate_kpps)  APPLY_CLAMP("rate_kpps",rate_kpps,0,G.max_rate_kpps)
         APPLY_F("intensity",intensity)  APPLY_CLAMP("intensity",intensity,0,1)
         // Directly setting the brightness fader (any source: UI, REST, MIDI)
         // implicitly opens the footswitch gate too, so it's visible right
@@ -1599,18 +1720,24 @@ int main(int argc, char* argv[]) {
     });
 
     // ── POST /api/reset — restore all show params to defaults ─────────────────
-    // Preserves the current controller connection (target_ip / armed state)
-    // and the global flash_release_ms setting (see its comment) so resetting
-    // the show doesn't drop the laser link or change the footswitch's fade
-    // time.
+    // Preserves the current controller connection (target_ip / armed state),
+    // the global flash_release_ms / max_rate_kpps settings, and blackout
+    // (see their comments) so resetting the show doesn't drop the laser
+    // link, change the footswitch's fade time, change the venue's
+    // configured scan-rate ceiling, or silently un-blank/blank the laser.
     svr.Post("/api/reset",[](const httplib::Request&,httplib::Response& res){
         {
             std::lock_guard<std::mutex> lk(G_mtx);
             std::string ip = G.target_ip;
             float flash_release_ms = G.flash_release_ms;
+            float max_rate_kpps = G.max_rate_kpps;
+            bool blackout = G.blackout;
             G = LaserState{};
             G.target_ip = ip;
             G.flash_release_ms = flash_release_ms;
+            G.max_rate_kpps = max_rate_kpps;
+            G.rate_kpps = std::clamp(G.rate_kpps, 0.0f, G.max_rate_kpps);
+            G.blackout = blackout;
         }
         res.set_content(state_to_json(),"application/json");
     });

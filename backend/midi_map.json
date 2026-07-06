@@ -28,7 +28,8 @@
   { "type": "cc", "channel": 1, "number": 7, "action": "move_speed",
     "gamma": 1.5, "outMin": 0.0, "outMax": 6.0 },
   { "type": "cc", "channel": 6, "number": 7, "action": "dot_amount", "outMin": 0.0, "outMax": 1.0 },
-  { "type": "cc", "channel": 7, "number": 7, "action": "rate_kpps", "outMin": 1.0, "outMax": 100.0 },
+  { "type": "cc", "channel": 7, "number": 7, "action": "rate_kpps",
+    "gamma": 3.0, "outMin": 0.0, "outMax": 100.0 },
 
   { "type": "cc", "channel": 2, "number": 7, "action": "wave_frequency",
     "gamma": 1.2, "outMin": 0.1, "outMax": 8.0 },

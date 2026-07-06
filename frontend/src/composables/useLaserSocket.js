@@ -36,6 +36,7 @@ export const laserState = reactive({
   flicker_hz:      0.0,
   // Scan
   rate_kpps:       30,
+  max_rate_kpps:   30,
   // Controller
   armed:           false,
   ip:              '',

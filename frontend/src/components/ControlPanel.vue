@@ -79,8 +79,10 @@
 
     <hr />
     <h2>Scan / Preview</h2>
-    <label>Rate (kpps) <span class="val">{{ fmt(laserState.rate_kpps) }}</span></label>
-    <input type="range" min="1" max="60" step="1" :value="laserState.rate_kpps" @input="push({ rate_kpps: +$event.target.value })" />
+    <label>Rate (kpps) <span class="val">{{ fmt(laserState.rate_kpps) }} / {{ fmt(laserState.max_rate_kpps) }}</span></label>
+    <input type="range" min="0" max="1" step="0.001" :value="ratePos" @input="onRatePos(+$event.target.value)" />
+    <label>Max rate (kpps) <span class="val">{{ fmt(laserState.max_rate_kpps) }}</span></label>
+    <input type="range" min="1" max="100" step="1" :value="laserState.max_rate_kpps" @input="push({ max_rate_kpps: +$event.target.value })" />
     <label>Eye persistence (ms) <span class="val">{{ persistenceMs }}</span></label>
     <input type="range" min="0" max="100" step="1" :value="persistenceMs" @input="onPersist(+$event.target.value)" />
 
@@ -117,6 +119,25 @@ const hexColor = computed(() => {
 function onColor(e) {
   const h = e.target.value
   push({ r: parseInt(h.slice(1,3),16)/255, g: parseInt(h.slice(3,5),16)/255, b: parseInt(h.slice(5,7),16)/255 })
+}
+
+// Scan-rate fader: much finer control at the low end (needed to dial in
+// strobe-like slow-scan effects), rougher at the high end - same
+// exponent (3) and shape as the MIDI "rate_kpps" binding's gamma in
+// midi_map.json, so the on-screen slider, MIDI knob and REST all agree on
+// what "position" means. `laserState.rate_kpps` itself stays the real,
+// linear kpps value (as sent/received over REST and saved in cues) -
+// only the on-screen slider's *position* is curved; pos^RATE_GAMMA*max
+// gives the kpps value, and the inverse turns a live kpps value (e.g.
+// from a cue recall or MIDI move) back into the matching slider position.
+const RATE_GAMMA = 3
+const ratePos = computed(() => {
+  const max = laserState.max_rate_kpps || 1
+  return Math.pow(Math.min(1, Math.max(0, laserState.rate_kpps / max)), 1 / RATE_GAMMA)
+})
+function onRatePos(pos) {
+  const max = laserState.max_rate_kpps || 1
+  push({ rate_kpps: Math.pow(pos, RATE_GAMMA) * max })
 }
 
 // pointerdown/up (not click) so the flash lasts exactly as long as the
