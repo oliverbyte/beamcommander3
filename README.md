@@ -92,9 +92,11 @@ for how the packaged macOS/Windows builds are put together.
    playing) — handy for a quick "oh no" moment without losing your settings.
 5. **Cues**: the panel on the right holds 32 save slots. Turn on "Save
    mode", click an empty numbered slot to store the current look, then
-   click any populated (green) slot any time to instantly recall it.
-   Right-click a slot to clear it, or use "Move" to relocate a saved cue to
-   a different slot.
+   click any populated (green) slot any time to instantly recall it. Each
+   populated slot shows a small live preview icon of its shape, color and
+   motion (rotation, movement, rainbow, wave, dotted look) so you can see
+   what a cue looks like before recalling it. Right-click a slot to clear
+   it, or use "Move" to relocate a saved cue to a different slot.
 6. **Optional: MIDI controller or foot pedal** — if you plug in a USB MIDI
    controller (an Akai APC40 mkII works out of the box, matching the
    original BeamCommander's exact layout), its knobs and buttons drive the
@@ -183,15 +185,17 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `WS /ws/points` | Live preview stream, `{"pts":[[x,y,r,g,b],...]}` at ~30fps |
 
 `POST /api/state` accepts a JSON body with any of: `shape`, `radius`, `points`,
-`rate_kpps`, `intensity`, `flash_release_ms`, `r`, `g`, `b`, `shape_scale`,
-`pos_x`, `pos_y`, `rotation_speed`, `mirror_x`, `move_mode`, `move_speed`,
-`move_size`, `wave_frequency`, `wave_amplitude`, `wave_speed`, `rainbow_amount`,
-`rainbow_speed`, `blackout`, `dot_amount`, `flicker_hz`, `ip`.
+`rate_kpps`, `max_rate_kpps`, `intensity`, `flash_release_ms`, `r`, `g`, `b`,
+`shape_scale`, `pos_x`, `pos_y`, `rotation_speed`, `mirror_x`, `move_mode`,
+`move_speed`, `move_size`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
+`rainbow_amount`, `rainbow_speed`, `blackout`, `dot_amount`, `flicker_hz`, `ip`.
 
-`flash_release_ms` (like `ip`/the controller connection) is a *global* daemon
-setting, not part of a cue's show state: saving a cue never captures it and
-recalling one never changes it, no matter what it was set to when the cue
-was saved.
+`flash_release_ms`, `intensity`, `blackout` and `max_rate_kpps` (like `ip`/the
+controller connection) are *global* daemon settings, not part of a cue's show
+state: saving a cue never captures them and recalling one never changes them,
+no matter what they were set to when the cue was saved. `max_rate_kpps` also
+caps and defaults `rate_kpps` on the fader/REST/MIDI - turning it down lowers
+the scan-rate fader's usable range too.
 
 ## Multi-client sync
 

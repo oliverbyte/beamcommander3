@@ -292,17 +292,62 @@ the smoothed globals directly, not the raw target fields.
 
 ### Cue system
 
-Cues are snapshots of `LaserState` (minus `target_ip`) in
-`std::map<int, LaserState> G_cues`, guarded by its own `G_cues_mtx` and
-persisted to `backend/cues.json`. **`G_mtx` and `G_cues_mtx` are never held
-at the same time** - `do_cue_save/recall/clear()` in laser_daemon.cpp are
-the *only* functions allowed to touch `G_cues`, and each one locks at most
-one of the two mutexes at a time (lock, copy/assign, unlock - never nested).
+Cues are snapshots of `LaserState` in `std::map<int, LaserState> G_cues`,
+guarded by its own `G_cues_mtx` and persisted to `backend/cues.json`. A
+handful of fields are deliberately *not* part of that snapshot even though
+they live on `LaserState` - `target_ip`, `flash_release_ms`, `intensity`
+(master brightness), `blackout` and `max_rate_kpps` are global daemon/safety
+settings, not per-look show state: they're excluded from
+`cue_state_to_json`/`cue_state_from_json` and explicitly re-applied on top
+of `G` after every `do_cue_recall()` (and preserved across `/api/reset` the
+same way), so switching cues or resetting the show can never change the
+current connection, the footswitch fade time, the master brightness fader,
+whether the laser is blacked out, or the configured scan-rate ceiling.
+
+**`G_mtx` and `G_cues_mtx` are never held at the same time** -
+`do_cue_save/recall/clear()` in laser_daemon.cpp are the *only* functions
+allowed to touch `G_cues`, and each one locks at most one of the two
+mutexes at a time (lock, copy/assign, unlock - never nested).
 Both the `/api/cue/*` HTTP routes and the MIDI dispatcher's `cue:<n>` /
 `cue_momentary:<n>` actions call these same helpers instead of duplicating
 the logic, so there's exactly one place that has to get the lock order
 right. If you add a new cue-related code path, route it through these
 helpers rather than touching `G_cues` directly.
+
+The frontend's cue grid (`CuePanel.vue`) also renders a small animated SVG
+preview icon per populated slot straight off the saved state object (shape,
+color, rotation, movement, rainbow, dot pattern) - see that file's
+`cue*Style()` helper functions if you add a new animatable parameter that
+should show up there too. Two gotchas already hit while building it:
+`<style scoped>` rewrites `@keyframes` names, which breaks any animation
+name built dynamically in JS (put those keyframes in a second, unscoped
+`<style>` block instead), and `linearGradient` needs
+`gradientUnits="userSpaceOnUse"` - the default `objectBoundingBox` silently
+fails to paint on a shape with a degenerate (zero width/height) bounding
+box, like a horizontal `<line>`.
+
+### Dot rendering (dot_amount < 1)
+
+`make_frame()` doesn't just thin the point list by an integer stride - a
+DAC plays a frame's points back-to-back at a fixed rate, moving the galvo
+in a straight line between consecutive buffer entries (it does not
+teleport), so naively dropping points would just redraw the same solid
+outline in hardware even though the browser preview (which draws each
+point as its own isolated ray) looked correctly dotted. Instead:
+
+- Kept dot indices are spaced evenly by dividing the point count in
+  floating point (not a fixed integer stride), so gaps - including the
+  wrap-around pair - come out equal instead of dumping all the rounding
+  error into one gap.
+- Each kept dot is surrounded by blanked settle points before it goes lit,
+  scaled by how far the galvo actually has to jump (a real mirror needs
+  time to stop moving after a big jump - too little settle time and dots
+  come out as short streaks instead of clean points).
+- Any point that would land outside the +-1 safe range on either axis is
+  blanked outright, rather than letting the downstream DAC encoder
+  clamp-and-draw it at the boundary (which flattens an oversized/moved
+  shape against the screen edge - e.g. a large circle degenerating into a
+  rectangle).
 
 ### MIDI subsystem (optional, macOS/CoreMIDI)
 
