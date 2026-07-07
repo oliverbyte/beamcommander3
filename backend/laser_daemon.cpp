@@ -271,18 +271,20 @@ static std::atomic<bool> g_flash_active{false};
 
 // Master-brightness gate for a footswitch wired as a "hold to show light"
 // pedal (CC64, the standard MIDI sustain-pedal number): while held/open,
-// output (both the browser preview *and* hardware) renders normally; while
-// released/closed (including at startup, before the pedal has ever been
-// touched), output is forced dark - baked directly into make_frame()'s
-// `bri` computation so preview and hardware always show it together (per
-// explicit request, unlike `blackout` which stays hardware-only so the
-// preview keeps working while blacked out on the real beam). Deliberately
-// does NOT touch LaserState.intensity itself - the fader/knob/UI/REST
-// setting it is LTP (last value counts) and keeps updating independently
-// of the gate, so whatever the fader was last set to (even while the gate
-// was closed) takes effect immediately the next time the pedal is pressed.
-// LTP goes both ways: touching the intensity fader directly (MIDI CC,
-// REST /api/state, /laser/brightness) also opens the gate immediately, so
+// hardware output renders normally; while released/closed (including at
+// startup, before the pedal has ever been touched), *hardware* output is
+// forced dark. This is hardware-only, exactly like `blackout` below - the
+// browser preview always renders at full s.intensity regardless of the
+// gate (see laser_thread()'s hardware-send step, which applies g_gate_level
+// only to the copy sent to the DAC), so recalling a cue or just opening the
+// UI after a restart shows the correct preview immediately, without first
+// having to touch the pedal or the brightness fader. Deliberately does NOT
+// touch LaserState.intensity itself - the fader/knob/UI/REST setting it is
+// LTP (last value counts) and keeps updating independently of the gate, so
+// whatever the fader was last set to (even while the gate was closed)
+// takes effect immediately the next time the pedal is pressed. LTP goes
+// both ways: touching the intensity fader directly (MIDI CC, REST
+// /api/state, /laser/brightness) also opens the gate immediately, so
 // brightness shows right away even if the pedal was never pressed - the
 // footswitch only needs to be used at all if you actually want it to be
 // able to force things dark on release. Read from laser_thread without
@@ -295,13 +297,13 @@ static std::atomic<bool> g_brightness_gate_open{false};
 // original design - pressing the pedal shows light right away), but
 // closing it starts a decay from 1.0 to 0.0 over flash_release_ms instead
 // of an instant cut (0ms = instant, same as before this existed). Applied
-// as a multiplier on top of s.intensity in make_frame() - never touches
-// LaserState.intensity itself, so the fader's LTP value is untouched by
-// how quickly the gate happens to be closing. g_prev_gate_open detects the
-// open->closed edge (the atomic bool alone carries no timestamp). Not
-// atomic themselves, but always touched under G_mtx - both by
-// laser_thread's per-tick update and by do_flash_press() forcing the gate
-// open (see its comment).
+// as a multiplier only to the hardware-bound frame copy in laser_thread()
+// (never to the preview, and never to LaserState.intensity itself, so the
+// fader's LTP value is untouched by how quickly the gate happens to be
+// closing). g_prev_gate_open detects the open->closed edge (the atomic
+// bool alone carries no timestamp). Not atomic themselves, but always
+// touched under G_mtx - both by laser_thread's per-tick update and by
+// do_flash_press() forcing the gate open (see its comment).
 static bool                                  g_prev_gate_open = false;
 static bool                                  g_gate_decaying = false;
 static std::chrono::steady_clock::time_point g_gate_decay_start;
@@ -534,13 +536,11 @@ static core::Frame make_frame(const LaserState& s) {
             hsv_to_rgb(hue, 1.0f, 1.0f, fr, fg, fb);
         }
 
-        // Footswitch master-brightness gate: applied to the shared frame
-        // (so the preview shows it too, per explicit request - unlike
-        // `blackout`, which stays hardware-only) via g_gate_level, a 0..1
-        // multiplier that's 1.0 while the gate is open and fades to 0.0
-        // over flash_release_ms once it closes (see g_gate_level's
-        // comment). Doesn't touch s.intensity itself, so the fader keeps
-        // whatever it was last set to (LTP) regardless of the gate.
+        // Master brightness. The footswitch gate (g_gate_level) is
+        // deliberately *not* applied here - it's hardware-only, applied to
+        // a separate copy of the frame in laser_thread()'s hardware-send
+        // step (same treatment as `blackout`), so the WS preview always
+        // shows the true, ungated brightness.
         float px = mirror_sign * (base[i].x + ox);
         float py = base[i].y + oy;
         // Screen-edge safety: whatever we send downstream, the DAC encoder
@@ -557,7 +557,7 @@ static core::Frame make_frame(const LaserState& s) {
         // axis, so the figure simply fades out before reaching the edge
         // rather than being disturbed/squashed against it.
         bool offScreen = std::fabs(px) > 1.0f || std::fabs(py) > 1.0f;
-        float bri = (frame_blank || offScreen) ? 0.0f : s.intensity * g_gate_level;
+        float bri = (frame_blank || offScreen) ? 0.0f : s.intensity;
 
         if (dotted) {
             // Arrive blanked and hold for a distance-scaled number of
@@ -794,18 +794,26 @@ static void laser_thread() {
 
         if (hardwareReady) {
             last_hw_send = now_tp;
-            // Blackout only ever suppresses the *real* laser output, never
-            // the browser preview (which already got the true-color `frame`
-            // above) - so a blanked copy is what actually goes to hardware,
-            // keeping the same point positions (safety-relevant for some
-            // controllers) but zeroing every channel's color. The
-            // footswitch brightness gate is *not* handled here - it's
-            // baked into `frame` itself (see make_frame()'s `bri`
-            // computation) so both preview and hardware see it together.
+            // Blackout and the footswitch brightness gate only ever
+            // suppress/dim the *real* laser output, never the browser
+            // preview (which already got the true, full-brightness `frame`
+            // above) - so a modified copy is what actually goes to
+            // hardware, keeping the same point positions (safety-relevant
+            // for some controllers) but scaling/zeroing every channel's
+            // color. Blackout wins outright (full zero); otherwise the
+            // gate's current fade level (1.0 = fully open, decaying to 0.0
+            // while closed/closing - see g_gate_level's comment) is applied
+            // as a multiplier.
             if (snap.blackout) {
                 core::Frame blanked = frame;
                 for (auto& p : blanked.points) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
                 ctrl->sendFrame(std::move(blanked));
+            } else if (g_gate_level < 1.0f) {
+                core::Frame gated = frame;
+                for (auto& p : gated.points) {
+                    p.r *= g_gate_level; p.g *= g_gate_level; p.b *= g_gate_level;
+                }
+                ctrl->sendFrame(std::move(gated));
             } else {
                 ctrl->sendFrame(std::move(frame));
             }

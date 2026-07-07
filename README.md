@@ -169,7 +169,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /move/speed/<v>` / `/move/size/<v>` | Movement cycle speed / amplitude |
 | `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow color blend / hue cycle speed |
 | `POST /blackout/<0\|1>` | Force *hardware* output dark (never affects the browser preview) |
-| `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate (affects preview + hardware): 1 = open instantly (renders the current brightness fader value), 0 = closed (fades to dark over `flash_release_ms`, or instantly if it's 0) — defaults closed until set. Never touches the `intensity` field itself |
+| `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate, *hardware-only* (never affects the browser preview - same treatment as blackout above): 1 = open instantly (renders the current brightness fader value), 0 = closed (fades to dark over `flash_release_ms`, or instantly if it's 0) — defaults closed until set. Never touches the `intensity` field itself |
 | `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (always restores them instantly - `flash_release_ms` does not apply here, only to the footswitch gate above) |
 | `POST /flash/release_ms/<v>` | Footswitch gate release fade time (0-2000ms), despite the name this only affects `/brightness/gate` closing, not flash's own release: `0` = instant cut, `>0` = fade brightness to 0 over this many ms instead of snapping to dark (default `200`) |
 | `POST /mirror/x/<0\|1>` | Flip the output horizontally (mirror around center); 1 = mirrored, 0 = normal |
