@@ -202,8 +202,12 @@ struct LaserState {
     // excluded from cue_state_to_json/cue_state_from_json and preserved
     // across cue recalls (do_cue_recall()) and /api/reset, so recalling or
     // resetting a look can never silently un-blank the laser (or blank it)
-    // behind the operator's back.
-    bool  blackout        = false;
+    // behind the operator's back. Defaults to true (safety: a fresh daemon
+    // start / first install always comes up blacked out, master brightness
+    // at full 100% - see `intensity` above - so the very first thing an
+    // operator does is a deliberate, visible "un-blackout" action rather
+    // than the beam silently firing at startup).
+    bool  blackout        = true;
     float dot_amount      = 1.0f;     // 0..1 fraction of points shown
     float flicker_hz      = 0.0f;     // strobe frequency
 

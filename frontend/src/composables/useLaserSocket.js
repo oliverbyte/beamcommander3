@@ -31,7 +31,7 @@ export const laserState = reactive({
   rainbow_amount:  0.0,
   rainbow_speed:   0.0,
   // FX
-  blackout:        false,
+  blackout:        true,
   dot_amount:      1.0,
   flicker_hz:      0.0,
   // Scan
