@@ -1,10 +1,6 @@
 <template>
-  <div id="ui" :class="{ collapsed }">
-    <button class="collapse-btn" @click="collapsed = !collapsed" :title="collapsed ? 'Show panel' : 'Hide panel'">
-      {{ collapsed ? '☰' : '✕' }}
-    </button>
-    <div class="panel-body" v-show="!collapsed">
-    <h1>BeamCommander<span class="ver">3</span></h1>
+  <div id="ui" :class="{ popout }">
+    <div class="panel-body">
     <div class="status-row">
       <span class="dot" :class="{ on: laserState.wsConnected }"></span>
       Preview {{ laserState.wsConnected ? 'live' : 'connecting…' }}
@@ -104,13 +100,13 @@
 import { computed, ref } from 'vue'
 import { laserState, updateState, resetState, connectLaser, disconnectLaser, markLocalChange, flashPress, flashRelease } from '../composables/useLaserSocket.js'
 
+const { popout } = defineProps({ popout: { type: Boolean, default: false } })
 const emit = defineEmits(['update:persistence'])
 
 const SHAPES = ['circle','line','triangle','square','wave','staticwave']
 const MOVES  = ['none','circle','pan','tilt','eight','random']
 const persistenceMs = ref(5)
 const ipInput = ref('10.10.10.4')
-const collapsed = ref(false)
 
 const hexColor = computed(() => {
   const to = v => Math.round(v*255).toString(16).padStart(2,'0')
@@ -174,26 +170,32 @@ async function reset() { await resetState().catch(console.error) }
 </script>
 
 <style scoped>
+/* top:52px (not 12px) leaves clearance for the standalone "BeamCommander3"
+   logo now rendered separately in App.vue, fixed top-left of the main
+   screen - this panel used to carry that logo itself as its own <h1>. */
 #ui {
-  position:fixed; top:12px; left:12px; width:275px;
+  position:fixed; top:52px; left:12px; width:275px;
   background:rgba(8,10,18,0.88); border:1px solid rgba(120,130,200,0.25);
   border-radius:10px; padding:14px 16px; backdrop-filter:blur(6px);
   user-select:none; z-index:10; color:#cfd3e6;
   font-family:-apple-system,"Segoe UI",Roboto,sans-serif;
-  max-height:calc(100vh - 24px); overflow-y:auto;
+  max-height:calc(100vh - 64px); overflow-y:auto;
 }
-#ui.collapsed {
-  width:auto; max-height:none; overflow:visible; padding:8px;
+/* Popped out - either into its own draggable browser window, or embedded
+   in a FloatingPanel div (see TouchDock.vue). height:100% (not 100vh) so
+   it fills whichever parent it's actually in. */
+#ui.popout {
+  position:static; width:100%; height:100%; max-height:none;
+  border:none; border-radius:0; box-sizing:border-box;
+  padding:20px 22px 40px;
 }
-.collapse-btn {
-  position:absolute; top:10px; right:10px; z-index:11;
-  width:22px; height:22px; padding:0; line-height:1;
-  font-size:12px; display:flex; align-items:center; justify-content:center;
-}
-#ui.collapsed .collapse-btn { position:static; }
-.panel-body { padding-right:26px; }
-h1 { font-size:13px; letter-spacing:2px; text-transform:uppercase; margin:0 0 8px; color:#8fe3ff; }
-h1 .ver { color:#48e07a; }
+#ui.popout h2 { font-size:12px; }
+#ui.popout label { font-size:14px; }
+#ui.popout button { padding:12px 10px; font-size:14px; }
+#ui.popout .btn-grid button { padding:14px 4px; font-size:13px; }
+#ui.popout input[type="range"] { height:28px; }
+#ui.popout input[type="text"] { padding:10px 8px; font-size:14px; }
+#ui.popout .blackout-btn, #ui.popout .flash-btn, #ui.popout .reset-btn { padding:14px; font-size:15px; }
 h2 { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; margin:8px 0 4px; color:#9aa0bd; }
 label { display:block; font-size:11px; margin:6px 0 1px; color:#9aa0bd; }
 .val { color:#cfd3e6; margin-left:4px; }

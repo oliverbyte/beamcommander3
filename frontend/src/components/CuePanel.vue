@@ -1,10 +1,6 @@
 <template>
-  <div id="cue-panel" :class="{ collapsed }">
-    <button class="collapse-btn" @click="collapsed = !collapsed" :title="collapsed ? 'Show cues' : 'Hide cues'">
-      {{ collapsed ? '☰' : '✕' }}
-    </button>
-    <div class="panel-body" v-show="!collapsed">
-      <h1>Cues</h1>
+  <div id="cue-panel" :class="{ popout }">
+    <div class="panel-body">
       <div class="mode-row">
         <button class="mode-btn save-mode-btn" :class="{ active: saveArmed }" @click="toggleSaveMode">
           {{ saveArmed ? '● tap slot' : '◌ Save' }}
@@ -72,8 +68,8 @@
 import { ref, onMounted } from 'vue'
 import { cues, saveCue, recallCue, clearCue, moveCue, fetchCues } from '../composables/useLaserSocket.js'
 
+const { popout } = defineProps({ popout: { type: Boolean, default: false } })
 const CUE_COUNT = 32
-const collapsed = ref(false)
 const saveArmed = ref(false)
 const moveArmed = ref(false)
 const moveSource = ref(null)
@@ -245,20 +241,18 @@ async function onClear(n) {
   font-family:-apple-system,"Segoe UI",Roboto,sans-serif;
   max-height:calc(100vh - 24px); overflow-y:auto;
 }
-#cue-panel.collapsed {
-  width:auto; max-height:none; overflow:visible; padding:8px;
+/* Popped out - either into its own draggable browser window, or embedded
+   in a FloatingPanel div (see TouchDock.vue). height:100% (not 100vh) so
+   it fills whichever parent it's actually in. */
+#cue-panel.popout {
+  position:static; width:100%; height:100%; max-height:none;
+  border:none; border-radius:0; box-sizing:border-box;
+  padding:20px 22px 40px;
 }
-.collapse-btn {
-  position:absolute; top:10px; right:10px; z-index:11;
-  width:22px; height:22px; padding:0; line-height:1;
-  font-size:12px; display:flex; align-items:center; justify-content:center;
-  background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.18);
-  color:#cfd3e6; border-radius:4px; cursor:pointer;
-}
-.collapse-btn:hover { background:rgba(255,255,255,0.14); }
-#cue-panel.collapsed .collapse-btn { position:static; }
-.panel-body { padding-right:26px; }
-h1 { font-size:13px; letter-spacing:2px; text-transform:uppercase; margin:0 0 8px; color:#8fe3ff; }
+#cue-panel.popout .mode-btn { padding:14px 6px; font-size:13px; }
+#cue-panel.popout .cue-grid { gap:10px; }
+#cue-panel.popout .cue-num.empty { font-size:16px; }
+#cue-panel.popout .hint { font-size:12px; }
 .mode-row { display:flex; gap:6px; margin-bottom:10px; }
 .mode-btn {
   flex:1; min-width:0; padding:6px 4px; font-size:11px; letter-spacing:0.3px;
