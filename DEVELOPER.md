@@ -9,6 +9,8 @@ backend/
   build.sh           Compiles laser_daemon (and legacy circle_daemon)
 frontend/
   src/components/ControlPanel.vue   All UI controls (shape, color, transform, FX...)
+  src/components/CuePanel.vue       Cue grid (save/recall/move/clear)
+  src/components/ZoningPanel.vue    Drag-to-move/scale "Zone 1" venue calibration
   src/components/LaserScene.vue     Three.js 3D preview, renders WS point stream
   src/composables/useLaserSocket.js REST + WebSocket client, shared reactive state
 start.sh             Builds backend if needed, runs both processes, cleans up on Ctrl-C
@@ -121,6 +123,12 @@ This replaced an earlier CWD-relative-path approach that had a real bug:
 MIDI control disabled"`) and could've read/written a stray `cues.json` in
 the wrong directory - with no obvious error. See `exe_dir()`,
 `app_data_dir()`, and `resolve_data_file()` in `laser_daemon.cpp`.
+
+`zones.json` (the "Zone 1" venue calibration - see "Zoning / multi-region
+output" below) lives in the same per-user app-data directory and is seeded/
+resolved the same way, via `load_zone_from_disk()`/`save_zone_to_disk()`.
+Unlike `cues.json`, it always has a value (defaults to no pan/scale) and is
+re-saved to disk on every `POST /api/zone`, not just at exit.
 
 ## Standalone / packaged builds
 
@@ -290,19 +298,52 @@ resolution as visible stepping), while big jumps (>0.25 normalized) get a
 boosted alpha so large moves still feel responsive. `make_frame()` reads
 the smoothed globals directly, not the raw target fields.
 
+### Zoning ("Zone 1")
+
+`zone_x`/`zone_y`/`zone_scale_x`/`zone_scale_y` are a master pan/zoom
+applied on top of everything else (shape/position/rotation/movement/
+mirror) — for mapping the whole show onto a physical sub-region of a
+laser's range (e.g. a wall or truss segment), not a per-look show
+parameter. Set only by dragging the box in `ZoningPanel.vue` (no numeric
+fader by design), backed by `GET`/`POST /api/zone`.
+
+- **Hardware-only, exactly like `blackout`/the footswitch gate.** It's
+  applied in `laser_thread()`'s hardware-send step, to a separate copy of
+  the frame (`hwFrame`) built *after* `make_frame()` already produced the
+  frame broadcast to the WS preview — so the preview always shows the
+  true, un-zoned show regardless of how the physical output is currently
+  mapped.
+- **Independent per-axis scale**, not a single uniform zoom, so the zone
+  can be stretched/squeezed on just one axis to match a non-square venue
+  region.
+- Points the zone pushes outside the DAC's ±1 range are blanked (not
+  clamped), same reasoning as `make_frame()`'s own off-screen handling —
+  clamping would pin/smear the shape against the venue boundary instead of
+  cleanly cutting it off.
+- Persisted independently in its own file, `zones.json` (not `cues.json`),
+  loaded once at startup via `load_zone_from_disk()` and re-saved on every
+  `POST /api/zone` — see "Persistent user data" above.
+- Exactly one zone exists right now ("Zone 1", permanently auto-assigned to
+  "Laser 1") since only a single laser output is supported; this becomes a
+  real per-laser list once multi-laser output exists.
+- Excluded from cue state and `/api/reset` for the same reason as
+  `blackout`/`flash_release_ms` — see "Cue system" below.
+
 ### Cue system
 
 Cues are snapshots of `LaserState` in `std::map<int, LaserState> G_cues`,
 guarded by its own `G_cues_mtx` and persisted to `backend/cues.json`. A
 handful of fields are deliberately *not* part of that snapshot even though
 they live on `LaserState` - `target_ip`, `flash_release_ms`, `intensity`
-(master brightness), `blackout` and `max_rate_kpps` are global daemon/safety
+(master brightness), `blackout`, `max_rate_kpps` and the zone 1 calibration
+(`zone_x`/`zone_y`/`zone_scale_x`/`zone_scale_y`) are global daemon/safety
 settings, not per-look show state: they're excluded from
 `cue_state_to_json`/`cue_state_from_json` and explicitly re-applied on top
 of `G` after every `do_cue_recall()` (and preserved across `/api/reset` the
 same way), so switching cues or resetting the show can never change the
 current connection, the footswitch fade time, the master brightness fader,
-whether the laser is blacked out, or the configured scan-rate ceiling.
+whether the laser is blacked out, the configured scan-rate ceiling, or the
+projector's physical zone alignment.
 
 **`G_mtx` and `G_cues_mtx` are never held at the same time** -
 `do_cue_save/recall/clear()` in laser_daemon.cpp are the *only* functions

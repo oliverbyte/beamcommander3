@@ -104,6 +104,14 @@ for how the packaged macOS/Windows builds are put together.
    "brightness on while held" switch. None of this is required — the web
    page alone is a complete remote control. See ["MIDI control"](#midi-control-optional)
    below if you want to set one up.
+7. **Optional: Zoning** — the Zoning panel lets you pan/scale the *entire*
+   output to fit a physical sub-region of the laser's range (e.g. a wall or
+   truss segment), independently of everything else you set up above. Drag
+   the green box to move it, drag one of its edges to stretch/squeeze just
+   that axis. This only reshapes the real laser output — the on-screen
+   preview always keeps showing the full, un-zoned show — and it's a venue
+   calibration, not a per-cue look, so it's unaffected by saving/recalling
+   cues or resetting the show.
 
 ---
 
@@ -182,6 +190,8 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the current connection and the global `flash_release_ms` setting - see below) |
 | `POST /api/cue/<n>/clear` | Delete slot `n` |
 | `POST /api/cue/<from>/move/<to>` | Move slot `from`'s cue into slot `to` (overwriting it), clearing `from`. 404 if `from` is empty or `from == to` |
+| `GET /api/zone` | Current "Zone 1" calibration (pan/scale applied to the whole hardware output) |
+| `POST /api/zone` | Update zone 1: `x`/`y` (-1..1, offset) and/or `scale_x`/`scale_y` (0.1..2, independent per-axis scale) |
 | `WS /ws/points` | Live preview stream, `{"pts":[[x,y,r,g,b],...]}` at ~30fps |
 
 `POST /api/state` accepts a JSON body with any of: `shape`, `radius`, `points`,
@@ -196,6 +206,12 @@ state: saving a cue never captures them and recalling one never changes them,
 no matter what they were set to when the cue was saved. `max_rate_kpps` also
 caps and defaults `rate_kpps` on the fader/REST/MIDI - turning it down lowers
 the scan-rate fader's usable range too.
+
+Zone 1 (`GET`/`POST /api/zone`, see above) is also excluded from cue state
+for the same reason — it's a physical venue calibration (which sub-region of
+the laser's range the whole show is mapped onto), not a show look, so it
+survives cue saves/recalls and `/api/reset` untouched and persists on its own
+in `zones.json` (not `cues.json`).
 
 ## Multi-client sync
 

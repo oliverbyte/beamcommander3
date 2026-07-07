@@ -211,6 +211,34 @@ struct LaserState {
     float dot_amount      = 1.0f;     // 0..1 fraction of points shown
     float flicker_hz      = 0.0f;     // strobe frequency
 
+    // Zone: a master pan/zoom applied to the *entire* final output, on top
+    // of everything else (shape/position/rotation/movement/mirror) - lets
+    // the whole show be mapped onto a sub-region of this laser's full
+    // physical range (e.g. to fit a wall/truss segment). Horizontal and
+    // vertical scale are independent axes (zone_scale_x/zone_scale_y), not
+    // a single uniform scale, so the zone can be stretched/squeezed on just
+    // one axis - matches the frontend's drag-to-move/drag-edge-to-resize
+    // zone box (see ZoningPanel.vue), which is the only way this is meant
+    // to be set (no numeric fader). Hardware-only, exactly like
+    // `blackout`/the footswitch gate above - it reshapes only the copy of
+    // the frame actually sent to the real controller (laser_thread()'s
+    // hardware-send step), never the browser preview (make_frame(), used
+    // for the WS broadcast), so the preview always shows the true,
+    // un-zoned show regardless of how the physical output is currently
+    // mapped. Exactly one zone exists right now ("Zone 1", permanently
+    // auto-assigned to "Laser 1") since only a single laser output is
+    // supported - this becomes a real per-laser list once multi-laser
+    // output exists. It's a physical venue
+    // calibration, not a per-cue show look, so - like target_ip - it's
+    // deliberately excluded from cue_state_to_json/cue_state_from_json and
+    // preserved across cue recalls (do_cue_recall()) and /api/reset; it has
+    // its own persistence (zones.json) and REST endpoint (/api/zone),
+    // loaded once at startup independently of the rest of this struct.
+    float zone_x          = 0.0f;     // -1..1, offset of the whole output
+    float zone_y          = 0.0f;     // -1..1
+    float zone_scale_x    = 1.0f;     // 0.1..2, independent horizontal multiplier
+    float zone_scale_y    = 1.0f;     // 0.1..2, independent vertical multiplier
+
     // Preview-only
     int   persistence_ms  = 25;
 };
@@ -540,7 +568,10 @@ static core::Frame make_frame(const LaserState& s) {
         // deliberately *not* applied here - it's hardware-only, applied to
         // a separate copy of the frame in laser_thread()'s hardware-send
         // step (same treatment as `blackout`), so the WS preview always
-        // shows the true, ungated brightness.
+        // shows the true, ungated brightness. Zone 1 (see zone_x/zone_y/
+        // zone_scale_x/zone_scale_y's comment) gets the exact same
+        // hardware-only treatment, for the exact same reason - applied in
+        // laser_thread(), never here.
         float px = mirror_sign * (base[i].x + ox);
         float py = base[i].y + oy;
         // Screen-edge safety: whatever we send downstream, the DAC encoder
@@ -794,6 +825,28 @@ static void laser_thread() {
 
         if (hardwareReady) {
             last_hw_send = now_tp;
+            // Zone 1 (laser 1): a hardware-only master pan/zoom, never
+            // applied to the browser preview (which already got the true,
+            // unzoned `frame` above) - see zone_x/zone_y/zone_scale_x/
+            // zone_scale_y's comment. Only a real controller output should
+            // be reshaped to fit the venue's physical sub-region; the
+            // preview always shows the full, un-zoned show. Horizontal and
+            // vertical scale are independent, so the zone can be
+            // stretched/squeezed on just one axis. Unlike the
+            // blackout/gate step below (color-only), this rewrites each
+            // point's actual x/y - and, same reasoning as make_frame()'s
+            // own off-screen handling, blanks (not clamps) anything the
+            // zone pushes outside the DAC's +-1 range instead of letting
+            // it pin/smear against the edge.
+            core::Frame hwFrame = frame;
+            if (snap.zone_scale_x != 1.0f || snap.zone_scale_y != 1.0f || snap.zone_x != 0.0f || snap.zone_y != 0.0f) {
+                for (auto& p : hwFrame.points) {
+                    float zx = p.x * snap.zone_scale_x + snap.zone_x;
+                    float zy = p.y * snap.zone_scale_y + snap.zone_y;
+                    p.x = zx; p.y = zy;
+                    if (std::fabs(zx) > 1.0f || std::fabs(zy) > 1.0f) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
+                }
+            }
             // Blackout and the footswitch brightness gate only ever
             // suppress/dim the *real* laser output, never the browser
             // preview (which already got the true, full-brightness `frame`
@@ -805,17 +858,17 @@ static void laser_thread() {
             // while closed/closing - see g_gate_level's comment) is applied
             // as a multiplier.
             if (snap.blackout) {
-                core::Frame blanked = frame;
+                core::Frame blanked = hwFrame;
                 for (auto& p : blanked.points) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
                 ctrl->sendFrame(std::move(blanked));
             } else if (g_gate_level < 1.0f) {
-                core::Frame gated = frame;
+                core::Frame gated = hwFrame;
                 for (auto& p : gated.points) {
                     p.r *= g_gate_level; p.g *= g_gate_level; p.b *= g_gate_level;
                 }
                 ctrl->sendFrame(std::move(gated));
             } else {
-                ctrl->sendFrame(std::move(frame));
+                ctrl->sendFrame(std::move(hwFrame));
             }
         }
     }
@@ -847,6 +900,46 @@ static bool json_bool(const std::string& b,const std::string& k,bool d) {
     return d;
 }
 static int json_int(const std::string& b,const std::string& k,int d){ return (int)json_float(b,k,(float)d); }
+
+// ── Zone persistence ─────────────────────────────────────────────────────────
+// "Zone 1" (see LaserState::zone_x/zone_y/zone_scale_x/zone_scale_y) is a
+// physical venue calibration, not a show look, so it lives in its own
+// small file (zones.json) rather than the general show state - which
+// currently isn't persisted at all - so a projector alignment survives a
+// daemon restart.
+static const std::string ZONES_FILE = resolve_data_file("zones.json");
+
+static void save_zone_to_disk() {
+    std::ostringstream ss; ss << std::fixed << std::setprecision(4);
+    float zx, zy, zsx, zsy;
+    { std::lock_guard<std::mutex> lk(G_mtx); zx = G.zone_x; zy = G.zone_y; zsx = G.zone_scale_x; zsy = G.zone_scale_y; }
+    ss << "{\"laser_id\":1,\"x\":" << zx << ",\"y\":" << zy << ",\"scale_x\":" << zsx << ",\"scale_y\":" << zsy << "}";
+    std::ofstream f(ZONES_FILE, std::ios::trunc);
+    if (f) f << ss.str();
+}
+
+// Seeds zones.json with the compiled-in defaults on first run (no file
+// yet), otherwise loads the persisted zone 1 values into G.
+static void load_zone_from_disk() {
+    std::ifstream f(ZONES_FILE);
+    if (!f) { save_zone_to_disk(); return; }
+    std::ostringstream buf; buf << f.rdbuf();
+    std::string body = buf.str();
+    std::lock_guard<std::mutex> lk(G_mtx);
+    G.zone_x       = json_float(body, "x", G.zone_x);
+    G.zone_y       = json_float(body, "y", G.zone_y);
+    G.zone_scale_x = json_float(body, "scale_x", G.zone_scale_x);
+    G.zone_scale_y = json_float(body, "scale_y", G.zone_scale_y);
+    std::cout << "[laser_daemon] Loaded zone 1 from " << ZONES_FILE << "\n";
+}
+
+static std::string zone_to_json() {
+    std::lock_guard<std::mutex> lk(G_mtx);
+    std::ostringstream ss; ss << std::fixed << std::setprecision(4);
+    ss << "{\"laser_id\":1,\"x\":" << G.zone_x << ",\"y\":" << G.zone_y
+       << ",\"scale_x\":" << G.zone_scale_x << ",\"scale_y\":" << G.zone_scale_y << "}";
+    return ss.str();
+}
 
 // ── Cue save/recall ──────────────────────────────────────────────────────────
 // A cue is a saved snapshot of every show parameter (shape, color, transform,
@@ -989,14 +1082,15 @@ static bool do_cue_recall(int n) {
     {
         std::lock_guard<std::mutex> lk(G_mtx);
         std::string ip = G.target_ip;
-        // flash_release_ms, intensity (master brightness), max_rate_kpps
-        // and blackout are global daemon settings, not part of the per-cue
-        // show state - preserve whatever they're currently set to across
-        // the recall, same treatment as target_ip.
+        // flash_release_ms, intensity (master brightness), max_rate_kpps,
+        // blackout and the zone 1 calibration are global daemon settings,
+        // not part of the per-cue show state - preserve whatever they're
+        // currently set to across the recall, same treatment as target_ip.
         float flash_release_ms = G.flash_release_ms;
         float intensity = G.intensity;
         float max_rate_kpps = G.max_rate_kpps;
         bool blackout = G.blackout;
+        float zone_x = G.zone_x, zone_y = G.zone_y, zone_scale_x = G.zone_scale_x, zone_scale_y = G.zone_scale_y;
         G = snap;
         G.target_ip = ip;
         G.flash_release_ms = flash_release_ms;
@@ -1004,6 +1098,7 @@ static bool do_cue_recall(int n) {
         G.max_rate_kpps = max_rate_kpps;
         G.rate_kpps = std::clamp(G.rate_kpps, 0.0f, G.max_rate_kpps);
         G.blackout = blackout;
+        G.zone_x = zone_x; G.zone_y = zone_y; G.zone_scale_x = zone_scale_x; G.zone_scale_y = zone_scale_y;
     }
     // Restore the rotation angle the cue was saved at (see do_cue_save).
     G_rotation_phase.store(snap.rotation_phase);
@@ -1530,6 +1625,7 @@ int main(int argc, char* argv[]) {
     std::cout << "[laser_daemon] User data directory: " << app_data_dir() << "\n";
 
     load_cues_from_disk();
+    load_zone_from_disk();
 
     std::thread laser_t(laser_thread);
     std::thread midi_t(midi_thread);
@@ -1557,6 +1653,22 @@ int main(int argc, char* argv[]) {
     // ── GET /api/state ──────────────────────────────────────────────────────────
     svr.Get("/api/state",[](const httplib::Request&,httplib::Response& res){
         res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── GET /api/zone — "Zone 1", auto-assigned to "Laser 1" ───────────────────
+    svr.Get("/api/zone",[](const httplib::Request&,httplib::Response& res){
+        res.set_content(zone_to_json(),"application/json");
+    });
+
+    // ── POST /api/zone — move/scale zone 1 (x/y move, independent scale_x/scale_y) ─
+    svr.Post("/api/zone",[](const httplib::Request& req,httplib::Response& res){
+        { std::lock_guard<std::mutex> lk(G_mtx);
+          APPLY_F("x",zone_x) APPLY_CLAMP("x",zone_x,-1,1)
+          APPLY_F("y",zone_y) APPLY_CLAMP("y",zone_y,-1,1)
+          APPLY_F("scale_x",zone_scale_x) APPLY_CLAMP("scale_x",zone_scale_x,0.1,2)
+          APPLY_F("scale_y",zone_scale_y) APPLY_CLAMP("scale_y",zone_scale_y,0.1,2) }
+        save_zone_to_disk();
+        res.set_content(zone_to_json(),"application/json");
     });
 
     // ── POST /api/state — bulk update ──────────────────────────────────────────
@@ -1733,10 +1845,11 @@ int main(int argc, char* argv[]) {
 
     // ── POST /api/reset — restore all show params to defaults ─────────────────
     // Preserves the current controller connection (target_ip / armed state),
-    // the global flash_release_ms / max_rate_kpps settings, and blackout
-    // (see their comments) so resetting the show doesn't drop the laser
-    // link, change the footswitch's fade time, change the venue's
-    // configured scan-rate ceiling, or silently un-blank/blank the laser.
+    // the global flash_release_ms / max_rate_kpps settings, blackout, and
+    // the zone 1 calibration (see their comments) so resetting the show
+    // doesn't drop the laser link, change the footswitch's fade time,
+    // change the venue's configured scan-rate ceiling, silently un-blank/
+    // blank the laser, or undo the projector's physical zone alignment.
     svr.Post("/api/reset",[](const httplib::Request&,httplib::Response& res){
         {
             std::lock_guard<std::mutex> lk(G_mtx);
@@ -1744,12 +1857,14 @@ int main(int argc, char* argv[]) {
             float flash_release_ms = G.flash_release_ms;
             float max_rate_kpps = G.max_rate_kpps;
             bool blackout = G.blackout;
+            float zone_x = G.zone_x, zone_y = G.zone_y, zone_scale_x = G.zone_scale_x, zone_scale_y = G.zone_scale_y;
             G = LaserState{};
             G.target_ip = ip;
             G.flash_release_ms = flash_release_ms;
             G.max_rate_kpps = max_rate_kpps;
             G.rate_kpps = std::clamp(G.rate_kpps, 0.0f, G.max_rate_kpps);
             G.blackout = blackout;
+            G.zone_x = zone_x; G.zone_y = zone_y; G.zone_scale_x = zone_scale_x; G.zone_scale_y = zone_scale_y;
         }
         res.set_content(state_to_json(),"application/json");
     });

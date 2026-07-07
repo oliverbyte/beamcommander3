@@ -195,6 +195,27 @@ export async function moveCue(from, to) {
   await fetchCues()
 }
 
+// ── Zoning ───────────────────────────────────────────────────────────────────
+// "Zone 1", auto-assigned to "Laser 1" (the only laser currently supported) -
+// a master pan/zoom applied to the whole output, for mapping the show onto a
+// physical sub-region of that laser's range. See /api/zone in laser_daemon.cpp.
+export const zone = reactive({ laser_id: 1, x: 0, y: 0, scale_x: 1, scale_y: 1 })
+
+export async function fetchZone() {
+  Object.assign(zone, await api('/zone'))
+}
+
+// Guards against the background poll clobbering an optimistic local drag
+// edit that's still in flight - same reasoning as markLocalChange() above,
+// separate timestamp since zone updates are independent of the rest of
+// laserState.
+let lastZoneLocalChangeAt = 0
+
+export async function updateZone(partial) {
+  lastZoneLocalChangeAt = Date.now()
+  Object.assign(zone, await api('/zone', { method: 'POST', body: JSON.stringify(partial) }))
+}
+
 // ── Status polling ─────────────────────────────────────────────────────────────
 // Keeps this client's view of laserState in sync even when another client
 // (a different browser tab, curl, etc.) changes settings on the backend.
@@ -205,6 +226,10 @@ export function startStatusPolling(intervalMs = 1000) {
   statusPoll = setInterval(() => {
     api('/state').then(applyPolledState).catch(() => {})
     api('/cues').then(applyCues).catch(() => {})
+    api('/zone').then(data => {
+      if (Date.now() - lastZoneLocalChangeAt < 700) return
+      Object.assign(zone, data)
+    }).catch(() => {})
   }, intervalMs)
 }
 export function stopStatusPolling() {
