@@ -4,6 +4,7 @@ import LaserScene from './components/LaserScene.vue'
 import ControlPanel from './components/ControlPanel.vue'
 import CuePanel from './components/CuePanel.vue'
 import ZoningPanel from './components/ZoningPanel.vue'
+import LasersPanel from './components/LasersPanel.vue'
 import TouchDock from './components/TouchDock.vue'
 import { connectSocket, fetchState, startStatusPolling } from './composables/useLaserSocket.js'
 
@@ -19,7 +20,7 @@ const popupView = new URLSearchParams(window.location.search).get('popup')
 // The popped-out panel has no in-content heading of its own (see
 // ControlPanel/CuePanel) - its title lives only in the actual window/tab
 // title instead, so it still identifies itself in the taskbar.
-const POPUP_TITLES = { settings: 'Settings', cues: 'Cues', zoning: 'Zoning' }
+const POPUP_TITLES = { settings: 'Settings', cues: 'Cues', zoning: 'Zoning', lasers: 'Lasers' }
 if (popupView && POPUP_TITLES[popupView]) {
   document.title = `BeamCommander3 – ${POPUP_TITLES[popupView]}`
 }
@@ -36,6 +37,7 @@ onMounted(() => {
     <ControlPanel v-if="popupView === 'settings'" popout @update:persistence="persistenceMs = $event" />
     <CuePanel v-else-if="popupView === 'cues'" popout />
     <ZoningPanel v-else-if="popupView === 'zoning'" popout />
+    <LasersPanel v-else-if="popupView === 'lasers'" popout />
   </template>
   <template v-else>
     <LaserScene :persistence-ms="persistenceMs" />

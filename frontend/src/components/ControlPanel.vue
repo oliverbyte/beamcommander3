@@ -6,11 +6,19 @@
       Preview {{ laserState.wsConnected ? 'live' : 'connecting…' }}
     </div>
     <div class="status-row">
-      <span class="dot" :class="{ on: laserState.armed }"></span>
-      Laser {{ laserState.armed ? `→ ${laserState.ip}` : 'disarmed' }}
+      <span class="dot" :class="{ on: connectedLaserCount > 0 }"></span>
+      Lasers {{ connectedLaserCount }}/{{ lasers.length }} streaming
     </div>
     <button class="blackout-btn" :class="{ active: laserState.blackout }" @click="push({ blackout: !laserState.blackout })">
       {{ laserState.blackout ? '◼ BLACKOUT' : '◻ Blackout' }}
+    </button>
+    <button
+      class="gate-btn"
+      :class="{ active: laserState.brightness_gate_open }"
+      title="Master output gate - like holding a footswitch. Must be open (and Blackout off) for any real laser output."
+      @click="toggleGate"
+    >
+      {{ laserState.brightness_gate_open ? '🔓 Output Enabled' : '🔒 Output Gated (click to enable)' }}
     </button>
     <button
       class="flash-btn"
@@ -83,14 +91,7 @@
     <input type="range" min="0" max="100" step="1" :value="persistenceMs" @input="onPersist(+$event.target.value)" />
 
     <hr />
-    <h2>Controller</h2>
-    <div class="row">
-      <input type="text" v-model="ipInput" placeholder="IP address" />
-    </div>
-    <div class="row">
-      <button v-if="!laserState.armed" @click="arm" :disabled="!ipInput">Connect</button>
-      <button v-else @click="disarm" class="btn-stop">Disconnect</button>
-    </div>
+    <p class="hint">Manage laser (DAC) connections in the Lasers panel.</p>
     <p class="error" v-if="laserState.error">{{ laserState.error }}</p>
     </div>
   </div>
@@ -98,7 +99,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { laserState, updateState, resetState, connectLaser, disconnectLaser, markLocalChange, flashPress, flashRelease } from '../composables/useLaserSocket.js'
+import { laserState, lasers, updateState, resetState, markLocalChange, flashPress, flashRelease, setBrightnessGate } from '../composables/useLaserSocket.js'
 
 const { popout } = defineProps({ popout: { type: Boolean, default: false } })
 const emit = defineEmits(['update:persistence'])
@@ -106,7 +107,8 @@ const emit = defineEmits(['update:persistence'])
 const SHAPES = ['circle','line','triangle','square','wave','staticwave']
 const MOVES  = ['none','circle','pan','tilt','eight','random']
 const persistenceMs = ref(5)
-const ipInput = ref('10.10.10.4')
+
+const connectedLaserCount = computed(() => lasers.filter(l => l.connected).length)
 
 const hexColor = computed(() => {
   const to = v => Math.round(v*255).toString(16).padStart(2,'0')
@@ -150,6 +152,9 @@ function onFlashUp() {
   flashHeld = false
   flashRelease().catch(console.error)
 }
+function toggleGate() {
+  setBrightnessGate(!laserState.brightness_gate_open).catch(console.error)
+}
 function fmt(v) { return typeof v === 'boolean' ? String(v) : Number(v).toFixed(2) }
 function onPersist(v) { persistenceMs.value = v; emit('update:persistence', v) }
 
@@ -161,11 +166,6 @@ function push(partial) {
   debounce = setTimeout(() => updateState(partial).catch(console.error), 80)
 }
 
-async function arm() {
-  if (!ipInput.value) return
-  await connectLaser(ipInput.value).catch(e => { laserState.error = String(e) })
-}
-async function disarm() { await disconnectLaser().catch(console.error) }
 async function reset() { await resetState().catch(console.error) }
 </script>
 
@@ -195,7 +195,7 @@ async function reset() { await resetState().catch(console.error) }
 #ui.popout .btn-grid button { padding:14px 4px; font-size:13px; }
 #ui.popout input[type="range"] { height:28px; }
 #ui.popout input[type="text"] { padding:10px 8px; font-size:14px; }
-#ui.popout .blackout-btn, #ui.popout .flash-btn, #ui.popout .reset-btn { padding:14px; font-size:15px; }
+#ui.popout .blackout-btn, #ui.popout .gate-btn, #ui.popout .flash-btn, #ui.popout .reset-btn { padding:14px; font-size:15px; }
 h2 { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; margin:8px 0 4px; color:#9aa0bd; }
 label { display:block; font-size:11px; margin:6px 0 1px; color:#9aa0bd; }
 .val { color:#cfd3e6; margin-left:4px; }
@@ -209,6 +209,7 @@ button:disabled { opacity:0.5; cursor:default; }
 button.active { background:rgba(72,224,122,0.18); border-color:#48e07a; color:#48e07a; }
 .btn-stop { border-color:rgba(255,100,100,0.5); color:#ff8080; }
 .blackout-btn { width:100%; margin-top:6px; padding:6px; font-size:12px; letter-spacing:1px; }
+.gate-btn { width:100%; margin-top:6px; padding:6px; font-size:12px; letter-spacing:0.5px; }
 .blackout-btn.active { background:rgba(255,50,50,0.28); border-color:#ff4040; color:#ff8080; }
 .flash-btn { width:100%; margin-top:6px; padding:6px; font-size:12px; letter-spacing:1px; user-select:none; touch-action:none; }
 .flash-btn:active { background:rgba(255,255,255,0.35); border-color:#ffffff; color:#ffffff; }
@@ -218,6 +219,7 @@ hr { border:none; border-top:1px solid rgba(255,255,255,0.1); margin:8px 0; }
 .dot { width:7px; height:7px; border-radius:50%; background:#703030; flex-shrink:0; }
 .dot.on { background:#48e07a; }
 .error { font-size:11px; color:#ff8080; word-break:break-word; margin-top:4px; }
+.hint { font-size:10px; color:#6a7090; margin:0 0 8px; line-height:1.4; }
 .btn-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:3px; margin-bottom:4px; }
 .btn-grid button { padding:4px 2px; font-size:10px; text-align:center; }
 </style>
