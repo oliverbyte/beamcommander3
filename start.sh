@@ -6,6 +6,19 @@ DAEMON_BIN="$ROOT/backend/laser_daemon"
 DAEMON_LOG="${TMPDIR:-/tmp}/bc3-daemon.log"
 FRONTEND_LOG="${TMPDIR:-/tmp}/bc3-frontend.log"
 
+# Pin Node.js to nvm's (arm64) build. Depending on how this script is
+# invoked, PATH may resolve `node`/`npm` to an x86_64 Homebrew install at
+# /usr/local/bin instead (e.g. non-interactive shells that don't run
+# ~/.zshrc's nvm init). That mismatch makes vite/rolldown fail with
+# "Cannot find native binding" because frontend/node_modules only has the
+# arm64 optional binary installed. Force nvm's node here so behavior is
+# consistent regardless of the caller's shell/PATH.
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+    \. "$NVM_DIR/nvm.sh"
+    nvm use default >/dev/null
+fi
+
 # Kill child processes on exit/Ctrl-C — run only once
 _cleaned=0
 cleanup() {
