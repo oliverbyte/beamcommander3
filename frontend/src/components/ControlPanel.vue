@@ -6,8 +6,8 @@
       Preview {{ laserState.wsConnected ? 'live' : 'connecting…' }}
     </div>
     <div class="status-row">
-      <span class="dot" :class="{ on: laserState.armed }"></span>
-      Laser {{ laserState.armed ? `→ ${laserState.ip}` : 'disarmed' }}
+      <span class="dot" :class="{ on: connectedLaserCount > 0 }"></span>
+      Lasers {{ connectedLaserCount }}/{{ lasers.length }} streaming
     </div>
     <button class="blackout-btn" :class="{ active: laserState.blackout }" @click="push({ blackout: !laserState.blackout })">
       {{ laserState.blackout ? '◼ BLACKOUT' : '◻ Blackout' }}
@@ -83,14 +83,7 @@
     <input type="range" min="0" max="100" step="1" :value="persistenceMs" @input="onPersist(+$event.target.value)" />
 
     <hr />
-    <h2>Controller</h2>
-    <div class="row">
-      <input type="text" v-model="ipInput" placeholder="IP address" />
-    </div>
-    <div class="row">
-      <button v-if="!laserState.armed" @click="arm" :disabled="!ipInput">Connect</button>
-      <button v-else @click="disarm" class="btn-stop">Disconnect</button>
-    </div>
+    <p class="hint">Manage laser (DAC) connections in the Lasers panel.</p>
     <p class="error" v-if="laserState.error">{{ laserState.error }}</p>
     </div>
   </div>
@@ -98,7 +91,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { laserState, updateState, resetState, connectLaser, disconnectLaser, markLocalChange, flashPress, flashRelease } from '../composables/useLaserSocket.js'
+import { laserState, lasers, updateState, resetState, markLocalChange, flashPress, flashRelease } from '../composables/useLaserSocket.js'
 
 const { popout } = defineProps({ popout: { type: Boolean, default: false } })
 const emit = defineEmits(['update:persistence'])
@@ -106,7 +99,8 @@ const emit = defineEmits(['update:persistence'])
 const SHAPES = ['circle','line','triangle','square','wave','staticwave']
 const MOVES  = ['none','circle','pan','tilt','eight','random']
 const persistenceMs = ref(5)
-const ipInput = ref('10.10.10.4')
+
+const connectedLaserCount = computed(() => lasers.filter(l => l.connected).length)
 
 const hexColor = computed(() => {
   const to = v => Math.round(v*255).toString(16).padStart(2,'0')
@@ -161,11 +155,6 @@ function push(partial) {
   debounce = setTimeout(() => updateState(partial).catch(console.error), 80)
 }
 
-async function arm() {
-  if (!ipInput.value) return
-  await connectLaser(ipInput.value).catch(e => { laserState.error = String(e) })
-}
-async function disarm() { await disconnectLaser().catch(console.error) }
 async function reset() { await resetState().catch(console.error) }
 </script>
 
@@ -218,6 +207,7 @@ hr { border:none; border-top:1px solid rgba(255,255,255,0.1); margin:8px 0; }
 .dot { width:7px; height:7px; border-radius:50%; background:#703030; flex-shrink:0; }
 .dot.on { background:#48e07a; }
 .error { font-size:11px; color:#ff8080; word-break:break-word; margin-top:4px; }
+.hint { font-size:10px; color:#6a7090; margin:0 0 8px; line-height:1.4; }
 .btn-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:3px; margin-bottom:4px; }
 .btn-grid button { padding:4px 2px; font-size:10px; text-align:center; }
 </style>

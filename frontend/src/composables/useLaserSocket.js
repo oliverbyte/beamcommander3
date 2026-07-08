@@ -37,9 +37,6 @@ export const laserState = reactive({
   // Scan
   rate_kpps:       30,
   max_rate_kpps:   30,
-  // Controller
-  armed:           false,
-  ip:              '',
   // UI-only
   wsConnected:     false,
   error:           null,
@@ -48,6 +45,13 @@ export const laserState = reactive({
 // Cue slots — { [cueNumber]: <full saved state object> } for populated
 // slots only; a slot simply being absent from this object means it's empty.
 export const cues = reactive({})
+
+// Configured lasers (physical DACs) — see GET/POST/DELETE /api/lasers in
+// laser_daemon.cpp. Each entry: {id, name, ip, assigned_zone, connected}.
+// assigned_zone 0 = configured but idle, 1 = streaming Zone 1's output
+// (the only zone that exists today) - any number of lasers can share
+// assigned_zone 1 at once, all receiving the same output in parallel.
+export const lasers = reactive([])
 
 // ── WebSocket preview ──────────────────────────────────────────────────────────
 
@@ -140,14 +144,32 @@ export async function setBrightness(v) {
   applyState(await laser(`/brightness/${v}`, { method: 'POST' }))
 }
 
-export async function connectLaser(ip) {
-  markLocalChange()
-  applyState(await laser(`/connect/${encodeURIComponent(ip)}`, { method: 'POST' }))
+// ── Lasers (DACs) ────────────────────────────────────────────────────────────
+// Manage the configured laser list and each one's Zone 1 assignment - see
+// GET/POST/DELETE /api/lasers in laser_daemon.cpp. Unlike laserState/zone,
+// there's no optimistic local-change guard here: the list is small and
+// edited infrequently, so a full re-fetch after every mutation is simplest.
+function applyLasers(data) {
+  lasers.splice(0, lasers.length, ...(data || []))
 }
 
-export async function disconnectLaser() {
-  markLocalChange()
-  applyState(await laser('/disconnect', { method: 'POST' }))
+export async function fetchLasers() {
+  applyLasers(await api('/lasers'))
+}
+
+export async function addLaser(name, ip) {
+  await api('/lasers', { method: 'POST', body: JSON.stringify({ name, ip }) })
+  await fetchLasers()
+}
+
+export async function updateLaser(id, partial) {
+  await api(`/lasers/${id}`, { method: 'POST', body: JSON.stringify(partial) })
+  await fetchLasers()
+}
+
+export async function deleteLaser(id) {
+  await api(`/lasers/${id}`, { method: 'DELETE' })
+  await fetchLasers()
 }
 
 // Momentary flash: forces color to white *and* full brightness only while
@@ -226,6 +248,7 @@ export function startStatusPolling(intervalMs = 1000) {
   statusPoll = setInterval(() => {
     api('/state').then(applyPolledState).catch(() => {})
     api('/cues').then(applyCues).catch(() => {})
+    api('/lasers').then(applyLasers).catch(() => {})
     api('/zone').then(data => {
       if (Date.now() - lastZoneLocalChangeAt < 700) return
       Object.assign(zone, data)

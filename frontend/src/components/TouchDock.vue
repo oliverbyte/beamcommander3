@@ -46,6 +46,18 @@
   >
     <ZoningPanel popout />
   </FloatingPanel>
+
+  <FloatingPanel
+    v-if="open.lasers"
+    title="Lasers"
+    :width="320"
+    :initial-x="pos(920)"
+    :initial-y="pos(40, true)"
+    @close="open.lasers = false"
+    @popout="popout('lasers')"
+  >
+    <LasersPanel popout />
+  </FloatingPanel>
 </template>
 
 <script setup>
@@ -59,6 +71,7 @@ import FloatingPanel from './FloatingPanel.vue'
 import ControlPanel from './ControlPanel.vue'
 import CuePanel from './CuePanel.vue'
 import ZoningPanel from './ZoningPanel.vue'
+import LasersPanel from './LasersPanel.vue'
 
 defineEmits(['update:persistence'])
 
@@ -66,9 +79,10 @@ const ITEMS = [
   { view: 'settings', icon: '⚙️', label: 'Settings' },
   { view: 'cues',     icon: '🎬', label: 'Cues' },
   { view: 'zoning',   icon: '🗺️', label: 'Zoning' },
+  { view: 'lasers',   icon: '📡', label: 'Lasers' },
 ]
 
-const open = reactive({ settings: false, cues: false, zoning: false })
+const open = reactive({ settings: false, cues: false, zoning: false, lasers: false })
 
 // Cascaded default position for a panel, clamped to whatever the actual
 // viewport is (a small/secondary screen would otherwise place a panel

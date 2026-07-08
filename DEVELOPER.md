@@ -11,6 +11,7 @@ frontend/
   src/components/ControlPanel.vue   All UI controls (shape, color, transform, FX...)
   src/components/CuePanel.vue       Cue grid (save/recall/move/clear)
   src/components/ZoningPanel.vue    Drag-to-move/scale "Zone 1" venue calibration
+  src/components/LasersPanel.vue    Add/remove lasers (DACs), assign them to Zone 1
   src/components/LaserScene.vue     Three.js 3D preview, renders WS point stream
   src/composables/useLaserSocket.js REST + WebSocket client, shared reactive state
 start.sh             Builds backend if needed, runs both processes, cleans up on Ctrl-C
@@ -226,9 +227,11 @@ laser_daemon.cpp
   │       G_pos_y_smooth) - see "Animation phase continuity" below
   │     - generates a Frame from the current LaserState every tick
   │     - always broadcasts the frame over WebSocket at ~30fps (preview),
-  │       regardless of hardware connection state
-  │     - if a controller is connected + armed + ready, also sends the
-  │       same frame to it via libera's core::LaserController API
+  │       regardless of any hardware connection state
+  │     - owns one core::LaserController per configured+assigned laser
+  │       (G_lasers) and, each tick, sends the same zone-transformed frame
+  │       to every one of them that's connected + ready, in parallel - see
+  │       "Lasers (multi-DAC output)" below
   ├── midi_thread()      optional, macOS/CoreMIDI only: auto-connects to
   │     every MIDI source, dispatches note/CC messages into the same
   │     LaserState - see "MIDI subsystem" below
@@ -248,9 +251,11 @@ Key design points:
   4095-point buffer) instead of relying on libera's UDP broadcast discovery.
   This avoids `UdpSocket bind_any failed` errors when the discovery port is
   already in use, and connects instantly instead of waiting out a scan.
-- **Connect retry backoff.** Hardware connect attempts back off 1s after a
-  failure (`next_connect_attempt`) so a persistently-unreachable IP doesn't
-  spam TCP connect attempts on every loop iteration.
+- **Connect retry backoff.** Each laser's hardware connect attempts back off
+  1s after a failure (`LaserRuntime::next_connect_attempt`) so a
+  persistently-unreachable IP doesn't spam TCP connect attempts on every
+  loop iteration - tracked independently per laser, so one unreachable DAC
+  never delays connecting to (or streaming) the others.
 - **Single non-recursive mutex (`G_mtx`).** Every REST handler that mutates
   `LaserState` must fully release the lock *before* calling `state_to_json()`,
   which locks the same mutex again. Getting this wrong deadlocks the handler's
@@ -260,8 +265,10 @@ Key design points:
   `{ }` block or inside a `try { }` that ends before the `res.set_content(...)`
   call.
 - **`POST /api/reset`** restores `LaserState` to its default-constructed
-  values but preserves `target_ip` so resetting the show doesn't drop the
-  hardware connection.
+  values but preserves `flash_release_ms`/`max_rate_kpps`/`blackout`/the
+  zone 1 calibration (all global daemon settings - see "Cue system"
+  below). The configured laser list (`G_lasers`/`lasers.json`) is entirely
+  separate from `LaserState` and untouched by a reset.
 - **No recursive shape/frame restart on param change.** All shape/movement/
   color/etc. parameters are read fresh from `G` every frame — there is no
   "restart the daemon" step anywhere, so slider drags are glitch-free.
@@ -323,26 +330,61 @@ fader by design), backed by `GET`/`POST /api/zone`.
 - Persisted independently in its own file, `zones.json` (not `cues.json`),
   loaded once at startup via `load_zone_from_disk()` and re-saved on every
   `POST /api/zone` — see "Persistent user data" above.
-- Exactly one zone exists right now ("Zone 1", permanently auto-assigned to
-  "Laser 1") since only a single laser output is supported; this becomes a
-  real per-laser list once multi-laser output exists.
+- Exactly one zone exists right now ("Zone 1"). Any number of physical
+  lasers can be assigned to it at once though — see "Lasers (multi-DAC
+  output)" below for the per-laser list this zone concept was already
+  designed to plug into.
 - Excluded from cue state and `/api/reset` for the same reason as
   `blackout`/`flash_release_ms` — see "Cue system" below.
+
+### Lasers (multi-DAC output)
+
+`G_lasers` (`std::vector<LaserConfig>`, guarded by `G_lasers_mtx`) is the
+configured list of physical DACs, persisted to `lasers.json` and exposed
+via `GET/POST /api/lasers`, `POST /api/lasers/<id>`, `DELETE
+/api/lasers/<id>` — added/renamed/re-IP'd/removed from the **Lasers** panel
+(`LasersPanel.vue`) in the UI. Each entry is `{id, name, ip,
+assigned_zone}`; `assigned_zone` is `0` (configured but idle - no network
+connection attempted) or `1` (Zone 1 — the only zone that exists today).
+
+`laser_thread()` owns a `std::map<int, LaserRuntime>` — one
+`core::LaserController` + its own connect/pacing state per laser id — kept
+entirely local to that thread (never shared with the HTTP thread; only a
+plain `bool` "connected" summary is, via `G_laser_connected`/
+`set_laser_connected()`, which `GET /api/lasers` reads). Every tick it:
+
+1. Snapshots `G_lasers` (brief lock, no HTTP request ever blocks on
+   connect/send work).
+2. Drops runtime state for any laser id no longer configured at all.
+3. Connects/disconnects/retries each laser independently based on its own
+   `assigned_zone`/`ip` (same connect-retry-backoff logic as before, just
+   duplicated per laser instead of a single global `ctrl`).
+4. If *any* assigned+connected laser is ready for a new frame, renders one
+   zone-transformed + blackout/gate-applied frame and fans an independent
+   copy out to every laser that's currently ready (`isReadyForNewFrame()` +
+   its own 20ms pacing floor).
+
+This works safely in parallel (not sequentially/one-at-a-time) because
+`core::LaserController::sendFrame()` just queues the frame into that
+controller's own internal scheduler rather than blocking on the network
+write — looping over N controllers and calling `sendFrame()` on each ready
+one therefore adds no meaningful per-controller latency, and one slow/
+unreachable DAC can never delay or lag another's output.
 
 ### Cue system
 
 Cues are snapshots of `LaserState` in `std::map<int, LaserState> G_cues`,
 guarded by its own `G_cues_mtx` and persisted to `backend/cues.json`. A
 handful of fields are deliberately *not* part of that snapshot even though
-they live on `LaserState` - `target_ip`, `flash_release_ms`, `intensity`
+they live on `LaserState` - `flash_release_ms`, `intensity`
 (master brightness), `blackout`, `max_rate_kpps` and the zone 1 calibration
 (`zone_x`/`zone_y`/`zone_scale_x`/`zone_scale_y`) are global daemon/safety
 settings, not per-look show state: they're excluded from
 `cue_state_to_json`/`cue_state_from_json` and explicitly re-applied on top
 of `G` after every `do_cue_recall()` (and preserved across `/api/reset` the
 same way), so switching cues or resetting the show can never change the
-current connection, the footswitch fade time, the master brightness fader,
-whether the laser is blacked out, the configured scan-rate ceiling, or the
+footswitch fade time, the master brightness fader, whether the laser is
+blacked out, the configured scan-rate ceiling, or the
 projector's physical zone alignment.
 
 **`G_mtx` and `G_cues_mtx` are never held at the same time** -

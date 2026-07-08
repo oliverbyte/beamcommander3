@@ -130,10 +130,10 @@ start.sh
 
 There is no Python and no separate daemon process — `laser_daemon` *is* the
 backend. It generates every frame once, streams it to the browser preview via
-WebSocket, and (if a controller is connected/armed) sends the same frame to
-the hardware. Preview and hardware output are decoupled: the preview keeps
-animating and responding to every parameter change even when no laser is
-connected.
+WebSocket, and (for every laser assigned to Zone 1 that's connected) sends the
+same frame to that hardware in parallel. Preview and hardware output are
+decoupled: the preview keeps animating and responding to every parameter
+change even when no laser is connected.
 
 ## Quick start
 
@@ -151,12 +151,18 @@ Press `Ctrl-C` to stop both processes cleanly.
 
 ## Connecting a real laser
 
-In the UI, enter the controller's IP address (e.g. an Ether Dream at
-`10.10.10.4`) and click **Connect**. Or via the API:
+Open the **Lasers** panel in the UI, add a laser with its controller's IP
+address (e.g. an Ether Dream at `10.10.10.4`), then click its **Zone 1**
+button to assign it (this is what actually connects/streams to it). Any
+number of lasers can be assigned to Zone 1 at once - they all receive the
+same output in parallel. Or via the API:
 
 ```sh
-curl -X POST http://localhost:8000/laser/connect/10.10.10.4
-curl -X POST http://localhost:8000/laser/disconnect
+curl -X POST http://localhost:8000/api/lasers -d '{"name":"Laser 1","ip":"10.10.10.4"}'
+# → {"id":1,"name":"Laser 1","ip":"10.10.10.4","assigned_zone":0,"connected":false}
+curl -X POST http://localhost:8000/api/lasers/1 -d '{"assigned_zone":1}'
+curl -X POST http://localhost:8000/api/lasers/1 -d '{"assigned_zone":0}'   # unassign/disconnect
+curl -X DELETE http://localhost:8000/api/lasers/1                          # remove it entirely
 ```
 
 ## REST API
@@ -183,11 +189,13 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /mirror/x/<0\|1>` | Flip the output horizontally (mirror around center); 1 = mirrored, 0 = normal |
 | `POST /motion/hold/<0\|1>` | Momentary freeze: 1 = press (stops movement, rotation, and the rainbow hue cycle in place, remembering the prior speeds), 0 = release (restores them) |
 | `POST /rotation/reset` | Snap the rotation angle back to 0 and stop it spinning (sets `rotation_speed` to 0) |
-| `POST /laser/connect/<ip>` | Connect + arm a controller at this IP |
-| `POST /laser/disconnect` | Disarm and disconnect |
+| `GET /api/lasers` | List every configured laser (DAC): `[{"id","name","ip","assigned_zone","connected"}, ...]` |
+| `POST /api/lasers` | Add a new laser: `{"name":"...","ip":"..."}` (`assigned_zone` defaults to `0`, i.e. configured but idle) |
+| `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","assigned_zone"}` - setting `assigned_zone` to `1` connects + streams Zone 1's output to it, `0` disconnects/idles it |
+| `DELETE /api/lasers/<id>` | Remove a laser |
 | `GET /api/cues` | List all populated cue slots (1-32) |
 | `POST /api/cue/<n>/save` | Snapshot current show params into slot `n` |
-| `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the current connection and the global `flash_release_ms` setting - see below) |
+| `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the global `flash_release_ms` setting - see below) |
 | `POST /api/cue/<n>/clear` | Delete slot `n` |
 | `POST /api/cue/<from>/move/<to>` | Move slot `from`'s cue into slot `to` (overwriting it), clearing `from`. 404 if `from` is empty or `from == to` |
 | `GET /api/zone` | Current "Zone 1" calibration (pan/scale applied to the whole hardware output) |

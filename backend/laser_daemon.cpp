@@ -11,6 +11,7 @@
 #include "httplib.h"
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -25,6 +26,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <vector>
 #include <thread>
 
 // Used only to locate the running executable's own directory (to seed a
@@ -126,11 +128,10 @@ static std::string resolve_data_file(const std::string& filename) {
 // ── Laser state — full BeamCommander feature set ───────────────────────────────
 struct LaserState {
     // Controller
-    std::string target_ip;
     float rate_kpps       = 30.0f;
     // Upper bound (and initial default value, above) for rate_kpps - a
     // venue/hardware setting ("how fast can this scanner safely run"), not
-    // a per-look show parameter, so - like target_ip/flash_release_ms - it's
+    // a per-look show parameter, so - like flash_release_ms - it's
     // deliberately excluded from cue_state_to_json/cue_state_from_json and
     // preserved across cue recalls (do_cue_recall()) and /api/reset. The
     // scan-rate fader/REST/MIDI input is clamped to this value everywhere
@@ -145,7 +146,7 @@ struct LaserState {
 
     // Color (0..1)
     float r = 0.0f, g = 1.0f, b = 0.314f;
-    // Master brightness. Like target_ip and flash_release_ms below, this is
+    // Master brightness. Like flash_release_ms below, this is
     // a *global* daemon setting, not part of the per-cue show state - it's
     // deliberately excluded from cue_state_to_json/cue_state_from_json and
     // explicitly preserved across cue recalls in do_cue_recall(), so
@@ -156,8 +157,8 @@ struct LaserState {
     // Footswitch brightness-gate release fade time (ms): 0 = instant cut
     // to dark when the gate closes, >0 = fade from 1.0 down to 0 over this
     // many ms instead (see g_gate_level). Defaults to 200ms. This is a
-    // *global* daemon setting, not part of the per-cue show state - like
-    // target_ip, it's deliberately excluded from cue_state_to_json/
+    // *global* daemon setting, not part of the per-cue show state - it's
+    // deliberately excluded from cue_state_to_json/
     // cue_state_from_json and explicitly preserved across cue recalls in
     // do_cue_recall() and across /api/reset, so switching cues or
     // resetting the show never changes it.
@@ -225,11 +226,12 @@ struct LaserState {
     // hardware-send step), never the browser preview (make_frame(), used
     // for the WS broadcast), so the preview always shows the true,
     // un-zoned show regardless of how the physical output is currently
-    // mapped. Exactly one zone exists right now ("Zone 1", permanently
-    // auto-assigned to "Laser 1") since only a single laser output is
-    // supported - this becomes a real per-laser list once multi-laser
-    // output exists. It's a physical venue
-    // calibration, not a per-cue show look, so - like target_ip - it's
+    // mapped. Exactly one zone exists right now ("Zone 1") - see the
+    // G_lasers list below (struct LaserConfig) for the actual set of
+    // physical DACs, any number of which can be assigned to Zone 1 at once
+    // (laser_thread() then streams this same zone-transformed output to
+    // every assigned+connected one in parallel). It's a physical venue
+    // calibration, not a per-cue show look, so - like flash_release_ms - it's
     // deliberately excluded from cue_state_to_json/cue_state_from_json and
     // preserved across cue recalls (do_cue_recall()) and /api/reset; it has
     // its own persistence (zones.json) and REST endpoint (/api/zone),
@@ -245,8 +247,46 @@ struct LaserState {
 
 static LaserState        G;
 static std::mutex        G_mtx;
-static std::atomic<bool> G_armed{false};
 static std::atomic<bool> G_running{true};
+
+// ── Laser (DAC) list — multiple physical EtherDream controllers ────────────
+// Unlike LaserState (the single show/look, applied identically everywhere),
+// each entry here is one physical DAC connection that can be assigned to a
+// zone (currently only Zone 1 exists - see zone_x/zone_y/zone_scale_x/
+// zone_scale_y's comment above). assigned_zone == 0 means configured but
+// idle (no network connection attempted); assigned_zone == 1 means
+// laser_thread() should connect to it and stream Zone 1's calibrated
+// output. Multiple lasers can share the same assigned_zone at once, in
+// which case they all receive the exact same zone-transformed frame in
+// parallel (see laser_thread()'s hardware-send step). Persisted to its own
+// file (lasers.json) and REST surface (/api/lasers), same pattern as
+// zones.json/api/zone above.
+struct LaserConfig {
+    int         id;
+    std::string name;
+    std::string ip;
+    int         assigned_zone = 0; // 0 = unassigned, 1 = Zone 1 (only zone today)
+};
+static std::vector<LaserConfig> G_lasers;
+static std::mutex               G_lasers_mtx;
+static int                      G_next_laser_id = 1;
+
+// Runtime connection status per laser id, written only by laser_thread and
+// read by GET /api/lasers - separate from G_lasers/G_lasers_mtx above
+// (which holds the persisted *configuration*) since "connected" is a live
+// fact about the actual hardware link, never set directly by a client.
+static std::map<int, bool> G_laser_connected;
+static std::mutex          G_laser_connected_mtx;
+static void set_laser_connected(int id, bool connected) {
+    std::lock_guard<std::mutex> lk(G_laser_connected_mtx);
+    G_laser_connected[id] = connected;
+}
+static bool get_laser_connected(int id) {
+    std::lock_guard<std::mutex> lk(G_laser_connected_mtx);
+    auto it = G_laser_connected.find(id);
+    return it != G_laser_connected.end() && it->second;
+}
+
 
 // Runtime animation clock (seconds since start, never locked — only laser thread writes)
 static double G_time = 0.0;
@@ -660,9 +700,7 @@ static std::string state_to_json() {
        << "\"blackout\":"      << (G.blackout?"true":"false") << ","
        << "\"dot_amount\":"    << G.dot_amount     << ","
        << "\"flicker_hz\":"    << G.flicker_hz     << ","
-       << "\"brightness_gate_open\":" << (g_brightness_gate_open.load()?"true":"false") << ","
-       << "\"armed\":"         << (G_armed.load()?"true":"false") << ","
-       << "\"ip\":\""          << G.target_ip      << "\""
+       << "\"brightness_gate_open\":" << (g_brightness_gate_open.load()?"true":"false")
        << "}";
     return ss.str();
 }
@@ -681,7 +719,19 @@ static void on_signal(int) { G_running = false; }
 // ── Laser output thread ────────────────────────────────────────────────────────
 // Preview (WebSocket) generation is fully decoupled from the hardware
 // connection: the browser preview must keep responding to every parameter
-// change whether or not a real controller is connected/armed.
+// change whether or not any real controller is connected/assigned.
+//
+// Multi-DAC output: every laser in G_lasers with assigned_zone != 0 gets its
+// own core::LaserController and its own connection/pacing state (see
+// LaserRuntime below), all owned locally by this thread (never shared with
+// the HTTP thread - only G_laser_connected's bool summary is, via
+// set_laser_connected()). Each tick, every assigned+connected controller is
+// offered the same zone-transformed frame if *that* controller's own
+// isReadyForNewFrame()/20ms pacing says it's due - since core::LaserController
+// queues frames internally rather than blocking on the network write,
+// looping over N controllers here adds no meaningful per-controller
+// latency, so all assigned lasers stream in parallel with no cross-talk lag
+// between them.
 static void laser_thread() {
     System sys;
     core::LaserController::setMaxFrameHoldTime(std::chrono::milliseconds(0));
@@ -689,22 +739,22 @@ static void laser_thread() {
     using Clock = std::chrono::steady_clock;
     auto last_preview = Clock::now() - 1s;
     auto last_tick    = Clock::now();
-    // Paces hardware sendFrame() calls (see hardwareReady below) - without
-    // this, the loop would call sendFrame() every time
-    // ctrl->isReadyForNewFrame() allows (which can be much more often than
-    // a frame's actual physical draw time of points/rate_kpps), enqueueing
-    // new frames faster than the hardware can drain them. That builds an
-    // ever-growing backlog/delay on the real laser output while the
-    // preview (throttled separately to 33ms via last_preview/previewDue,
-    // and not subject to any hardware queue) stays near-instant - exactly
-    // the "preview has zero delay, real output has massive delay" bug this
-    // fixes.
-    auto last_hw_send = Clock::now() - 1s;
 
-    std::shared_ptr<core::LaserController> ctrl;
-    std::string connected_ip;
-    float       connected_rate = 0;
-    auto        next_connect_attempt = Clock::now();
+    struct LaserRuntime {
+        std::shared_ptr<core::LaserController> ctrl;
+        std::string connected_ip;
+        float       connected_rate = 0;
+        // Paces this controller's own sendFrame() calls - without this,
+        // the loop would call sendFrame() every time isReadyForNewFrame()
+        // allows (which can be much more often than a frame's actual
+        // physical draw time of points/rate_kpps), enqueueing new frames
+        // faster than the hardware can drain them. Each laser gets its own
+        // independent 20ms floor so one DAC's pacing can never starve or
+        // be starved by another's.
+        Clock::time_point last_hw_send        = Clock::now() - 1s;
+        Clock::time_point next_connect_attempt = Clock::now();
+    };
+    std::map<int, LaserRuntime> runtimes; // keyed by LaserConfig::id - this thread's own state, never shared
 
     while (G_running) {
         // Advance animation clock
@@ -713,10 +763,9 @@ static void laser_thread() {
         G_time += dt;
         last_tick = now_tp;
 
-        std::string ip; float rate;
+        float rate;
         {
             std::lock_guard<std::mutex> lk(G_mtx);
-            ip   = G.target_ip;
             rate = G.rate_kpps;
 
             // Integrate each animated parameter's phase by its *current*
@@ -780,37 +829,72 @@ static void laser_thread() {
             g_prev_gate_open = gate_open_now;
         }
 
-        // Tear down the hardware connection if disarmed/disconnected, but
-        // keep running the loop so the preview keeps animating.
-        if (ip.empty() || !G_armed.load()) {
-            if (ctrl) { ctrl->setArmed(false); ctrl.reset(); connected_ip.clear(); std::cout << "[laser] disarmed\n" << std::flush; }
-        } else if ((!ctrl || connected_ip != ip || std::abs(rate-connected_rate) > 0.1f) && now_tp >= next_connect_attempt) {
-            if (ctrl) { ctrl->setArmed(false); ctrl.reset(); }
-            etherdream::EtherDreamControllerInfo info(ip,"Ether Dream",ip,7765,4095);
-            ctrl = sys.connectController(info);
-            if (!ctrl) {
-                std::cout << "[laser] connect failed " << ip << "\n" << std::flush;
-                next_connect_attempt = now_tp + 1s; // back off before retrying
-            } else {
-                ctrl->setPointRate(static_cast<std::uint32_t>(rate * 1000));
-                ctrl->setArmed(true);
-                connected_ip = ip; connected_rate = rate;
-                std::cout << "[laser] streaming " << ip << " @ " << rate << " kpps\n" << std::flush;
+        // Snapshot the configured laser list (id/ip/assigned_zone) - kept
+        // brief so no HTTP request (add/remove/(un)assign) is ever blocked
+        // on this thread's connect/send work below.
+        std::vector<LaserConfig> lasers_snapshot;
+        { std::lock_guard<std::mutex> lk(G_lasers_mtx); lasers_snapshot = G_lasers; }
+
+        // Drop runtime state for any laser no longer configured at all
+        // (deleted via DELETE /api/lasers/<id>).
+        for (auto it = runtimes.begin(); it != runtimes.end(); ) {
+            bool stillExists = std::any_of(lasers_snapshot.begin(), lasers_snapshot.end(),
+                                            [&](const LaserConfig& l){ return l.id == it->first; });
+            if (!stillExists) {
+                if (it->second.ctrl) it->second.ctrl->setArmed(false);
+                set_laser_connected(it->first, false);
+                it = runtimes.erase(it);
+            } else ++it;
+        }
+
+        // Connect/disconnect/retry each configured laser independently -
+        // only lasers assigned to a zone (assigned_zone != 0) with a
+        // non-empty IP are ever connected to; everything else stays idle.
+        for (const auto& l : lasers_snapshot) {
+            auto& rt = runtimes[l.id]; // default-constructed on first sight
+            bool wantsOutput = l.assigned_zone != 0 && !l.ip.empty();
+
+            if (!wantsOutput) {
+                if (rt.ctrl) {
+                    rt.ctrl->setArmed(false); rt.ctrl.reset(); rt.connected_ip.clear();
+                    set_laser_connected(l.id, false);
+                    std::cout << "[laser] " << l.name << " unassigned/disarmed\n" << std::flush;
+                }
+                continue;
             }
-        } else if (ctrl && connected_ip == ip) {
-            // Live rate update on an already-connected controller
-            std::lock_guard<std::mutex> lk(G_mtx);
-            if (std::abs(G.rate_kpps-connected_rate) > 0.1f) {
-                ctrl->setPointRate(static_cast<std::uint32_t>(G.rate_kpps*1000));
-                connected_rate = G.rate_kpps;
+
+            if ((!rt.ctrl || rt.connected_ip != l.ip || std::abs(rate - rt.connected_rate) > 0.1f)
+                && now_tp >= rt.next_connect_attempt) {
+                if (rt.ctrl) { rt.ctrl->setArmed(false); rt.ctrl.reset(); }
+                etherdream::EtherDreamControllerInfo info(l.ip, "Ether Dream", l.ip, 7765, 4095);
+                rt.ctrl = sys.connectController(info);
+                if (!rt.ctrl) {
+                    std::cout << "[laser] connect failed " << l.name << " (" << l.ip << ")\n" << std::flush;
+                    set_laser_connected(l.id, false);
+                    rt.next_connect_attempt = now_tp + 1s; // back off before retrying
+                } else {
+                    rt.ctrl->setPointRate(static_cast<std::uint32_t>(rate * 1000));
+                    rt.ctrl->setArmed(true);
+                    rt.connected_ip = l.ip; rt.connected_rate = rate;
+                    set_laser_connected(l.id, true);
+                    std::cout << "[laser] " << l.name << " streaming " << l.ip << " @ " << rate << " kpps\n" << std::flush;
+                }
+            } else if (rt.ctrl && rt.connected_ip == l.ip && std::abs(rate - rt.connected_rate) > 0.1f) {
+                // Live rate update on an already-connected controller
+                rt.ctrl->setPointRate(static_cast<std::uint32_t>(rate * 1000));
+                rt.connected_rate = rate;
             }
         }
 
+        bool anyHardwareReady = false;
+        for (auto& [id, rt] : runtimes) {
+            if (rt.ctrl && rt.ctrl->isReadyForNewFrame() && (now_tp - rt.last_hw_send) >= 20ms) {
+                anyHardwareReady = true; break;
+            }
+        }
+        bool previewDue = (now_tp - last_preview) >= 33ms;
 
-        bool hardwareReady = ctrl && ctrl->isReadyForNewFrame() && (now_tp - last_hw_send) >= 20ms;
-        bool previewDue     = (now_tp - last_preview) >= 33ms;
-
-        if (!hardwareReady && !previewDue) {
+        if (!anyHardwareReady && !previewDue) {
             std::this_thread::sleep_for(1ms);
             continue;
         }
@@ -823,21 +907,21 @@ static void laser_thread() {
             ws_broadcast(frame_to_ws_json(frame));
         }
 
-        if (hardwareReady) {
-            last_hw_send = now_tp;
-            // Zone 1 (laser 1): a hardware-only master pan/zoom, never
-            // applied to the browser preview (which already got the true,
-            // unzoned `frame` above) - see zone_x/zone_y/zone_scale_x/
-            // zone_scale_y's comment. Only a real controller output should
+        if (anyHardwareReady) {
+            // Zone 1: a hardware-only master pan/zoom, never applied to
+            // the browser preview (which already got the true, unzoned
+            // `frame` above) - see zone_x/zone_y/zone_scale_x/
+            // zone_scale_y's comment. Only real controller output should
             // be reshaped to fit the venue's physical sub-region; the
             // preview always shows the full, un-zoned show. Horizontal and
             // vertical scale are independent, so the zone can be
-            // stretched/squeezed on just one axis. Unlike the
-            // blackout/gate step below (color-only), this rewrites each
-            // point's actual x/y - and, same reasoning as make_frame()'s
-            // own off-screen handling, blanks (not clamps) anything the
-            // zone pushes outside the DAC's +-1 range instead of letting
-            // it pin/smear against the edge.
+            // stretched/squeezed on just one axis. Computed once and
+            // fanned out to every assigned+ready laser below, since they
+            // all currently share the same (only) zone - rewrites each
+            // point's actual x/y and, same reasoning as make_frame()'s own
+            // off-screen handling, blanks (not clamps) anything the zone
+            // pushes outside the DAC's +-1 range instead of letting it
+            // pin/smear against the edge.
             core::Frame hwFrame = frame;
             if (snap.zone_scale_x != 1.0f || snap.zone_scale_y != 1.0f || snap.zone_x != 0.0f || snap.zone_y != 0.0f) {
                 for (auto& p : hwFrame.points) {
@@ -850,29 +934,35 @@ static void laser_thread() {
             // Blackout and the footswitch brightness gate only ever
             // suppress/dim the *real* laser output, never the browser
             // preview (which already got the true, full-brightness `frame`
-            // above) - so a modified copy is what actually goes to
-            // hardware, keeping the same point positions (safety-relevant
-            // for some controllers) but scaling/zeroing every channel's
-            // color. Blackout wins outright (full zero); otherwise the
-            // gate's current fade level (1.0 = fully open, decaying to 0.0
-            // while closed/closing - see g_gate_level's comment) is applied
-            // as a multiplier.
+            // above) - computed once here as the final "what actually goes
+            // to hardware" frame, keeping the same point positions
+            // (safety-relevant for some controllers) but scaling/zeroing
+            // every channel's color. Blackout wins outright (full zero);
+            // otherwise the gate's current fade level (1.0 = fully open,
+            // decaying to 0.0 while closed/closing - see g_gate_level's
+            // comment) is applied as a multiplier.
+            core::Frame outFrame = hwFrame;
             if (snap.blackout) {
-                core::Frame blanked = hwFrame;
-                for (auto& p : blanked.points) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
-                ctrl->sendFrame(std::move(blanked));
+                for (auto& p : outFrame.points) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
             } else if (g_gate_level < 1.0f) {
-                core::Frame gated = hwFrame;
-                for (auto& p : gated.points) {
+                for (auto& p : outFrame.points) {
                     p.r *= g_gate_level; p.g *= g_gate_level; p.b *= g_gate_level;
                 }
-                ctrl->sendFrame(std::move(gated));
-            } else {
-                ctrl->sendFrame(std::move(hwFrame));
+            }
+
+            // Fan the same finished frame out to every assigned+ready
+            // controller in parallel - each gets its own copy since
+            // sendFrame() moves it, and each is paced independently above.
+            for (auto& [id, rt] : runtimes) {
+                if (!rt.ctrl) continue;
+                if (!(rt.ctrl->isReadyForNewFrame() && (now_tp - rt.last_hw_send) >= 20ms)) continue;
+                rt.last_hw_send = now_tp;
+                core::Frame toSend = outFrame;
+                rt.ctrl->sendFrame(std::move(toSend));
             }
         }
     }
-    if (ctrl) ctrl->setArmed(false);
+    for (auto& [id, rt] : runtimes) if (rt.ctrl) rt.ctrl->setArmed(false);
     sys.shutdown();
 }
 
@@ -900,6 +990,69 @@ static bool json_bool(const std::string& b,const std::string& k,bool d) {
     return d;
 }
 static int json_int(const std::string& b,const std::string& k,int d){ return (int)json_float(b,k,(float)d); }
+
+// ── Laser (DAC) list persistence ────────────────────────────────────────────
+// See struct LaserConfig's comment (near G_lasers) for the data model. Same
+// brace-matching array parsing technique as load_midi_map() below - this is
+// our own file format (produced only by save_lasers_to_disk), so a full
+// JSON parser isn't needed.
+static const std::string LASERS_FILE = resolve_data_file("lasers.json");
+
+static std::string laser_config_to_json(const LaserConfig& l) {
+    std::ostringstream ss;
+    ss << "{\"id\":" << l.id
+       << ",\"name\":\"" << l.name << "\""
+       << ",\"ip\":\"" << l.ip << "\""
+       << ",\"assigned_zone\":" << l.assigned_zone
+       << ",\"connected\":" << (get_laser_connected(l.id) ? "true" : "false")
+       << "}";
+    return ss.str();
+}
+
+static void save_lasers_to_disk() {
+    std::lock_guard<std::mutex> lk(G_lasers_mtx);
+    std::ostringstream ss; ss << "[";
+    for (std::size_t i = 0; i < G_lasers.size(); ++i) {
+        if (i) ss << ",";
+        const auto& l = G_lasers[i];
+        ss << "{\"id\":" << l.id << ",\"name\":\"" << l.name << "\",\"ip\":\"" << l.ip
+           << "\",\"assigned_zone\":" << l.assigned_zone << "}";
+    }
+    ss << "]";
+    std::ofstream f(LASERS_FILE, std::ios::trunc);
+    if (f) f << ss.str();
+}
+
+static void load_lasers_from_disk() {
+    std::ifstream f(LASERS_FILE);
+    if (!f) { save_lasers_to_disk(); return; } // no file yet - empty list is a fine default
+    std::ostringstream buf; buf << f.rdbuf();
+    std::string body = buf.str();
+
+    std::lock_guard<std::mutex> lk(G_lasers_mtx);
+    G_lasers.clear();
+    std::size_t i = body.find('{');
+    while (i != std::string::npos) {
+        int depth = 0; std::size_t j = i;
+        for (; j < body.size(); ++j) {
+            if (body[j] == '{') ++depth;
+            else if (body[j] == '}') { --depth; if (depth == 0) { ++j; break; } }
+        }
+        if (depth != 0) break;
+        std::string obj = body.substr(i, j - i);
+        LaserConfig l;
+        l.id            = json_int(obj, "id", 0);
+        l.name          = json_str(obj, "name");
+        l.ip            = json_str(obj, "ip");
+        l.assigned_zone = json_int(obj, "assigned_zone", 0);
+        if (l.id > 0) {
+            G_lasers.push_back(l);
+            G_next_laser_id = std::max(G_next_laser_id, l.id + 1);
+        }
+        i = body.find('{', j);
+    }
+    std::cout << "[laser_daemon] Loaded " << G_lasers.size() << " laser(s) from " << LASERS_FILE << "\n";
+}
 
 // ── Zone persistence ─────────────────────────────────────────────────────────
 // "Zone 1" (see LaserState::zone_x/zone_y/zone_scale_x/zone_scale_y) is a
@@ -943,7 +1096,7 @@ static std::string zone_to_json() {
 
 // ── Cue save/recall ──────────────────────────────────────────────────────────
 // A cue is a saved snapshot of every show parameter (shape, color, transform,
-// movement, wave, rainbow, FX) — NOT the controller connection (target_ip),
+// movement, wave, rainbow, FX) — NOT the controller connections (see the
 // so recalling a cue never drops/changes the current DAC link. Persisted to
 // a small JSON file on disk so cues survive a daemon restart, mirroring the
 // cue system from the original BeamCommander (Python edition).
@@ -1081,18 +1234,16 @@ static bool do_cue_recall(int n) {
     if (!found) return false;
     {
         std::lock_guard<std::mutex> lk(G_mtx);
-        std::string ip = G.target_ip;
         // flash_release_ms, intensity (master brightness), max_rate_kpps,
         // blackout and the zone 1 calibration are global daemon settings,
         // not part of the per-cue show state - preserve whatever they're
-        // currently set to across the recall, same treatment as target_ip.
+        // currently set to across the recall.
         float flash_release_ms = G.flash_release_ms;
         float intensity = G.intensity;
         float max_rate_kpps = G.max_rate_kpps;
         bool blackout = G.blackout;
         float zone_x = G.zone_x, zone_y = G.zone_y, zone_scale_x = G.zone_scale_x, zone_scale_y = G.zone_scale_y;
         G = snap;
-        G.target_ip = ip;
         G.flash_release_ms = flash_release_ms;
         G.intensity = intensity;
         G.max_rate_kpps = max_rate_kpps;
@@ -1502,8 +1653,7 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
             g_cue_momentary_active = true;
             if (do_cue_recall(n)) std::cout << "[midi] previewing cue " << n << "\n";
         } else if (isRelease && g_cue_momentary_active) {
-            { std::lock_guard<std::mutex> lk(G_mtx);
-              std::string ip = G.target_ip; G = g_cue_momentary_snapshot; G.target_ip = ip; }
+            { std::lock_guard<std::mutex> lk(G_mtx); G = g_cue_momentary_snapshot; }
             g_cue_momentary_active = false;
             std::cout << "[midi] cue " << n << " preview released\n";
         }
@@ -1626,13 +1776,14 @@ int main(int argc, char* argv[]) {
 
     load_cues_from_disk();
     load_zone_from_disk();
+    load_lasers_from_disk();
 
     std::thread laser_t(laser_thread);
     std::thread midi_t(midi_thread);
     midi_t.detach(); // pumps a CFRunLoop forever; torn down on process exit
     httplib::Server svr;
 
-    svr.set_default_headers({{"Access-Control-Allow-Origin","*"},{"Access-Control-Allow-Methods","GET,POST,OPTIONS"},{"Access-Control-Allow-Headers","Content-Type"}});
+    svr.set_default_headers({{"Access-Control-Allow-Origin","*"},{"Access-Control-Allow-Methods","GET,POST,DELETE,OPTIONS"},{"Access-Control-Allow-Headers","Content-Type"}});
     svr.Options(".*",[](const httplib::Request&,httplib::Response& r){r.status=204;});
 
     // ── Serve the built frontend (frontend/dist), if present ───────────────────
@@ -1675,7 +1826,7 @@ int main(int argc, char* argv[]) {
     svr.Post("/api/state",[](const httplib::Request& req,httplib::Response& res){
         { // scope the lock so it's released before state_to_json() re-locks G_mtx
         std::lock_guard<std::mutex> lk(G_mtx);
-        APPLY_S("shape",shape)  APPLY_S("ip",target_ip)  APPLY_S("move_mode",move_mode)
+        APPLY_S("shape",shape)  APPLY_S("move_mode",move_mode)
         APPLY_F("radius",radius)  APPLY_CLAMP("radius",radius,0,1)
         APPLY_F("max_rate_kpps",max_rate_kpps)  APPLY_CLAMP("max_rate_kpps",max_rate_kpps,1,100)
         APPLY_F("rate_kpps",rate_kpps)  APPLY_CLAMP("rate_kpps",rate_kpps,0,G.max_rate_kpps)
@@ -1844,22 +1995,21 @@ int main(int argc, char* argv[]) {
     });
 
     // ── POST /api/reset — restore all show params to defaults ─────────────────
-    // Preserves the current controller connection (target_ip / armed state),
-    // the global flash_release_ms / max_rate_kpps settings, blackout, and
-    // the zone 1 calibration (see their comments) so resetting the show
-    // doesn't drop the laser link, change the footswitch's fade time,
-    // change the venue's configured scan-rate ceiling, silently un-blank/
-    // blank the laser, or undo the projector's physical zone alignment.
+    // Preserves the global flash_release_ms / max_rate_kpps settings,
+    // blackout, and the zone 1 calibration (see their comments) so
+    // resetting the show doesn't change the footswitch's fade time, change
+    // the venue's configured scan-rate ceiling, silently un-blank/blank the
+    // laser, or undo the projector's physical zone alignment. The
+    // configured laser list (G_lasers/lasers.json) is entirely separate
+    // from LaserState and is untouched by a show reset.
     svr.Post("/api/reset",[](const httplib::Request&,httplib::Response& res){
         {
             std::lock_guard<std::mutex> lk(G_mtx);
-            std::string ip = G.target_ip;
             float flash_release_ms = G.flash_release_ms;
             float max_rate_kpps = G.max_rate_kpps;
             bool blackout = G.blackout;
             float zone_x = G.zone_x, zone_y = G.zone_y, zone_scale_x = G.zone_scale_x, zone_scale_y = G.zone_scale_y;
             G = LaserState{};
-            G.target_ip = ip;
             G.flash_release_ms = flash_release_ms;
             G.max_rate_kpps = max_rate_kpps;
             G.rate_kpps = std::clamp(G.rate_kpps, 0.0f, G.max_rate_kpps);
@@ -1869,16 +2019,63 @@ int main(int argc, char* argv[]) {
         res.set_content(state_to_json(),"application/json");
     });
 
-    // ── POST /laser/connect/<ip>  /laser/disconnect ────────────────────────────
-    svr.Post(R"(/laser/connect/(.+))",[](const httplib::Request& req,httplib::Response& res){
-        std::string ip=req.matches[1];
-        {std::lock_guard<std::mutex> lk(G_mtx);G.target_ip=ip;}
-        G_armed=true;
-        res.set_content("{\"ip\":\""+ip+"\",\"armed\":true}","application/json");
+    // ── GET /api/lasers — list every configured laser (DAC) ─────────────────────
+    svr.Get("/api/lasers",[](const httplib::Request&,httplib::Response& res){
+        std::vector<LaserConfig> snapshot;
+        { std::lock_guard<std::mutex> lk(G_lasers_mtx); snapshot = G_lasers; }
+        std::ostringstream ss; ss << "[";
+        for (std::size_t i=0;i<snapshot.size();++i) { if(i) ss<<","; ss<<laser_config_to_json(snapshot[i]); }
+        ss << "]";
+        res.set_content(ss.str(),"application/json");
     });
-    svr.Post("/laser/disconnect",[](const httplib::Request&,httplib::Response& res){
-        G_armed=false;{std::lock_guard<std::mutex> lk(G_mtx);G.target_ip="";}
-        res.set_content("{\"armed\":false}","application/json");
+
+    // ── POST /api/lasers — add a new laser (DAC) ────────────────────────────────
+    // Body: {"name":"...", "ip":"..."} - assigned_zone defaults to 0
+    // (configured but idle) until explicitly assigned via
+    // POST /api/lasers/<id>.
+    svr.Post("/api/lasers",[](const httplib::Request& req,httplib::Response& res){
+        LaserConfig l;
+        l.ip = json_str(req.body,"ip");
+        { std::lock_guard<std::mutex> lk(G_lasers_mtx);
+          l.id = G_next_laser_id++;
+          l.name = json_str(req.body,"name"); if (l.name.empty()) l.name = "Laser " + std::to_string(l.id);
+          G_lasers.push_back(l);
+        }
+        save_lasers_to_disk();
+        res.set_content(laser_config_to_json(l),"application/json");
+    });
+
+    // ── POST /api/lasers/<id> — update name/ip/assigned_zone ───────────────────
+    // Body: any of {"name":"...", "ip":"...", "assigned_zone":0|1} - only
+    // fields present in the body are changed. Setting assigned_zone to 1
+    // is what actually makes laser_thread() connect to and stream this
+    // laser (see laser_thread()'s connect loop); 0 disconnects/idles it.
+    svr.Post(R"(/api/lasers/(\d+))",[](const httplib::Request& req,httplib::Response& res){
+        int id = std::stoi(std::string(req.matches[1]));
+        bool found = false; LaserConfig updated;
+        { std::lock_guard<std::mutex> lk(G_lasers_mtx);
+          for (auto& l : G_lasers) {
+              if (l.id != id) continue;
+              auto nm = json_str(req.body,"name"); if (!nm.empty()) l.name = nm;
+              if (req.body.find("\"ip\"") != std::string::npos) l.ip = json_str(req.body,"ip");
+              l.assigned_zone = json_int(req.body,"assigned_zone",l.assigned_zone);
+              updated = l; found = true; break;
+          } }
+        if (!found) { res.status=404; res.set_content("{\"error\":\"unknown laser id\"}","application/json"); return; }
+        save_lasers_to_disk();
+        res.set_content(laser_config_to_json(updated),"application/json");
+    });
+
+    // ── DELETE /api/lasers/<id> — remove a laser ────────────────────────────────
+    svr.Delete(R"(/api/lasers/(\d+))",[](const httplib::Request& req,httplib::Response& res){
+        int id = std::stoi(std::string(req.matches[1]));
+        bool found = false;
+        { std::lock_guard<std::mutex> lk(G_lasers_mtx);
+          auto it = std::find_if(G_lasers.begin(), G_lasers.end(), [&](const LaserConfig& l){ return l.id==id; });
+          if (it != G_lasers.end()) { G_lasers.erase(it); found = true; } }
+        if (!found) { res.status=404; res.set_content("{\"error\":\"unknown laser id\"}","application/json"); return; }
+        save_lasers_to_disk();
+        res.set_content("{\"deleted\":"+std::to_string(id)+"}","application/json");
     });
 
     // ── GET /api/cues — list all populated cue slots ───────────────────────────
@@ -1903,8 +2100,6 @@ int main(int argc, char* argv[]) {
     });
 
     // ── POST /api/cue/<n>/recall — apply slot n's saved show params ────────────
-    // Preserves the current controller connection (target_ip), just like
-    // /api/reset does, so recalling a cue never drops the laser link.
     svr.Post(R"(/api/cue/(\d+)/recall)",[](const httplib::Request& req,httplib::Response& res){
         int n=std::stoi(std::string(req.matches[1]));
         if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
@@ -1947,7 +2142,7 @@ int main(int argc, char* argv[]) {
               << "  POST /laser/rainbow/amount/<v>  /laser/rainbow/speed/<v>\n"
               << "  POST /blackout/<0|1>  /flash/<0|1>  /mirror/x/<0|1>  /motion/hold/<0|1>\n"
               << "  POST /brightness/gate/<0|1>  /rotation/reset\n"
-              << "  POST /laser/connect/<ip>  /laser/disconnect\n"
+              << "  GET /api/lasers   POST /api/lasers   POST /api/lasers/<id>   DELETE /api/lasers/<id>\n"
               << "  WS   /ws/points\n"
               << "  MIDI: optional, see backend/midi_map.json (Akai APC40 mkII or any USB controller)\n";
 
