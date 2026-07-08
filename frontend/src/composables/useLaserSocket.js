@@ -37,6 +37,11 @@ export const laserState = reactive({
   // Scan
   rate_kpps:       30,
   max_rate_kpps:   30,
+  // Footswitch-style master output gate (see /brightness/gate/<0|1> in
+  // laser_daemon.cpp): defaults OPEN (true) - only `blackout` above is the
+  // active safety default. Hardware output stays forced dark only if this
+  // is explicitly closed (rigs with a physical footswitch) or blackout is on.
+  brightness_gate_open: true,
   // UI-only
   wsConnected:     false,
   error:           null,
@@ -47,10 +52,14 @@ export const laserState = reactive({
 export const cues = reactive({})
 
 // Configured lasers (physical DACs) — see GET/POST/DELETE /api/lasers in
-// laser_daemon.cpp. Each entry: {id, name, ip, assigned_zone, connected}.
-// assigned_zone 0 = configured but idle, 1 = streaming Zone 1's output
-// (the only zone that exists today) - any number of lasers can share
-// assigned_zone 1 at once, all receiving the same output in parallel.
+// laser_daemon.cpp. Each entry: {id, name, ip, armed, zone_x, zone_y,
+// zone_scale_x, zone_scale_y, connected}. `armed` is the master enable -
+// false means configured but idle (never connected to), true means
+// laser_thread() connects and streams Zone 1's output to it. Any number of
+// lasers can be armed at once, all receiving the same show output in
+// parallel, each transformed by its own zone_x/y/zone_scale_x/y pan-zoom
+// calibration (so two projectors in the same rig can each be aimed at a
+// different physical sub-region while showing the exact same content).
 export const lasers = reactive([])
 
 // ── WebSocket preview ──────────────────────────────────────────────────────────
@@ -145,10 +154,8 @@ export async function setBrightness(v) {
 }
 
 // ── Lasers (DACs) ────────────────────────────────────────────────────────────
-// Manage the configured laser list and each one's Zone 1 assignment - see
-// GET/POST/DELETE /api/lasers in laser_daemon.cpp. Unlike laserState/zone,
-// there's no optimistic local-change guard here: the list is small and
-// edited infrequently, so a full re-fetch after every mutation is simplest.
+// Manage the configured laser list, each one's armed state and its own
+// zone calibration - see GET/POST/DELETE /api/lasers in laser_daemon.cpp.
 function applyLasers(data) {
   lasers.splice(0, lasers.length, ...(data || []))
 }
@@ -157,12 +164,34 @@ export async function fetchLasers() {
   applyLasers(await api('/lasers'))
 }
 
+// Guards against the background poll clobbering an optimistic local edit
+// (arm toggle, zoning drag) that's still in flight - same reasoning as
+// markLocalChange() above for laserState.
+let lastLaserLocalChangeAt = 0
+export function markLaserLocalChange() { lastLaserLocalChangeAt = Date.now() }
+
+function applyPolledLasers(data) {
+  if (Date.now() - lastLaserLocalChangeAt < 700) return
+  applyLasers(data)
+}
+
+// Mutates a laser's fields locally (optimistic, no network round trip) so
+// e.g. ZoningPanel's drag can update the box position every pointermove
+// without spamming the API - callers debounce the actual updateLaser() call
+// separately.
+export function patchLaserLocal(id, partial) {
+  markLaserLocalChange()
+  const l = lasers.find((x) => x.id === id)
+  if (l) Object.assign(l, partial)
+}
+
 export async function addLaser(name, ip) {
   await api('/lasers', { method: 'POST', body: JSON.stringify({ name, ip }) })
   await fetchLasers()
 }
 
 export async function updateLaser(id, partial) {
+  markLaserLocalChange()
   await api(`/lasers/${id}`, { method: 'POST', body: JSON.stringify(partial) })
   await fetchLasers()
 }
@@ -184,6 +213,14 @@ export async function flashPress() {
 export async function flashRelease() {
   markLocalChange()
   applyState(await (await fetch('/flash/0', { method: 'POST' })).json())
+}
+
+// Opens/closes the master brightness gate (see laserState.brightness_gate_open
+// above) - the UI's equivalent of holding/releasing a footswitch wired to
+// CC64. Unlike flash, this is a persistent toggle, not momentary.
+export async function setBrightnessGate(open) {
+  markLocalChange()
+  applyState(await (await fetch(`/brightness/gate/${open ? 1 : 0}`, { method: 'POST' })).json())
 }
 
 // ── Cue save/recall ─────────────────────────────────────────────────────────────
@@ -217,27 +254,6 @@ export async function moveCue(from, to) {
   await fetchCues()
 }
 
-// ── Zoning ───────────────────────────────────────────────────────────────────
-// "Zone 1", auto-assigned to "Laser 1" (the only laser currently supported) -
-// a master pan/zoom applied to the whole output, for mapping the show onto a
-// physical sub-region of that laser's range. See /api/zone in laser_daemon.cpp.
-export const zone = reactive({ laser_id: 1, x: 0, y: 0, scale_x: 1, scale_y: 1 })
-
-export async function fetchZone() {
-  Object.assign(zone, await api('/zone'))
-}
-
-// Guards against the background poll clobbering an optimistic local drag
-// edit that's still in flight - same reasoning as markLocalChange() above,
-// separate timestamp since zone updates are independent of the rest of
-// laserState.
-let lastZoneLocalChangeAt = 0
-
-export async function updateZone(partial) {
-  lastZoneLocalChangeAt = Date.now()
-  Object.assign(zone, await api('/zone', { method: 'POST', body: JSON.stringify(partial) }))
-}
-
 // ── Status polling ─────────────────────────────────────────────────────────────
 // Keeps this client's view of laserState in sync even when another client
 // (a different browser tab, curl, etc.) changes settings on the backend.
@@ -248,11 +264,7 @@ export function startStatusPolling(intervalMs = 1000) {
   statusPoll = setInterval(() => {
     api('/state').then(applyPolledState).catch(() => {})
     api('/cues').then(applyCues).catch(() => {})
-    api('/lasers').then(applyLasers).catch(() => {})
-    api('/zone').then(data => {
-      if (Date.now() - lastZoneLocalChangeAt < 700) return
-      Object.assign(zone, data)
-    }).catch(() => {})
+    api('/lasers').then(applyPolledLasers).catch(() => {})
   }, intervalMs)
 }
 export function stopStatusPolling() {

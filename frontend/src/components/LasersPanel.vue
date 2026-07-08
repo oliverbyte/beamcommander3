@@ -2,9 +2,10 @@
   <div id="lasers-panel" :class="{ popout }">
     <div class="panel-body">
       <p class="hint">Add each physical laser (EtherDream DAC) by its IP
-        address, then assign it to Zone 1 to start streaming the show to
-        it. Any number of lasers can be assigned to Zone 1 at once - they
-        all output the exact same (zone-calibrated) show in parallel.</p>
+        address, then arm it to start streaming the show to it. Any number
+        of lasers can be armed at once - they all output the exact same
+        show in parallel (Zone 1), each transformed by its own calibration
+        set in the Zoning panel.</p>
 
       <div class="laser-list">
         <div v-for="l in lasers" :key="l.id" class="laser-row">
@@ -21,10 +22,11 @@
             @change="onReip(l, $event.target.value)"
           />
           <button
-            class="assign-btn"
-            :class="{ active: l.assigned_zone === 1 }"
-            @click="toggleAssign(l)"
-          >{{ l.assigned_zone === 1 ? '● Zone 1' : '○ Zone 1' }}</button>
+            class="arm-btn"
+            :class="{ active: l.armed }"
+            :title="l.armed ? 'Disarm (stop streaming)' : 'Arm (start streaming Zone 1)'"
+            @click="toggleArmed(l)"
+          >{{ l.armed ? '● Armed' : '○ Armed' }}</button>
           <button class="del-btn" title="Remove laser" @click="onDelete(l)">✕</button>
         </div>
         <p v-if="!lasers.length" class="empty">No lasers configured yet.</p>
@@ -46,15 +48,15 @@
 
 <script setup>
 // Lists every configured laser (physical EtherDream DAC) and lets the
-// operator add/rename/re-IP/remove one, and assign it to Zone 1 (the only
-// zone that exists today - see zone_x/zone_y/zone_scale_x/zone_scale_y's
+// operator add/rename/re-IP/remove one, and arm/disarm it (see `armed`'s
 // comment in laser_daemon.cpp). All actions go straight through the REST
 // API (GET/POST/DELETE /api/lasers) - the backend (laser_thread()) is the
 // only thing that actually opens/manages the DAC connections; this panel
-// just edits the configured list and its assignment. Any number of lasers
-// can be assigned to Zone 1 simultaneously, in which case laser_thread()
-// streams the same output to all of them in parallel (not sequentially),
-// so adding more assigned lasers never adds lag to existing ones.
+// just edits the configured list and its armed flag. Any number of lasers
+// can be armed simultaneously, in which case laser_thread() streams the
+// same Zone 1 show to all of them in parallel (not sequentially), so
+// arming more lasers never adds lag to the ones already streaming. Each
+// laser's own pan/zoom calibration is set separately, in the Zoning panel.
 import { ref, onMounted } from 'vue'
 import { lasers, fetchLasers, addLaser, updateLaser, deleteLaser } from '../composables/useLaserSocket.js'
 
@@ -82,8 +84,8 @@ async function onRename(l, name) {
 async function onReip(l, ip) {
   try { await updateLaser(l.id, { ip }); error.value = null } catch (e) { error.value = String(e) }
 }
-async function toggleAssign(l) {
-  try { await updateLaser(l.id, { assigned_zone: l.assigned_zone === 1 ? 0 : 1 }); error.value = null }
+async function toggleArmed(l) {
+  try { await updateLaser(l.id, { armed: !l.armed }); error.value = null }
   catch (e) { error.value = String(e) }
 }
 async function onDelete(l) {
@@ -128,8 +130,8 @@ input.ip { flex:1 1 45%; }
 button { background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.18); color:#cfd3e6; border-radius:4px; padding:4px 8px; font-size:11px; cursor:pointer; }
 button:hover { background:rgba(255,255,255,0.14); }
 button:disabled { opacity:0.5; cursor:default; }
-.assign-btn { flex-shrink:0; white-space:nowrap; }
-.assign-btn.active { background:rgba(72,224,122,0.18); border-color:#48e07a; color:#48e07a; }
+.arm-btn { flex-shrink:0; white-space:nowrap; }
+.arm-btn.active { background:rgba(72,224,122,0.18); border-color:#48e07a; color:#48e07a; }
 .del-btn { flex-shrink:0; padding:4px 7px; color:#ff8080; border-color:rgba(255,100,100,0.35); }
 
 .row { margin-bottom:6px; }

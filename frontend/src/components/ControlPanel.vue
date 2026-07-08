@@ -13,6 +13,14 @@
       {{ laserState.blackout ? '◼ BLACKOUT' : '◻ Blackout' }}
     </button>
     <button
+      class="gate-btn"
+      :class="{ active: laserState.brightness_gate_open }"
+      title="Master output gate - like holding a footswitch. Must be open (and Blackout off) for any real laser output."
+      @click="toggleGate"
+    >
+      {{ laserState.brightness_gate_open ? '🔓 Output Enabled' : '🔒 Output Gated (click to enable)' }}
+    </button>
+    <button
       class="flash-btn"
       @pointerdown="onFlashDown"
       @pointerup="onFlashUp"
@@ -91,7 +99,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { laserState, lasers, updateState, resetState, markLocalChange, flashPress, flashRelease } from '../composables/useLaserSocket.js'
+import { laserState, lasers, updateState, resetState, markLocalChange, flashPress, flashRelease, setBrightnessGate } from '../composables/useLaserSocket.js'
 
 const { popout } = defineProps({ popout: { type: Boolean, default: false } })
 const emit = defineEmits(['update:persistence'])
@@ -144,6 +152,9 @@ function onFlashUp() {
   flashHeld = false
   flashRelease().catch(console.error)
 }
+function toggleGate() {
+  setBrightnessGate(!laserState.brightness_gate_open).catch(console.error)
+}
 function fmt(v) { return typeof v === 'boolean' ? String(v) : Number(v).toFixed(2) }
 function onPersist(v) { persistenceMs.value = v; emit('update:persistence', v) }
 
@@ -184,7 +195,7 @@ async function reset() { await resetState().catch(console.error) }
 #ui.popout .btn-grid button { padding:14px 4px; font-size:13px; }
 #ui.popout input[type="range"] { height:28px; }
 #ui.popout input[type="text"] { padding:10px 8px; font-size:14px; }
-#ui.popout .blackout-btn, #ui.popout .flash-btn, #ui.popout .reset-btn { padding:14px; font-size:15px; }
+#ui.popout .blackout-btn, #ui.popout .gate-btn, #ui.popout .flash-btn, #ui.popout .reset-btn { padding:14px; font-size:15px; }
 h2 { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; margin:8px 0 4px; color:#9aa0bd; }
 label { display:block; font-size:11px; margin:6px 0 1px; color:#9aa0bd; }
 .val { color:#cfd3e6; margin-left:4px; }
@@ -198,6 +209,7 @@ button:disabled { opacity:0.5; cursor:default; }
 button.active { background:rgba(72,224,122,0.18); border-color:#48e07a; color:#48e07a; }
 .btn-stop { border-color:rgba(255,100,100,0.5); color:#ff8080; }
 .blackout-btn { width:100%; margin-top:6px; padding:6px; font-size:12px; letter-spacing:1px; }
+.gate-btn { width:100%; margin-top:6px; padding:6px; font-size:12px; letter-spacing:0.5px; }
 .blackout-btn.active { background:rgba(255,50,50,0.28); border-color:#ff4040; color:#ff8080; }
 .flash-btn { width:100%; margin-top:6px; padding:6px; font-size:12px; letter-spacing:1px; user-select:none; touch-action:none; }
 .flash-btn:active { background:rgba(255,255,255,0.35); border-color:#ffffff; color:#ffffff; }
