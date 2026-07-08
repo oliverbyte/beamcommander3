@@ -11,6 +11,52 @@ You don't need to know how to code to use it — see
 curious how it's built, or want to modify it, the rest of this file and
 [DEVELOPER.md](DEVELOPER.md) cover the technical side.
 
+## ⚠️ Safety warning: lasers can cause permanent eye injury and are heavily regulated
+
+**Read this before connecting any real laser projector.** This software can
+drive a real laser at full power the instant a laser is armed with
+Blackout off — a moment of misconfiguration (wrong shape/position, an
+unintended full-screen circle at max brightness, a beam left pointed at
+head height, etc.) can cause **permanent eye damage or blindness**, in the
+audience or to yourself, faster than a blink reflex can protect you.
+Class 3B/4 laser projectors (the kind used for shows) are not toys:
+
+- **Never look directly into the beam or aperture**, at any brightness,
+  from any distance you'd expect to be safe with a flashlight or torch.
+- **Never point the beam at people's eye level** unless the specific unit,
+  optics, and installation are professionally certified for full-audience
+  scanning (this typically requires beam attenuation, scan-fail
+  interlocks, and a variance/registration with the relevant safety
+  authority — e.g. FDA/CDRH in the US, or the equivalent in your country).
+  Most hobbyist/DIY rigs are **not** certified for this and must be rigged
+  well above head height with the beam angled so it can never sweep across
+  an occupied area.
+- **Test and calibrate (including the Zoning panel) with the beam aimed at
+  a wall, floor, or dedicated beam dump** — never at a person, mirror, or
+  reflective/glossy surface that could redirect it unexpectedly.
+- **This software's safety defaults (`Blackout` on, brightness gate) are
+  conveniences, not certified safety interlocks.** They're ordinary
+  software flags — a bug, a crash, a network hiccup, or an unexpected
+  hardware/firmware quirk could leave the beam on or reset a setting.
+  Never treat "Blackout is on" as a substitute for physically pointing the
+  projector somewhere safe, an emergency-stop you can reach instantly, and
+  a competent operator watching the beam at all times while it's armed.
+- **Know and follow your local laws and regulations** for laser show
+  operation, output power limits, venue permits/notifications, and
+  operator certification — these vary significantly by country/region and
+  are the operator's responsibility, not something this software can
+  check or enforce for you.
+- If you are not already experienced with laser show safety, get trained
+  by a qualified professional (e.g. through the
+  [International Laser Display Association](https://ilda.com/)) before
+  operating real laser hardware with this or any other control software.
+
+The authors and contributors of this project provide this software "as is",
+without warranty of any kind, and accept no liability for any injury,
+damage, or legal consequence arising from its use — see [LICENSE](LICENSE).
+You are solely responsible for the safe operation of any laser hardware you
+connect to it.
+
 ## History
 
 BeamCommander3 is the third generation of a laser-show controller originally
@@ -77,12 +123,17 @@ for how the packaged macOS/Windows builds are put together.
 1. **Start it**: use one of the options in ["Installing"](#installing)
    above. Whichever one you pick, it opens a browser tab automatically —
    that page *is* the remote control for your laser show.
-2. **Connect your laser**: type its IP address into the "Controller" box in
-   the UI and click **Connect** (e.g. an Ether Dream is often
-   `192.168.x.x` or a fixed address like `10.10.10.4` — check your laser's
-   manual or network settings). You'll see "Laser → connected" once it's
-   linked up. No laser connected yet? Everything still works — the preview
-   on screen always shows exactly what would come out of the laser.
+2. **Connect your laser**: open the **Lasers** panel, add a laser with a
+   name and its IP address (e.g. an Ether Dream is often `192.168.x.x` or a
+   fixed address like `10.10.10.4` — check your laser's manual or network
+   settings), then click **Arm** on it. You'll see its dot turn green
+   ("connected") once it's linked up. Any number of lasers can be armed at
+   once — they all stream the exact same show in parallel. No laser armed
+   yet? Everything still works — the preview on screen always shows exactly
+   what would come out of the laser. Also make sure **Blackout** is off and
+   **Output Gated** is switched to **Output Enabled** in the Settings panel
+   — both must be open for any real laser light, as a deliberate safety
+   default.
 3. **Play with the show**: pick a shape, drag the color picker, turn on
    Rainbow, try a Movement pattern, adjust Speed/Size — every change is
    instant, nothing needs to be "applied" or saved first.
@@ -104,14 +155,17 @@ for how the packaged macOS/Windows builds are put together.
    "brightness on while held" switch. None of this is required — the web
    page alone is a complete remote control. See ["MIDI control"](#midi-control-optional)
    below if you want to set one up.
-7. **Optional: Zoning** — the Zoning panel lets you pan/scale the *entire*
-   output to fit a physical sub-region of the laser's range (e.g. a wall or
-   truss segment), independently of everything else you set up above. Drag
-   the green box to move it, drag one of its edges to stretch/squeeze just
-   that axis. This only reshapes the real laser output — the on-screen
-   preview always keeps showing the full, un-zoned show — and it's a venue
-   calibration, not a per-cue look, so it's unaffected by saving/recalling
-   cues or resetting the show.
+7. **Optional: Zoning** — the Zoning panel lets you pan/scale the output to
+   fit a physical sub-region of a laser's range (e.g. a wall or truss
+   segment), independently of everything else you set up above. Pick a
+   laser from the dropdown, then drag its green box to move it, or drag one
+   of its edges to stretch/squeeze just that axis. Each armed laser has its
+   own independent calibration, so multiple projectors in the same rig can
+   each be aimed at a different physical sub-region while all showing the
+   exact same content. This only reshapes the real laser output — the
+   on-screen preview always keeps showing the full, un-zoned show — and
+   it's a venue calibration, not a per-cue look, so it's unaffected by
+   saving/recalling cues or resetting the show.
 
 ---
 
@@ -130,10 +184,11 @@ start.sh
 
 There is no Python and no separate daemon process — `laser_daemon` *is* the
 backend. It generates every frame once, streams it to the browser preview via
-WebSocket, and (for every laser assigned to Zone 1 that's connected) sends the
-same frame to that hardware in parallel. Preview and hardware output are
-decoupled: the preview keeps animating and responding to every parameter
-change even when no laser is connected.
+WebSocket, and (for every armed laser that's connected) sends the same frame,
+transformed by that laser's own pan/zoom calibration, to that hardware in
+parallel. Preview and hardware output are decoupled: the preview keeps
+animating and responding to every parameter change even when no laser is
+connected.
 
 ## Quick start
 
@@ -152,18 +207,24 @@ Press `Ctrl-C` to stop both processes cleanly.
 ## Connecting a real laser
 
 Open the **Lasers** panel in the UI, add a laser with its controller's IP
-address (e.g. an Ether Dream at `10.10.10.4`), then click its **Zone 1**
-button to assign it (this is what actually connects/streams to it). Any
-number of lasers can be assigned to Zone 1 at once - they all receive the
-same output in parallel. Or via the API:
+address (e.g. an Ether Dream at `10.10.10.4`), then click **Arm** on it
+(this is what actually connects/streams to it). Any number of lasers can be
+armed at once - they all receive the same show output in parallel, each
+transformed by its own pan/zoom calibration (set in the Zoning panel). Or
+via the API:
 
 ```sh
 curl -X POST http://localhost:8000/api/lasers -d '{"name":"Laser 1","ip":"10.10.10.4"}'
-# → {"id":1,"name":"Laser 1","ip":"10.10.10.4","assigned_zone":0,"connected":false}
-curl -X POST http://localhost:8000/api/lasers/1 -d '{"assigned_zone":1}'
-curl -X POST http://localhost:8000/api/lasers/1 -d '{"assigned_zone":0}'   # unassign/disconnect
+# → {"id":1,"name":"Laser 1","ip":"10.10.10.4","armed":false,"zone_x":0,"zone_y":0,"zone_scale_x":1,"zone_scale_y":1,"connected":false}
+curl -X POST http://localhost:8000/api/lasers/1 -d '{"armed":true}'
+curl -X POST http://localhost:8000/api/lasers/1 -d '{"armed":false}'   # disarm/disconnect
+curl -X POST http://localhost:8000/api/lasers/1 -d '{"zone_x":0.2,"zone_scale_y":0.5}'  # calibration
 curl -X DELETE http://localhost:8000/api/lasers/1                          # remove it entirely
 ```
+
+Real hardware output also needs **Blackout** off (`POST /blackout/0`) and
+the brightness gate open (`POST /brightness/gate/1` — open by default,
+see below).
 
 ## REST API
 
@@ -183,43 +244,41 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /move/speed/<v>` / `/move/size/<v>` | Movement cycle speed / amplitude |
 | `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow color blend / hue cycle speed |
 | `POST /blackout/<0\|1>` | Force *hardware* output dark (never affects the browser preview) |
-| `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate, *hardware-only* (never affects the browser preview - same treatment as blackout above): 1 = open instantly (renders the current brightness fader value), 0 = closed (fades to dark over `flash_release_ms`, or instantly if it's 0) — defaults closed until set. Never touches the `intensity` field itself |
+| `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate, *hardware-only* (never affects the browser preview - same treatment as blackout above): 1 = open instantly (renders the current brightness fader value), 0 = closed (fades to dark over `flash_release_ms`, or instantly if it's 0) — defaults **open**; `blackout` is the one safety gate that defaults on. Closing this only matters to rigs with a physical footswitch/pedal wired up. Never touches the `intensity` field itself |
 | `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (always restores them instantly - `flash_release_ms` does not apply here, only to the footswitch gate above) |
 | `POST /flash/release_ms/<v>` | Footswitch gate release fade time (0-2000ms), despite the name this only affects `/brightness/gate` closing, not flash's own release: `0` = instant cut, `>0` = fade brightness to 0 over this many ms instead of snapping to dark (default `200`) |
 | `POST /mirror/x/<0\|1>` | Flip the output horizontally (mirror around center); 1 = mirrored, 0 = normal |
 | `POST /motion/hold/<0\|1>` | Momentary freeze: 1 = press (stops movement, rotation, and the rainbow hue cycle in place, remembering the prior speeds), 0 = release (restores them) |
 | `POST /rotation/reset` | Snap the rotation angle back to 0 and stop it spinning (sets `rotation_speed` to 0) |
-| `GET /api/lasers` | List every configured laser (DAC): `[{"id","name","ip","assigned_zone","connected"}, ...]` |
-| `POST /api/lasers` | Add a new laser: `{"name":"...","ip":"..."}` (`assigned_zone` defaults to `0`, i.e. configured but idle) |
-| `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","assigned_zone"}` - setting `assigned_zone` to `1` connects + streams Zone 1's output to it, `0` disconnects/idles it |
+| `GET /api/lasers` | List every configured laser (DAC): `[{"id","name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","connected"}, ...]` |
+| `POST /api/lasers` | Add a new laser: `{"name":"...","ip":"..."}` (`armed` defaults to `false`, i.e. configured but idle) |
+| `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y"}` - setting `armed` to `true` connects + streams this laser's own zone-calibrated output, `false` disconnects/idles it. `zone_x`/`zone_y` (-1..1, offset) and `zone_scale_x`/`zone_scale_y` (0.1..2, independent per-axis scale) are this laser's own pan/zoom calibration - set by dragging in the Zoning panel |
 | `DELETE /api/lasers/<id>` | Remove a laser |
 | `GET /api/cues` | List all populated cue slots (1-32) |
 | `POST /api/cue/<n>/save` | Snapshot current show params into slot `n` |
 | `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the global `flash_release_ms` setting - see below) |
 | `POST /api/cue/<n>/clear` | Delete slot `n` |
 | `POST /api/cue/<from>/move/<to>` | Move slot `from`'s cue into slot `to` (overwriting it), clearing `from`. 404 if `from` is empty or `from == to` |
-| `GET /api/zone` | Current "Zone 1" calibration (pan/scale applied to the whole hardware output) |
-| `POST /api/zone` | Update zone 1: `x`/`y` (-1..1, offset) and/or `scale_x`/`scale_y` (0.1..2, independent per-axis scale) |
 | `WS /ws/points` | Live preview stream, `{"pts":[[x,y,r,g,b],...]}` at ~30fps |
 
 `POST /api/state` accepts a JSON body with any of: `shape`, `radius`, `points`,
 `rate_kpps`, `max_rate_kpps`, `intensity`, `flash_release_ms`, `r`, `g`, `b`,
 `shape_scale`, `pos_x`, `pos_y`, `rotation_speed`, `mirror_x`, `move_mode`,
 `move_speed`, `move_size`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
-`rainbow_amount`, `rainbow_speed`, `blackout`, `dot_amount`, `flicker_hz`, `ip`.
+`rainbow_amount`, `rainbow_speed`, `blackout`, `dot_amount`, `flicker_hz`.
 
-`flash_release_ms`, `intensity`, `blackout` and `max_rate_kpps` (like `ip`/the
-controller connection) are *global* daemon settings, not part of a cue's show
-state: saving a cue never captures them and recalling one never changes them,
-no matter what they were set to when the cue was saved. `max_rate_kpps` also
-caps and defaults `rate_kpps` on the fader/REST/MIDI - turning it down lowers
-the scan-rate fader's usable range too.
+`flash_release_ms`, `intensity`, `blackout` and `max_rate_kpps` are *global*
+daemon settings, not part of a cue's show state: saving a cue never captures
+them and recalling one never changes them, no matter what they were set to
+when the cue was saved. `max_rate_kpps` also caps and defaults `rate_kpps` on
+the fader/REST/MIDI - turning it down lowers the scan-rate fader's usable
+range too.
 
-Zone 1 (`GET`/`POST /api/zone`, see above) is also excluded from cue state
-for the same reason — it's a physical venue calibration (which sub-region of
-the laser's range the whole show is mapped onto), not a show look, so it
-survives cue saves/recalls and `/api/reset` untouched and persists on its own
-in `zones.json` (not `cues.json`).
+Each laser's own configuration (`armed`, `zone_x`/`zone_y`/`zone_scale_x`/
+`zone_scale_y` - see `/api/lasers` above) is also excluded from cue state for
+a similar reason — it's a physical connection/venue calibration, not a show
+look, so it survives cue saves/recalls and `/api/reset` untouched, and
+persists on its own in `lasers.json` (not `cues.json`).
 
 ## Multi-client sync
 

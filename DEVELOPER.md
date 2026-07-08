@@ -10,8 +10,8 @@ backend/
 frontend/
   src/components/ControlPanel.vue   All UI controls (shape, color, transform, FX...)
   src/components/CuePanel.vue       Cue grid (save/recall/move/clear)
-  src/components/ZoningPanel.vue    Drag-to-move/scale "Zone 1" venue calibration
-  src/components/LasersPanel.vue    Add/remove lasers (DACs), assign them to Zone 1
+  src/components/ZoningPanel.vue    Drag-to-move/scale per-laser pan/zoom calibration
+  src/components/LasersPanel.vue    Add/remove lasers (DACs), arm/disarm each one
   src/components/LaserScene.vue     Three.js 3D preview, renders WS point stream
   src/composables/useLaserSocket.js REST + WebSocket client, shared reactive state
 start.sh             Builds backend if needed, runs both processes, cleans up on Ctrl-C
@@ -125,11 +125,11 @@ MIDI control disabled"`) and could've read/written a stray `cues.json` in
 the wrong directory - with no obvious error. See `exe_dir()`,
 `app_data_dir()`, and `resolve_data_file()` in `laser_daemon.cpp`.
 
-`zones.json` (the "Zone 1" venue calibration - see "Zoning / multi-region
-output" below) lives in the same per-user app-data directory and is seeded/
-resolved the same way, via `load_zone_from_disk()`/`save_zone_to_disk()`.
-Unlike `cues.json`, it always has a value (defaults to no pan/scale) and is
-re-saved to disk on every `POST /api/zone`, not just at exit.
+`lasers.json` (the configured laser/DAC list, including each one's `armed`
+state and its own zone_x/zone_y/zone_scale_x/zone_scale_y pan/zoom
+calibration - see "Lasers (multi-DAC output)" below) lives in the same
+per-user app-data directory and is seeded/resolved the same way, via
+`load_lasers_from_disk()`/`save_lasers_to_disk()`.
 
 ## Standalone / packaged builds
 
@@ -265,10 +265,11 @@ Key design points:
   `{ }` block or inside a `try { }` that ends before the `res.set_content(...)`
   call.
 - **`POST /api/reset`** restores `LaserState` to its default-constructed
-  values but preserves `flash_release_ms`/`max_rate_kpps`/`blackout`/the
-  zone 1 calibration (all global daemon settings - see "Cue system"
-  below). The configured laser list (`G_lasers`/`lasers.json`) is entirely
-  separate from `LaserState` and untouched by a reset.
+  values but preserves `flash_release_ms`/`max_rate_kpps`/`blackout`
+  (all global daemon settings - see "Cue system" below). The configured
+  laser list, including each laser's `armed` state and zone calibration
+  (`G_lasers`/`lasers.json`), is entirely separate from `LaserState` and
+  untouched by a reset.
 - **No recursive shape/frame restart on param change.** All shape/movement/
   color/etc. parameters are read fresh from `G` every frame — there is no
   "restart the daemon" step anywhere, so slider drags are glitch-free.
@@ -305,20 +306,24 @@ resolution as visible stepping), while big jumps (>0.25 normalized) get a
 boosted alpha so large moves still feel responsive. `make_frame()` reads
 the smoothed globals directly, not the raw target fields.
 
-### Zoning ("Zone 1")
+### Zoning (per-laser pan/zoom calibration)
 
-`zone_x`/`zone_y`/`zone_scale_x`/`zone_scale_y` are a master pan/zoom
-applied on top of everything else (shape/position/rotation/movement/
-mirror) — for mapping the whole show onto a physical sub-region of a
-laser's range (e.g. a wall or truss segment), not a per-look show
-parameter. Set only by dragging the box in `ZoningPanel.vue` (no numeric
-fader by design), backed by `GET`/`POST /api/zone`.
+`zone_x`/`zone_y`/`zone_scale_x`/`zone_scale_y` on each `LaserConfig` (see
+"Lasers (multi-DAC output)" below) are a master pan/zoom applied on top of
+everything else (shape/position/rotation/movement/mirror) — for mapping the
+whole show onto a physical sub-region of *that specific laser's* range
+(e.g. a wall or truss segment), not a per-look show parameter. Each
+configured laser has its own independent calibration, since two projectors
+in the same rig often need different alignments even while showing the
+exact same content. Set only by dragging the box in `ZoningPanel.vue` (no
+numeric fader by design), which lets the operator pick which laser to
+calibrate from a dropdown, backed by `POST /api/lasers/<id>`.
 
 - **Hardware-only, exactly like `blackout`/the footswitch gate.** It's
-  applied in `laser_thread()`'s hardware-send step, to a separate copy of
-  the frame (`hwFrame`) built *after* `make_frame()` already produced the
-  frame broadcast to the WS preview — so the preview always shows the
-  true, un-zoned show regardless of how the physical output is currently
+  applied in `laser_thread()`'s hardware-send step, per laser, to a
+  separate copy of the frame built *after* `make_frame()` already produced
+  the frame broadcast to the WS preview — so the preview always shows the
+  true, un-zoned show regardless of how any physical output is currently
   mapped.
 - **Independent per-axis scale**, not a single uniform zoom, so the zone
   can be stretched/squeezed on just one axis to match a non-square venue
@@ -327,13 +332,8 @@ fader by design), backed by `GET`/`POST /api/zone`.
   clamped), same reasoning as `make_frame()`'s own off-screen handling —
   clamping would pin/smear the shape against the venue boundary instead of
   cleanly cutting it off.
-- Persisted independently in its own file, `zones.json` (not `cues.json`),
-  loaded once at startup via `load_zone_from_disk()` and re-saved on every
-  `POST /api/zone` — see "Persistent user data" above.
-- Exactly one zone exists right now ("Zone 1"). Any number of physical
-  lasers can be assigned to it at once though — see "Lasers (multi-DAC
-  output)" below for the per-laser list this zone concept was already
-  designed to plug into.
+- Persisted as part of each laser's own entry in `lasers.json` (not
+  `cues.json`) — see "Lasers (multi-DAC output)" below.
 - Excluded from cue state and `/api/reset` for the same reason as
   `blackout`/`flash_release_ms` — see "Cue system" below.
 
@@ -342,10 +342,13 @@ fader by design), backed by `GET`/`POST /api/zone`.
 `G_lasers` (`std::vector<LaserConfig>`, guarded by `G_lasers_mtx`) is the
 configured list of physical DACs, persisted to `lasers.json` and exposed
 via `GET/POST /api/lasers`, `POST /api/lasers/<id>`, `DELETE
-/api/lasers/<id>` — added/renamed/re-IP'd/removed from the **Lasers** panel
-(`LasersPanel.vue`) in the UI. Each entry is `{id, name, ip,
-assigned_zone}`; `assigned_zone` is `0` (configured but idle - no network
-connection attempted) or `1` (Zone 1 — the only zone that exists today).
+/api/lasers/<id>` — added/renamed/re-IP'd/removed/armed/calibrated from the
+**Lasers** panel (`LasersPanel.vue`) and **Zoning** panel (`ZoningPanel.vue`)
+in the UI. Each entry is `{id, name, ip, armed, zone_x, zone_y,
+zone_scale_x, zone_scale_y}`; `armed` is the master enable for that
+specific laser - `false` means configured but idle (no network connection
+ever attempted), `true` means `laser_thread()` connects and streams to it,
+transformed by *that laser's own* zone calibration.
 
 `laser_thread()` owns a `std::map<int, LaserRuntime>` — one
 `core::LaserController` + its own connect/pacing state per laser id — kept
@@ -357,12 +360,13 @@ plain `bool` "connected" summary is, via `G_laser_connected`/
    connect/send work).
 2. Drops runtime state for any laser id no longer configured at all.
 3. Connects/disconnects/retries each laser independently based on its own
-   `assigned_zone`/`ip` (same connect-retry-backoff logic as before, just
+   `armed`/`ip` (same connect-retry-backoff logic as before, just
    duplicated per laser instead of a single global `ctrl`).
-4. If *any* assigned+connected laser is ready for a new frame, renders one
-   zone-transformed + blackout/gate-applied frame and fans an independent
-   copy out to every laser that's currently ready (`isReadyForNewFrame()` +
-   its own 20ms pacing floor).
+4. If *any* armed+connected laser is ready for a new frame, renders one
+   blackout/gate-applied base frame and fans it out to every laser that's
+   currently ready (`isReadyForNewFrame()` + its own 20ms pacing floor),
+   applying that specific laser's own zone_x/zone_y/zone_scale_x/
+   zone_scale_y transform to its copy just before sending.
 
 This works safely in parallel (not sequentially/one-at-a-time) because
 `core::LaserController::sendFrame()` just queues the frame into that
@@ -377,15 +381,16 @@ Cues are snapshots of `LaserState` in `std::map<int, LaserState> G_cues`,
 guarded by its own `G_cues_mtx` and persisted to `backend/cues.json`. A
 handful of fields are deliberately *not* part of that snapshot even though
 they live on `LaserState` - `flash_release_ms`, `intensity`
-(master brightness), `blackout`, `max_rate_kpps` and the zone 1 calibration
-(`zone_x`/`zone_y`/`zone_scale_x`/`zone_scale_y`) are global daemon/safety
+(master brightness), `blackout` and `max_rate_kpps` are global daemon/safety
 settings, not per-look show state: they're excluded from
 `cue_state_to_json`/`cue_state_from_json` and explicitly re-applied on top
 of `G` after every `do_cue_recall()` (and preserved across `/api/reset` the
 same way), so switching cues or resetting the show can never change the
 footswitch fade time, the master brightness fader, whether the laser is
-blacked out, the configured scan-rate ceiling, or the
-projector's physical zone alignment.
+blacked out, or the configured scan-rate ceiling. Each laser's own
+connection/zone calibration lives entirely outside `LaserState` (in
+`G_lasers`/`lasers.json` instead), so it's naturally unaffected by cues too
+- see "Lasers (multi-DAC output)" above.
 
 **`G_mtx` and `G_cues_mtx` are never held at the same time** -
 `do_cue_save/recall/clear()` in laser_daemon.cpp are the *only* functions
