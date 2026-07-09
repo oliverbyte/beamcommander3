@@ -156,6 +156,36 @@ on the target machine), and ships a `.dmg` with a drag-to-Applications
 shortcut. See `packaging/launcher.sh` and `packaging/Info.plist.template`
 for the app bundle's launcher script and metadata.
 
+## README screenshots
+
+The screenshots in [README.md](README.md#screenshots) (`docs/screenshots/*.png`)
+are generated, not hand-captured, and committed straight into the repo so
+they render even when README.md is viewed offline/from a clone. Regenerated
+automatically by the `build-macos` job of `.github/workflows/release.yml`
+on every push to `main`:
+
+1. Builds `laser_daemon` and `frontend/dist` as usual, then runs the real
+   backend against the built frontend (`FRONTEND_DIST=... ./laser_daemon`) -
+   no mocking, so the screenshots reflect an actually-working app.
+2. Applies a colorful demo look via `POST /api/state` and saves it into cue
+   slot 1 (`backend/cues.json` is gitignored/local-only runtime data, so a
+   fresh checkout has no saved cues to rely on) and adds one example
+   (unarmed) laser so the Lasers/Zoning panels aren't empty placeholders.
+3. `frontend/scripts/screenshots.mjs` (Playwright) drives a headless
+   Chromium at a fixed 1440×900 viewport (the default MacBook Air
+   resolution, kept fixed so image dimensions never drift release to
+   release) and captures one shot of the idle preview plus one per dock
+   menu button (Settings/Cues/Zoning/Lasers).
+4. The workflow commits the resulting PNGs back to `main` as
+   `docs: update screenshots [skip ci]`. The `on.push.paths-ignore` filter
+   for `docs/screenshots/**` stops that commit from re-triggering this same
+   workflow.
+
+To regenerate locally: build the backend and frontend as above, `cd frontend
+&& npx playwright install chromium`, start `laser_daemon` pointed at
+`frontend/dist` via `FRONTEND_DIST`, then run
+`BASE_URL=http://localhost:8000 OUT_DIR=../docs/screenshots node scripts/screenshots.mjs`.
+
 ## Building for Windows
 
 macOS keeps using `build.sh` (raw `clang++`) as shown above. Windows instead

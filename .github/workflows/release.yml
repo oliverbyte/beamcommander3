@@ -7,12 +7,21 @@ name: Release
 #
 # - macOS: a BeamCommander3.app bundle + .dmg (drag-to-Applications), built
 #   with clang++ via backend/build.sh, on macos-14 (Apple Silicon/arm64).
+#   This job also regenerates the README's screenshots (see
+#   frontend/scripts/screenshots.mjs) by running the just-built backend for
+#   real and driving a headless browser at a fixed 1440x900 ("MacBook Air")
+#   viewport, then commits the resulting PNGs into docs/screenshots/ on main
+#   (so they render for anyone viewing README.md offline/on a clone too, not
+#   just on GitHub) - see the "Commit updated screenshots" step below.
 # - Windows: a portable .zip (laser_daemon.exe + assets + a run.bat
 #   launcher), built with MSVC via CMake (backend/CMakeLists.txt - only used
 #   for this job, macOS keeps using build.sh), on windows-latest (x64).
 on:
   push:
     branches: [main]
+    # The screenshots commit below (docs/screenshots/**-only) must not
+    # re-trigger this same workflow - would otherwise loop forever.
+    paths-ignore: ["docs/screenshots/**"]
   workflow_dispatch: {}
 
 permissions:
@@ -39,6 +48,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # needed to rebase before pushing the screenshots commit
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -82,6 +93,49 @@ jobs:
           cd frontend
           npm ci
           npm run build
+
+      - name: Generate README screenshots
+        run: |
+          cd frontend
+          npx playwright install chromium
+
+          # Run the real built backend against the built frontend (not a
+          # mock) so the screenshots reflect an actual working app - cwd
+          # doesn't matter for cues.json/midi_map.json (resolved relative
+          # to the binary itself, see resolve_data_file() in
+          # laser_daemon.cpp), only FRONTEND_DIST needs pointing at dist/.
+          FRONTEND_DIST="$PWD/dist" ../backend/laser_daemon --port 8000 &
+          echo $! > /tmp/laser_daemon.pid
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/api/state >/dev/null && break
+            sleep 1
+          done
+
+          # A configured (but unarmed) example laser so the Lasers/Zoning
+          # panel screenshots aren't just empty-state placeholders.
+          curl -sf -X POST http://localhost:8000/api/lasers \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"Stage Left","ip":"10.10.10.4"}' >/dev/null
+
+          BASE_URL=http://localhost:8000 OUT_DIR="$GITHUB_WORKSPACE/docs/screenshots" node scripts/screenshots.mjs
+
+      - name: Stop screenshot backend
+        if: always()
+        run: kill "$(cat /tmp/laser_daemon.pid)" 2>/dev/null || true
+
+      - name: Commit updated screenshots
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/screenshots
+          if git diff --cached --quiet; then
+            echo "No screenshot changes to commit."
+          else
+            git commit -m "docs: update screenshots [skip ci]"
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
+          fi
 
       - name: Assemble release package (.app + .dmg)
         id: package

@@ -11,6 +11,23 @@ You don't need to know how to code to use it — see
 curious how it's built, or want to modify it, the rest of this file and
 [DEVELOPER.md](DEVELOPER.md) cover the technical side.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/screenshot-background.png" alt="BeamCommander3 live preview" width="820">
+</p>
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/screenshot-settings.png" alt="Settings panel"></td>
+<td width="50%"><img src="docs/screenshots/screenshot-cues.png" alt="Cues panel"></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/screenshot-zoning.png" alt="Zoning panel"></td>
+<td width="50%"><img src="docs/screenshots/screenshot-lasers.png" alt="Lasers panel"></td>
+</tr>
+</table>
+
 ## ⚠️ Safety warning: lasers can cause permanent eye injury and are heavily regulated
 
 **Read this before connecting any real laser projector.** This software can
