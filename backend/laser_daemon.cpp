@@ -738,8 +738,8 @@ static void laser_thread() {
         // faster than the hardware can drain them. Each laser gets its own
         // independent 20ms floor so one DAC's pacing can never starve or
         // be starved by another's.
-        Clock::time_point last_hw_send        = Clock::now() - 1s;
-        Clock::time_point next_connect_attempt = Clock::now();
+        std::chrono::steady_clock::time_point last_hw_send        = std::chrono::steady_clock::now() - 1s;
+        std::chrono::steady_clock::time_point next_connect_attempt = std::chrono::steady_clock::now();
     };
     std::map<int, LaserRuntime> runtimes; // keyed by LaserConfig::id - this thread's own state, never shared
 
