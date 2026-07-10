@@ -67,18 +67,13 @@
   { "type": "note", "channel": 0, "number": 84,  "action": "motion_hold" },
   { "type": "note", "channel": 0, "number": 82,  "action": "mirror_hold" },
 
-  { "type": "note", "channel": 0, "number": 39, "action": "cue_momentary:1" },
-  { "type": "note", "channel": 0, "number": 40, "action": "cue_momentary:2" },
-  { "type": "note", "channel": 0, "number": 44, "action": "cue_momentary:3" },
-  { "type": "note", "channel": 0, "number": 48, "action": "cue_momentary:4" },
-  { "type": "note", "channel": 0, "number": 49, "action": "cue_momentary:5" },
-  { "type": "note", "channel": 0, "number": 50, "action": "cue_momentary:6" },
-  { "type": "note", "channel": 0, "number": 51, "action": "cue_momentary:7" },
-  { "type": "note", "channel": 0, "number": 72, "action": "cue_momentary:8" },
-
   { "type": "note", "channel": 0, "number": 52, "action": "laser_toggle:1" },
   { "type": "note", "channel": 1, "number": 52, "action": "laser_toggle:2" },
-  { "type": "note", "channel": 2, "number": 52, "action": "laser_toggle:3" }
+  { "type": "note", "channel": 2, "number": 52, "action": "laser_toggle:3" },
+
+  { "type": "note", "channel": 0, "number": 49, "action": "laser_mirror_toggle:1" },
+  { "type": "note", "channel": 1, "number": 49, "action": "laser_mirror_toggle:2" },
+  { "type": "note", "channel": 2, "number": 49, "action": "laser_mirror_toggle:3" }
 ]
 
 

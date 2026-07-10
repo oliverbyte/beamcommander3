@@ -245,6 +245,7 @@ struct LaserConfig {
     bool        armed = false; // master enable - connect+stream only when true
     float       zone_x = 0.0f, zone_y = 0.0f;             // -1..1, offset of the whole output
     float       zone_scale_x = 1.0f, zone_scale_y = 1.0f; // 0.1..2, independent per-axis multiplier
+    bool        mirror_x = false; // this laser's own horizontal flip (hardware-only, applied before its zone offset/scale) - independent of the global LaserState::mirror_x
 };
 static std::vector<LaserConfig> G_lasers;
 static std::mutex               G_lasers_mtx;
@@ -936,10 +937,11 @@ static void laser_thread() {
                 for (const auto& l : lasers_snapshot) if (l.id == id) { cfg = &l; break; }
 
                 core::Frame toSend = outFrame;
-                if (cfg && (cfg->zone_scale_x != 1.0f || cfg->zone_scale_y != 1.0f ||
+                if (cfg && (cfg->mirror_x || cfg->zone_scale_x != 1.0f || cfg->zone_scale_y != 1.0f ||
                             cfg->zone_x != 0.0f || cfg->zone_y != 0.0f)) {
                     for (auto& p : toSend.points) {
-                        float zx = p.x * cfg->zone_scale_x + cfg->zone_x;
+                        float x  = cfg->mirror_x ? -p.x : p.x;
+                        float zx = x * cfg->zone_scale_x + cfg->zone_x;
                         float zy = p.y * cfg->zone_scale_y + cfg->zone_y;
                         p.x = zx; p.y = zy;
                         if (std::fabs(zx) > 1.0f || std::fabs(zy) > 1.0f) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
@@ -995,6 +997,7 @@ static std::string laser_config_to_json(const LaserConfig& l) {
        << ",\"zone_y\":" << l.zone_y
        << ",\"zone_scale_x\":" << l.zone_scale_x
        << ",\"zone_scale_y\":" << l.zone_scale_y
+       << ",\"mirror_x\":" << (l.mirror_x ? "true" : "false")
        << ",\"connected\":" << (get_laser_connected(l.id) ? "true" : "false")
        << "}";
     return ss.str();
@@ -1010,6 +1013,7 @@ static void save_lasers_to_disk() {
            << "\",\"armed\":" << (l.armed ? "true" : "false")
            << ",\"zone_x\":" << l.zone_x << ",\"zone_y\":" << l.zone_y
            << ",\"zone_scale_x\":" << l.zone_scale_x << ",\"zone_scale_y\":" << l.zone_scale_y
+           << ",\"mirror_x\":" << (l.mirror_x ? "true" : "false")
            << "}";
     }
     ss << "]";
@@ -1043,6 +1047,7 @@ static void load_lasers_from_disk() {
         l.zone_y        = json_float(obj, "zone_y", 0.0f);
         l.zone_scale_x  = json_float(obj, "zone_scale_x", 1.0f);
         l.zone_scale_y  = json_float(obj, "zone_scale_y", 1.0f);
+        l.mirror_x      = json_bool(obj, "mirror_x", false);
         if (l.id > 0) {
             G_lasers.push_back(l);
             G_next_laser_id = std::max(G_next_laser_id, l.id + 1);
@@ -1547,6 +1552,26 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         save_lasers_to_disk();
         return;
     }
+    // Per-laser hardware-output X-mirror toggle (e.g. another APC40 mkII
+    // button row, one per channel strip). "laser_mirror_toggle:<n>" flips
+    // G_lasers[n-1].mirror_x (1-based, in on-screen laser order) - like
+    // laser_toggle: above, this only affects that laser's real hardware
+    // output (see laser_thread()'s per-laser zone-transform step), never
+    // the browser preview.
+    if (action.rfind("laser_mirror_toggle:",0)==0) {
+        if (!isPress) return; // toggle once per press, ignore release
+        int n = 0; try { n = std::stoi(action.substr(20)); } catch (...) { return; }
+        {
+            std::lock_guard<std::mutex> lk(G_lasers_mtx);
+            int idx = n - 1;
+            if (idx < 0 || idx >= (int)G_lasers.size()) return;
+            G_lasers[idx].mirror_x = !G_lasers[idx].mirror_x;
+            std::cout << "[midi] laser " << n << " (" << G_lasers[idx].name << ") mirror_x "
+                      << (G_lasers[idx].mirror_x ? "on" : "off") << "\n" << std::flush;
+        }
+        save_lasers_to_disk();
+        return;
+    }
     // One-shot: snap rotation back to angle 0 and stop it spinning. Shared
     // with the /rotation/reset REST route. Fires on *every* MIDI message
     // for this note (both isPress and isRelease), not just isPress - this
@@ -1641,8 +1666,28 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
 #ifdef __APPLE__
 #include <CoreMIDI/CoreMIDI.h>
 
-static MIDIClientRef g_midi_client  = 0;
-static MIDIPortRef   g_midi_in_port = 0;
+static MIDIClientRef   g_midi_client   = 0;
+static MIDIPortRef     g_midi_in_port  = 0;
+static MIDIPortRef     g_midi_out_port = 0;
+static MIDIEndpointRef g_midi_out_dest = 0; // 0 = no output destination found yet
+
+// Sends a Note Off for (channel, note) back to the controller, if an
+// output destination has been found (see scan() in midi_thread()). Used
+// to override the APC40 mkII's own firmware LED behavior for buttons we've
+// repurposed (e.g. the "Solo" row, which the controller lights up blue on
+// press regardless of what the host does with the incoming note) - the
+// controller listens to its own MIDI *output* port for note messages to
+// set that same button's LED state, so echoing a Note Off back forces the
+// LED off immediately after the controller turns it on.
+static void send_note_off(unsigned char channel, unsigned char note) {
+    if (!g_midi_out_dest || !g_midi_out_port) return;
+    Byte msg[3] = { (Byte)(0x80 | (channel & 0x0F)), note, 0 };
+    Byte buffer[64];
+    MIDIPacketList* pktlist = reinterpret_cast<MIDIPacketList*>(buffer);
+    MIDIPacket* packet = MIDIPacketListInit(pktlist);
+    packet = MIDIPacketListAdd(pktlist, sizeof(buffer), packet, 0, 3, msg);
+    if (packet) MIDISend(g_midi_out_port, g_midi_out_dest, pktlist);
+}
 
 static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
     const MIDIPacket* packet = &pktlist->packet[0];
@@ -1677,6 +1722,13 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
                                   << " " << (isPress ? "press" : "release")
                                   << " -> " << match.action << "\n" << std::flush;
                         midi_apply_note_action(match.action, isPress, isRelease);
+                        // These buttons default to a "Solo"-style blue LED
+                        // on the controller itself - not meaningful for
+                        // this app's own use of them, so force it back off
+                        // right after each press (see send_note_off()'s
+                        // comment).
+                        if (isPress && match.action.rfind("laser_mirror_toggle:",0)==0)
+                            send_note_off(channel, d1);
                     } else {
                         midi_apply_cc_action(match.action, midi_cc_value(match, d2, channel));
                     }
@@ -1709,6 +1761,8 @@ static void midi_thread() {
     if (st != noErr) { std::cout << "[midi] MIDIClientCreate failed (" << st << ")\n"; return; }
     st = MIDIInputPortCreate(g_midi_client, CFSTR("BeamCommander3 In"), midi_read_proc, nullptr, &g_midi_in_port);
     if (st != noErr) { std::cout << "[midi] MIDIInputPortCreate failed (" << st << ")\n"; return; }
+    st = MIDIOutputPortCreate(g_midi_client, CFSTR("BeamCommander3 Out"), &g_midi_out_port);
+    if (st != noErr) std::cout << "[midi] MIDIOutputPortCreate failed (" << st << ") - LED feedback disabled\n";
 
     std::set<MIDIEndpointRef> connected;
     auto scan = [&]() {
@@ -1723,6 +1777,25 @@ static void midi_thread() {
             if (MIDIPortConnectSource(g_midi_in_port, src, nullptr) == noErr) {
                 connected.insert(src);
                 std::cout << "[midi] connected: " << name << "\n" << std::flush;
+
+                // Find this same controller's MIDI *output* destination
+                // (matched by display name) so send_note_off() can send
+                // LED-override messages back to it.
+                if (g_midi_out_port && !g_midi_out_dest) {
+                    ItemCount dn = MIDIGetNumberOfDestinations();
+                    for (ItemCount di = 0; di < dn; ++di) {
+                        MIDIEndpointRef dst = MIDIGetDestination(di);
+                        CFStringRef dNameRef = nullptr;
+                        MIDIObjectGetStringProperty(dst, kMIDIPropertyDisplayName, &dNameRef);
+                        char dName[256] = "?";
+                        if (dNameRef) { CFStringGetCString(dNameRef, dName, sizeof(dName), kCFStringEncodingUTF8); CFRelease(dNameRef); }
+                        if (std::string(dName) == std::string(name)) {
+                            g_midi_out_dest = dst;
+                            std::cout << "[midi] output destination: " << dName << "\n" << std::flush;
+                            break;
+                        }
+                    }
+                }
             }
         }
     };
@@ -2030,6 +2103,7 @@ int main(int argc, char* argv[]) {
               auto nm = json_str(req.body,"name"); if (!nm.empty()) l.name = nm;
               if (req.body.find("\"ip\"") != std::string::npos) l.ip = json_str(req.body,"ip");
               if (req.body.find("\"armed\"") != std::string::npos) l.armed = json_bool(req.body,"armed",l.armed);
+              if (req.body.find("\"mirror_x\"") != std::string::npos) l.mirror_x = json_bool(req.body,"mirror_x",l.mirror_x);
               l.zone_x       = json_float(req.body,"zone_x",l.zone_x);
               l.zone_y       = json_float(req.body,"zone_y",l.zone_y);
               l.zone_scale_x = std::clamp(json_float(req.body,"zone_scale_x",l.zone_scale_x),0.1f,2.0f);
