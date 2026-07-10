@@ -5,6 +5,7 @@ import vue from '@vitejs/plugin-vue'
 export default defineConfig({
   plugins: [vue()],
   server: {
+    host: true, // listen on 0.0.0.0 (all network interfaces), not just localhost
     proxy: {
       '/api':      { target: 'http://localhost:8000', changeOrigin: true },
       '/laser':    { target: 'http://localhost:8000', changeOrigin: true },
