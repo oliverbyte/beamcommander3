@@ -27,6 +27,12 @@
             :title="l.armed ? 'Disarm (stop streaming)' : 'Arm (start streaming Zone 1)'"
             @click="toggleArmed(l)"
           >{{ l.armed ? '● Armed' : '○ Armed' }}</button>
+          <button
+            class="mirror-btn"
+            :class="{ active: l.mirror_x }"
+            :title="l.mirror_x ? 'Un-mirror X axis (hardware only)' : 'Mirror X axis (hardware only)'"
+            @click="toggleMirror(l)"
+          >⇆</button>
           <button class="del-btn" title="Remove laser" @click="onDelete(l)">✕</button>
         </div>
         <p v-if="!lasers.length" class="empty">No lasers configured yet.</p>
@@ -88,6 +94,10 @@ async function toggleArmed(l) {
   try { await updateLaser(l.id, { armed: !l.armed }); error.value = null }
   catch (e) { error.value = String(e) }
 }
+async function toggleMirror(l) {
+  try { await updateLaser(l.id, { mirror_x: !l.mirror_x }); error.value = null }
+  catch (e) { error.value = String(e) }
+}
 async function onDelete(l) {
   try { await deleteLaser(l.id); error.value = null } catch (e) { error.value = String(e) }
 }
@@ -132,6 +142,8 @@ button:hover { background:rgba(255,255,255,0.14); }
 button:disabled { opacity:0.5; cursor:default; }
 .arm-btn { flex-shrink:0; white-space:nowrap; }
 .arm-btn.active { background:rgba(72,224,122,0.18); border-color:#48e07a; color:#48e07a; }
+.mirror-btn { flex-shrink:0; padding:4px 7px; }
+.mirror-btn.active { background:rgba(120,170,255,0.18); border-color:#78aaff; color:#78aaff; }
 .del-btn { flex-shrink:0; padding:4px 7px; color:#ff8080; border-color:rgba(255,100,100,0.35); }
 
 .row { margin-bottom:6px; }

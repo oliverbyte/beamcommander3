@@ -1588,9 +1588,13 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
     // G_lasers[n-1].mirror_x (1-based, in on-screen laser order) - like
     // laser_toggle: above, this only affects that laser's real hardware
     // output (see laser_thread()'s per-laser zone-transform step), never
-    // the browser preview.
+    // the browser preview. Fires on *every* MIDI message for this note
+    // (both isPress and isRelease), not just isPress - matches
+    // rotation_reset's comment below: this pad alternates note-on/note-off
+    // across successive physical taps rather than sending an on+off pair
+    // per tap, so gating on isPress only made it toggle on just every
+    // other press.
     if (action.rfind("laser_mirror_toggle:",0)==0) {
-        if (!isPress) return; // toggle once per press, ignore release
         int n = 0; try { n = std::stoi(action.substr(20)); } catch (...) { return; }
         {
             std::lock_guard<std::mutex> lk(G_lasers_mtx);
@@ -1702,17 +1706,19 @@ static MIDIPortRef     g_midi_in_port  = 0;
 static MIDIPortRef     g_midi_out_port = 0;
 static MIDIEndpointRef g_midi_out_dest = 0; // 0 = no output destination found yet
 
-// Sends a Note Off for (channel, note) back to the controller, if an
-// output destination has been found (see scan() in midi_thread()). Used
-// to override the APC40 mkII's own firmware LED behavior for buttons we've
-// repurposed (e.g. the "Solo" row, which the controller lights up blue on
-// press regardless of what the host does with the incoming note) - the
-// controller listens to its own MIDI *output* port for note messages to
-// set that same button's LED state, so echoing a Note Off back forces the
-// LED off immediately after the controller turns it on.
-static void send_note_off(unsigned char channel, unsigned char note) {
+// Sends a Note On (velocity>0) or Note Off (velocity 0) for (channel, note)
+// back to the controller, if an output destination has been found (see
+// scan() in midi_thread()). Used to override the APC40 mkII's own firmware
+// LED behavior for buttons we've repurposed (e.g. the "Solo" row, which the
+// controller lights up blue on press regardless of what the host does with
+// the incoming note) - the controller listens to its own MIDI *output* port
+// for note messages to set that same button's LED state, so echoing a note
+// back lets us force the LED to reflect our own toggle state instead
+// (lit while active, off otherwise) rather than the controller's default
+// light-on-press-only behavior.
+static void send_note(unsigned char channel, unsigned char note, unsigned char velocity) {
     if (!g_midi_out_dest || !g_midi_out_port) return;
-    Byte msg[3] = { (Byte)(0x80 | (channel & 0x0F)), note, 0 };
+    Byte msg[3] = { (Byte)((velocity > 0 ? 0x90 : 0x80) | (channel & 0x0F)), note, velocity };
     Byte buffer[64];
     MIDIPacketList* pktlist = reinterpret_cast<MIDIPacketList*>(buffer);
     MIDIPacket* packet = MIDIPacketListInit(pktlist);
@@ -1754,12 +1760,27 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
                                   << " -> " << match.action << "\n" << std::flush;
                         midi_apply_note_action(match.action, isPress, isRelease);
                         // These buttons default to a "Solo"-style blue LED
-                        // on the controller itself - not meaningful for
-                        // this app's own use of them, so force it back off
-                        // right after each press (see send_note_off()'s
-                        // comment).
-                        if (isPress && match.action.rfind("laser_mirror_toggle:",0)==0)
-                            send_note_off(channel, d1);
+                        // on the controller itself (lit only while held) -
+                        // not meaningful for this app's own use of them, so
+                        // override it right after each message to instead
+                        // reflect our own toggle state: lit while that
+                        // laser's x-axis is inverted, off otherwise (see
+                        // send_note()'s comment). Fires on every message
+                        // (not just isPress), matching
+                        // midi_apply_note_action's laser_mirror_toggle
+                        // handling above - this pad alternates note-on/
+                        // note-off per tap rather than a press+release
+                        // pair per tap.
+                        if (match.action.rfind("laser_mirror_toggle:",0)==0) {
+                            int n = 0; try { n = std::stoi(match.action.substr(20)); } catch (...) { n = 0; }
+                            bool mirrored = false;
+                            if (n > 0) {
+                                std::lock_guard<std::mutex> lk(G_lasers_mtx);
+                                int idx = n - 1;
+                                if (idx >= 0 && idx < (int)G_lasers.size()) mirrored = G_lasers[idx].mirror_x;
+                            }
+                            send_note(channel, d1, mirrored ? 127 : 0);
+                        }
                     } else {
                         midi_apply_cc_action(match.action, midi_cc_value(match, d2, channel));
                     }
@@ -1785,6 +1806,37 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
 // Runs on its own thread with an active CFRunLoop (required for CoreMIDI to
 // deliver read-proc callbacks). Periodically rescans for newly-connected
 // sources so plugging in the controller after the daemon starts still works.
+
+// Keeps each laser's "S" button LED in sync with its mirror_x state even
+// when that state changes via the REST API/web UI rather than the MIDI
+// button itself - those changes never arrive as an incoming MIDI message,
+// so midi_read_proc()'s LED echo (which only fires when it sees a
+// laser_mirror_toggle message come in) can't react to them. Instead this
+// polls G_lasers periodically (see the dedicated CFRunLoopTimer in
+// midi_thread() below) and pushes a Note On/Off for any laser whose
+// mirror_x has changed since the last check, so the LED always reflects
+// the true current state regardless of what changed it.
+static std::map<int, bool> g_last_mirror_led; // keyed by laser's 1-based position (matches laser_mirror_toggle:<n>)
+static void sync_mirror_leds() {
+    std::vector<std::pair<int, bool>> current; // (1-based position, mirror_x)
+    {
+        std::lock_guard<std::mutex> lk(G_lasers_mtx);
+        for (std::size_t i = 0; i < G_lasers.size(); ++i)
+            current.emplace_back((int)i + 1, G_lasers[i].mirror_x);
+    }
+    for (auto& [n, mirrored] : current) {
+        auto it = g_last_mirror_led.find(n);
+        if (it != g_last_mirror_led.end() && it->second == mirrored) continue;
+        g_last_mirror_led[n] = mirrored;
+        std::string action = "laser_mirror_toggle:" + std::to_string(n);
+        std::lock_guard<std::mutex> lk(G_midi_mtx);
+        for (auto& b : G_midi_bindings) {
+            if (b.type == "note" && b.action == action && b.channel >= 0)
+                send_note((unsigned char)b.channel, (unsigned char)b.number, mirrored ? 127 : 0);
+        }
+    }
+}
+
 static void midi_thread() {
     load_midi_map(resolve_data_file("midi_map.json"));
 
@@ -1838,6 +1890,14 @@ static void midi_thread() {
         kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 3, 3, 0, 0,
         ^(CFRunLoopTimerRef) { scan(); });
     CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopDefaultMode);
+
+    // Separate, much faster timer for sync_mirror_leds() (see its comment)
+    // so an API/UI-driven mirror change reaches the physical LED promptly,
+    // without waiting for (or being tied to) the 3s device-rescan cadence.
+    CFRunLoopTimerRef ledTimer = CFRunLoopTimerCreateWithHandler(
+        kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 0.2, 0, 0,
+        ^(CFRunLoopTimerRef) { sync_mirror_leds(); });
+    CFRunLoopAddTimer(CFRunLoopGetCurrent(), ledTimer, kCFRunLoopDefaultMode);
 
     CFRunLoopRun(); // pumps MIDI + the rescan timer forever
 }
