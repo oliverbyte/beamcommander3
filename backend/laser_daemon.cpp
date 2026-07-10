@@ -538,6 +538,37 @@ static core::Frame make_frame(const LaserState& s) {
     const int   kDotDwell  = 4;    // lit points held once settled
     const int   kBlankTrail = 2;   // blanked points held before leaving
 
+    // HARDWARE SAFETY CAP: each dot can cost up to kBlankMax+kDotDwell+
+    // kBlankTrail points (~86), so a shape with many base points (`points`,
+    // up to 1000 via the UI slider) at a dot_amount just under 1.0 - the
+    // overwhelmingly common case while slowly dragging the fader down -
+    // could keep numDots close to n0 while every one of those dots still
+    // pays close to the full per-dot cost, producing frames of tens of
+    // thousands of points. That's far beyond what a real DAC's ring buffer
+    // can hold in one frame (EtherDreamControllerInfo above is constructed
+    // with a 4095-point buffer) and was traced back as the root cause of
+    // the DAC locking up/needing a power cycle after slowly reducing dot
+    // amount. Fix in two parts, both driven by the same fixed budget so
+    // the *total* frame size sent to hardware always stays under a safe
+    // cap no matter the combination of `points` and dot_amount:
+    //  1. Hard-cap the number of lit dots itself (kMaxDots) - otherwise
+    //     even the cheapest possible per-dot cost (kMinDotCost, all at the
+    //     kBlankMin floor) could still add up to far more than the budget
+    //     when `points` is large.
+    //  2. Within that dot count, shrink the per-dot blank-settle ceiling
+    //     as numDots grows, so large jumps still get proportionally more
+    //     settle time relative to each other, just capped lower overall
+    //     when there are many dots.
+    const int kMaxFramePoints = 3000; // safely under the DAC's buffer capacity
+    const int kMinDotCost = kBlankMin + kDotDwell + kBlankTrail;
+    const int kMaxDots = kMaxFramePoints / kMinDotCost;
+    if (dotted && numDots > kMaxDots) numDots = kMaxDots;
+    int perDotBlankMax = kBlankMax;
+    if (dotted && numDots > 0) {
+        int budgetPerDot = kMaxFramePoints / numDots - kDotDwell - kBlankTrail;
+        perDotBlankMax = std::clamp(budgetPerDot, kBlankMin, kBlankMax);
+    }
+
     // Flicker/strobe (still affects the generated frame directly, so both
     // preview and hardware strobe together - only `blackout` is treated
     // differently, see laser_thread()'s hardware-send step below, which
@@ -626,7 +657,7 @@ static core::Frame make_frame(const LaserState& s) {
             float dx = px - prevx, dy = py - prevy;
             float dist = std::sqrt(dx * dx + dy * dy);
             int blankSettle = std::clamp((int)std::round(dist * kBlankPerUnitDistance) + kBlankMin,
-                                          kBlankMin, kBlankMax);
+                                          kBlankMin, perDotBlankMax);
             for (int d = 0; d < blankSettle; ++d)
                 frame.points.emplace_back(core::LaserPoint{px, py, 0.0f, 0.0f, 0.0f, 1.0f});
             for (int d = 0; d < kDotDwell; ++d) {
