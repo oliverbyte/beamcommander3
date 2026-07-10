@@ -16,3 +16,7 @@ backend/frontend_dist/
 
 # macOS
 .DS_Store
+
+# Editor / workspace
+.vscode/
+BeamCommander.code-workspace
