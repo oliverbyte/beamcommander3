@@ -1527,6 +1527,26 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         std::lock_guard<std::mutex> lk(G_mtx); G.blackout = !G.blackout;
         return;
     }
+    // Per-laser hardware-output on/off toggle (e.g. APC40 mkII Activator
+    // buttons, one per channel strip - note 52, channel = 0-based track
+    // index). "laser_toggle:<n>" toggles G_lasers[n-1].armed (1-based, in
+    // on-screen laser order) - this only gates real hardware output
+    // (laser_thread()'s connect/stream loop), it does NOT affect the
+    // browser preview, which always renders regardless of armed state.
+    if (action.rfind("laser_toggle:",0)==0) {
+        if (!isPress) return; // toggle once per press, ignore release
+        int n = 0; try { n = std::stoi(action.substr(13)); } catch (...) { return; }
+        {
+            std::lock_guard<std::mutex> lk(G_lasers_mtx);
+            int idx = n - 1;
+            if (idx < 0 || idx >= (int)G_lasers.size()) return;
+            G_lasers[idx].armed = !G_lasers[idx].armed;
+            std::cout << "[midi] laser " << n << " (" << G_lasers[idx].name << ") "
+                      << (G_lasers[idx].armed ? "armed" : "disarmed") << "\n" << std::flush;
+        }
+        save_lasers_to_disk();
+        return;
+    }
     // One-shot: snap rotation back to angle 0 and stop it spinning. Shared
     // with the /rotation/reset REST route. Fires on *every* MIDI message
     // for this note (both isPress and isRelease), not just isPress - this
@@ -1653,6 +1673,9 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
                 }
                 if (found) {
                     if (isNote) {
+                        std::cout << "[midi] note ch=" << (int)channel << " num=" << (int)d1
+                                  << " " << (isPress ? "press" : "release")
+                                  << " -> " << match.action << "\n" << std::flush;
                         midi_apply_note_action(match.action, isPress, isRelease);
                     } else {
                         midi_apply_cc_action(match.action, midi_cc_value(match, d2, channel));
@@ -1662,6 +1685,14 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
                               << " ch=" << (int)channel << " num=" << (int)d1
                               << " val=" << (int)d2 << "\n" << std::flush;
                 }
+            } else {
+                // Any other MIDI message type (e.g. program change, sysex,
+                // pitch bend) - log it raw so unexpected controller modes
+                // (e.g. APC40 not in the expected mode) are visible instead
+                // of silently doing nothing.
+                std::cout << "[midi] other status=0x" << std::hex << (int)status
+                          << std::dec << " d1=" << (int)d1 << " d2=" << (int)d2
+                          << "\n" << std::flush;
             }
         }
         packet = MIDIPacketNext(packet);
