@@ -19,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -1517,37 +1518,50 @@ static void do_rotation_reset() {
 }
 
 // Applies one note-triggered (button) action. `isPress`/`isRelease`
+// Shared by the "color:<name>" note action and sync_group_leds()'s color
+// LED sync (see its comment) - single source of truth for the named color
+// palette so both always agree on what RGB each name means.
+static bool named_color_rgb(const std::string& name, float& r, float& g, float& b) {
+    if      (name=="red")     { r=1.0f; g=0.0f;  b=0.0f; }
+    else if (name=="orange")  { r=1.0f; g=0.4f;  b=0.0f; }
+    else if (name=="yellow")  { r=1.0f; g=1.0f;  b=0.0f; }
+    else if (name=="green")   { r=0.0f; g=1.0f;  b=0.0f; }
+    else if (name=="cyan")    { r=0.0f; g=1.0f;  b=1.0f; }
+    else if (name=="blue")    { r=0.0f; g=0.2f;  b=1.0f; }
+    else if (name=="magenta") { r=1.0f; g=0.0f;  b=1.0f; }
+    else if (name=="white")   { r=1.0f; g=1.0f;  b=1.0f; }
+    else return false;
+    return true;
+}
+
 // describe note-on/note-off.
 static void midi_apply_note_action(const std::string& action, bool isPress, bool isRelease) {
     if (!isPress && !isRelease) return;
 
     if (action.rfind("shape:",0)==0) {
-        if (!isPress) return;
+        // Fires on every message for this note (both isPress and
+        // isRelease), not just isPress - like laser_mirror_toggle/
+        // rotation_reset, these grid pads alternate note-on/note-off
+        // across successive physical taps rather than an on+off pair per
+        // tap. Setting the same shape twice is idempotent, so reacting to
+        // both is safe.
         static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","staticwave"};
         std::string s = action.substr(6);
         if (SHAPES.count(s)) { std::lock_guard<std::mutex> lk(G_mtx); G.shape=s; }
         return;
     }
     if (action.rfind("move:",0)==0) {
-        if (!isPress) return;
+        // See shape:'s comment above - same alternating-LED pad behavior.
         static const std::set<std::string> MOVES{"none","circle","pan","tilt","eight","random"};
         std::string m = action.substr(5);
         if (MOVES.count(m)) { std::lock_guard<std::mutex> lk(G_mtx); G.move_mode=m; }
         return;
     }
     if (action.rfind("color:",0)==0) {
-        if (!isPress) return;
+        // See shape:'s comment above - same alternating-LED pad behavior.
         std::string c = action.substr(6);
         float cr,cg,cb;
-        if      (c=="red")     { cr=1.0f; cg=0.0f;  cb=0.0f; }
-        else if (c=="orange")  { cr=1.0f; cg=0.4f;  cb=0.0f; }
-        else if (c=="yellow")  { cr=1.0f; cg=1.0f;  cb=0.0f; }
-        else if (c=="green")   { cr=0.0f; cg=1.0f;  cb=0.0f; }
-        else if (c=="cyan")    { cr=0.0f; cg=1.0f;  cb=1.0f; }
-        else if (c=="blue")    { cr=0.0f; cg=0.2f;  cb=1.0f; }
-        else if (c=="magenta") { cr=1.0f; cg=0.0f;  cb=1.0f; }
-        else if (c=="white")   { cr=1.0f; cg=1.0f;  cb=1.0f; }
-        else return;
+        if (!named_color_rgb(c, cr, cg, cb)) return;
         std::lock_guard<std::mutex> lk(G_mtx);
         G.r=cr; G.g=cg; G.b=cb;
         // A plain color-select button is mutually exclusive with the
@@ -1726,6 +1740,16 @@ static void send_note(unsigned char channel, unsigned char note, unsigned char v
     if (packet) MIDISend(g_midi_out_port, g_midi_out_dest, pktlist);
 }
 
+// Forward-declared (defined further down, just before midi_thread()) so
+// midi_read_proc() below can call it immediately after a shape:/move:/
+// color:/rainbow_preset_slowfull message instead of waiting for its own
+// periodic timer tick (up to 200ms later) - these grid pads apparently
+// self-illuminate briefly the instant they're physically pressed
+// (independent of anything we send), so asserting the real color as fast
+// as possible after that minimizes the visible "wrong color" flash/blink
+// window instead of leaving it lit with stale state until the next tick.
+static void sync_shape_color_move_leds();
+
 static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
     const MIDIPacket* packet = &pktlist->packet[0];
     for (UInt32 i = 0; i < pktlist->numPackets; ++i) {
@@ -1759,6 +1783,13 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
                                   << " " << (isPress ? "press" : "release")
                                   << " -> " << match.action << "\n" << std::flush;
                         midi_apply_note_action(match.action, isPress, isRelease);
+                        // Assert the correct LED color immediately for
+                        // these groups too (see sync_shape_color_move_leds()'s
+                        // forward-declaration comment above) instead of
+                        // waiting for the next periodic timer tick.
+                        if (match.action.rfind("shape:",0)==0 || match.action.rfind("move:",0)==0 ||
+                            match.action.rfind("color:",0)==0 || match.action=="rainbow_preset_slowfull")
+                            sync_shape_color_move_leds();
                         // These buttons default to a "Solo"-style blue LED
                         // on the controller itself (lit only while held) -
                         // not meaningful for this app's own use of them, so
@@ -1813,9 +1844,12 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
 // so midi_read_proc()'s LED echo (which only fires when it sees a
 // laser_mirror_toggle message come in) can't react to them. Instead this
 // polls G_lasers periodically (see the dedicated CFRunLoopTimer in
-// midi_thread() below) and pushes a Note On/Off for any laser whose
-// mirror_x has changed since the last check, so the LED always reflects
-// the true current state regardless of what changed it.
+// midi_thread() below) and sends a Note On/Off for any laser whose
+// mirror_x has changed since the last check. Only sends on a detected
+// change (not unconditionally every tick) - repeatedly sending the same
+// Note On/Off re-triggers the pad's own attack/flash animation on this
+// controller even when the color doesn't change, which looked like
+// constant blinking.
 static std::map<int, bool> g_last_mirror_led; // keyed by laser's 1-based position (matches laser_mirror_toggle:<n>)
 static void sync_mirror_leds() {
     std::vector<std::pair<int, bool>> current; // (1-based position, mirror_x)
@@ -1835,6 +1869,63 @@ static void sync_mirror_leds() {
                 send_note((unsigned char)b.channel, (unsigned char)b.number, mirrored ? 127 : 0);
         }
     }
+}
+
+// Generalized version of the same idea as sync_mirror_leds(), for a group
+// of mutually-exclusive "pick one" note buttons (shape:<x>, move:<x>,
+// color:<x>) - keeps each button's LED reflecting whether its choice is
+// the currently active one, regardless of what changed the active choice
+// (this same MIDI button, a different one in the group, the REST API,
+// etc.). `prefix` selects which bindings to consider (e.g. "shape:") and
+// `velocityFor` computes the exact velocity/color-palette-index (0-127) to
+// send for a given binding's full action string (e.g. "shape:circle") -
+// these buttons sit on the APC40 mkII's 5x8 RGB clip-launch grid (notes
+// 0-39), which supports a full 128-entry color palette via the Note On
+// velocity byte (reverse-engineered from doc/APC40 colour codes.webp by
+// sampling its swatch pixels), not just plain on/off. Only sends on a
+// detected per-pad change, same reasoning as sync_mirror_leds() above -
+// resending an unchanged velocity every tick made the pad visibly blink.
+static std::map<std::pair<int,int>, int> g_last_group_led; // keyed by (channel, note) -> last sent velocity
+static void sync_group_leds(const std::string& prefix, const std::function<int(const std::string&)>& velocityFor) {
+    std::vector<MidiBinding> bindings;
+    { std::lock_guard<std::mutex> lk(G_midi_mtx); bindings = G_midi_bindings; }
+    for (auto& b : bindings) {
+        if (b.type != "note" || b.channel < 0 || b.action.rfind(prefix, 0) != 0) continue;
+        int velocity = velocityFor(b.action);
+        auto key = std::make_pair(b.channel, b.number);
+        auto it = g_last_group_led.find(key);
+        if (it != g_last_group_led.end() && it->second == velocity) continue;
+        g_last_group_led[key] = velocity;
+        send_note((unsigned char)b.channel, (unsigned char)b.number, (unsigned char)velocity);
+    }
+}
+
+// Concrete shape/move/color instances of sync_group_leds() - called
+// together from the same periodic LED-sync timer as sync_mirror_leds()
+// (see midi_thread() below). Simple on/off (127/0), same as the mirror/
+// laser-toggle buttons - a fancier per-hue/dim-when-inactive palette
+// scheme was tried and reverted (see git history) since it caused visible
+// blinking on this hardware.
+static void sync_shape_color_move_leds() {
+    LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap = G; }
+
+    sync_group_leds("shape:", [&](const std::string& action) {
+        return (action.substr(6) == snap.shape) ? 127 : 0;
+    });
+    sync_group_leds("move:", [&](const std::string& action) {
+        return (action.substr(5) == snap.move_mode) ? 127 : 0;
+    });
+    bool rainbowActive = snap.rainbow_amount > 0.0f;
+    sync_group_leds("rainbow_preset_slowfull", [&](const std::string&) {
+        return rainbowActive ? 127 : 0;
+    });
+    sync_group_leds("color:", [&](const std::string& action) {
+        float cr, cg, cb;
+        if (!named_color_rgb(action.substr(6), cr, cg, cb)) return 0;
+        const float eps = 0.02f;
+        bool active = std::fabs(snap.r - cr) < eps && std::fabs(snap.g - cg) < eps && std::fabs(snap.b - cb) < eps;
+        return active ? 127 : 0;
+    });
 }
 
 static void midi_thread() {
@@ -1891,12 +1982,13 @@ static void midi_thread() {
         ^(CFRunLoopTimerRef) { scan(); });
     CFRunLoopAddTimer(CFRunLoopGetCurrent(), timer, kCFRunLoopDefaultMode);
 
-    // Separate, much faster timer for sync_mirror_leds() (see its comment)
-    // so an API/UI-driven mirror change reaches the physical LED promptly,
+    // Separate, much faster timer for sync_mirror_leds()/
+    // sync_shape_color_move_leds() (see their comments) so an API/UI/other-
+    // button-driven state change reaches the physical LEDs promptly,
     // without waiting for (or being tied to) the 3s device-rescan cadence.
     CFRunLoopTimerRef ledTimer = CFRunLoopTimerCreateWithHandler(
         kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 0.2, 0, 0,
-        ^(CFRunLoopTimerRef) { sync_mirror_leds(); });
+        ^(CFRunLoopTimerRef) { sync_mirror_leds(); sync_shape_color_move_leds(); });
     CFRunLoopAddTimer(CFRunLoopGetCurrent(), ledTimer, kCFRunLoopDefaultMode);
 
     CFRunLoopRun(); // pumps MIDI + the rescan timer forever

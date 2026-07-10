@@ -42,8 +42,8 @@
 
   { "type": "note", "channel": 0, "number": 32, "action": "shape:circle" },
   { "type": "note", "channel": 0, "number": 33, "action": "shape:line" },
-  { "type": "note", "channel": 0, "number": 34, "action": "shape:square" },
-  { "type": "note", "channel": 0, "number": 35, "action": "shape:triangle" },
+  { "type": "note", "channel": 0, "number": 34, "action": "shape:triangle" },
+  { "type": "note", "channel": 0, "number": 35, "action": "shape:square" },
   { "type": "note", "channel": 0, "number": 36, "action": "shape:wave" },
   { "type": "note", "channel": 0, "number": 37, "action": "shape:staticwave" },
 
@@ -55,12 +55,12 @@
   { "type": "note", "channel": 0, "number": 31, "action": "rainbow_preset_slowfull" },
   { "type": "note", "channel": 0, "number": 61, "action": "rotation_reset" },
 
-  { "type": "note", "channel": 0, "number": 21, "action": "move:none" },
-  { "type": "note", "channel": 0, "number": 16, "action": "move:circle" },
-  { "type": "note", "channel": 0, "number": 17, "action": "move:pan" },
-  { "type": "note", "channel": 0, "number": 18, "action": "move:tilt" },
-  { "type": "note", "channel": 0, "number": 19, "action": "move:eight" },
-  { "type": "note", "channel": 0, "number": 20, "action": "move:random" },
+  { "type": "note", "channel": 0, "number": 16, "action": "move:none" },
+  { "type": "note", "channel": 0, "number": 17, "action": "move:circle" },
+  { "type": "note", "channel": 0, "number": 18, "action": "move:pan" },
+  { "type": "note", "channel": 0, "number": 19, "action": "move:tilt" },
+  { "type": "note", "channel": 0, "number": 20, "action": "move:eight" },
+  { "type": "note", "channel": 0, "number": 21, "action": "move:random" },
 
   { "type": "note", "channel": 0, "number": 64,  "action": "flash" },
   { "type": "note", "channel": 0, "number": 102, "action": "blackout_hold" },
