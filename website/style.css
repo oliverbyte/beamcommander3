@@ -101,6 +101,19 @@ a:hover { color: var(--neon-green-dim); }
 }
 .btn-secondary:hover { background: rgba(0, 230, 77, 0.1); }
 
+.experimental-notice {
+  display: inline-block;
+  max-width: 640px;
+  margin: 0 auto 1.75rem;
+  padding: 0.6rem 1rem;
+  border: 1px solid var(--warning);
+  background: rgba(255, 204, 0, 0.08);
+  color: var(--text-dim);
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+.experimental-notice strong { color: var(--warning); }
+
 .hero-shot { margin: 3rem auto 0; max-width: 900px; }
 .hero-shot img {
   width: 100%;

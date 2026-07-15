@@ -11,6 +11,12 @@ You don't need to know how to code to use it — see
 curious how it's built, or want to modify it, the rest of this file and
 [DEVELOPER.md](DEVELOPER.md) cover the technical side.
 
+> **⚠️ Experimental project, hobby use only.** BeamCommander3 is under active,
+> early-stage development. It has not been hardened, audited, or tested for
+> unattended/professional/production use — treat it as a hobbyist tool for
+> personal projects, not as production show-control software, and always
+> supervise any real laser hardware it drives (see the safety section below).
+
 ## Screenshots
 
 <p align="center">
