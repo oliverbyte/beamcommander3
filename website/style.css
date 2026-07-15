@@ -225,6 +225,7 @@ code { color: var(--neon-green); }
 .footer a { color: var(--text-dim); }
 .footer a:hover { color: var(--neon-green); }
 .footer-links { display: flex; gap: 1.25rem; justify-content: center; margin-bottom: 1rem; flex-wrap: wrap; }
+.footer-legal { margin-top: 0.5rem; font-size: 0.8rem; }
 
 @media (max-width: 600px) {
   .hero h1 { font-size: 1.9rem; }
