@@ -67,7 +67,11 @@ async function main() {
     await button.click()
     await page.waitForTimeout(500) // panel mount + layout settle
     await page.screenshot({ path: `${OUT_DIR}/screenshot-${view}.png` })
-    await button.click() // close it before opening the next one
+    // Close via the panel's own "✕" button rather than re-clicking the
+    // dock button: the Cues panel opens maximized (fills the viewport),
+    // which sits above the dock (z-index) and would otherwise intercept
+    // the click meant for the now-hidden dock button underneath it.
+    await page.locator('button[title="Close"]').click()
     await page.waitForTimeout(200)
   }
 
