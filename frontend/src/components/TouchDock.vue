@@ -1,12 +1,13 @@
 <template>
   <div class="touch-dock">
     <button
-      v-for="item in ITEMS" :key="item.view"
+      v-for="item in PANEL_ITEMS" :key="item.view"
       class="dock-btn"
       :class="{ active: open[item.view] }"
       @click="toggle(item.view)"
+      :title="item.label"
     >
-      <span class="dock-icon">{{ item.icon }}</span>
+      <span class="dock-icon" v-html="ICONS[item.icon]"></span>
       <span class="dock-label">{{ item.label }}</span>
     </button>
 
@@ -19,8 +20,19 @@
       @click="$emit('update:previewEnabled', !previewEnabled)"
       :title="previewEnabled ? 'Hide preview (this browser only)' : 'Show preview (this browser only)'"
     >
-      <span class="dock-icon">{{ previewEnabled ? '👁️' : '🙈' }}</span>
+      <span class="dock-icon" v-html="previewEnabled ? ICONS.eye : ICONS.eyeOff"></span>
       <span class="dock-label">Preview</span>
+    </button>
+
+    <!-- Settings is deliberately the rightmost/last dock button. -->
+    <button
+      class="dock-btn"
+      :class="{ active: open.settings }"
+      @click="toggle('settings')"
+      title="Settings"
+    >
+      <span class="dock-icon" v-html="ICONS.settings"></span>
+      <span class="dock-label">Settings</span>
     </button>
   </div>
 
@@ -91,12 +103,26 @@ defineProps({
 })
 defineEmits(['update:persistence', 'update:previewEnabled'])
 
-const ITEMS = [
-  { view: 'settings', icon: '⚙️', label: 'Settings' },
-  { view: 'cues',     icon: '🎬', label: 'Cues' },
-  { view: 'zoning',   icon: '🗺️', label: 'Zoning' },
-  { view: 'lasers',   icon: '📡', label: 'Lasers' },
+// Settings is intentionally not in this list - it's rendered as its own
+// explicit, always-last button in the template so it's guaranteed to stay
+// the rightmost dock icon regardless of panel order here.
+const PANEL_ITEMS = [
+  { view: 'cues',   icon: 'cues',   label: 'Cues' },
+  { view: 'zoning', icon: 'zoning', label: 'Zoning' },
+  { view: 'lasers', icon: 'lasers', label: 'Lasers' },
 ]
+
+// Minimal, single-color (monochrome, via CSS currentColor) stroke icons -
+// deliberately plain line art instead of colourful/oversized emoji, in
+// keeping with the rest of the dock's understated dark UI.
+const ICONS = {
+  cues: `<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v18M16 3v18M3 8h5M16 8h5M3 16h5M16 16h5"/></svg>`,
+  zoning: `<svg viewBox="0 0 24 24" fill="none"><polygon points="2 6 9 3 15 6 22 3 22 18 15 21 9 18 2 21"/><path d="M9 3v15M15 6v15"/></svg>`,
+  lasers: `<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 010 8.4M7.8 7.8a6 6 0 000 8.4M19 4.9a10 10 0 010 14.2M5 4.9a10 10 0 000 14.2"/></svg>`,
+  eye: `<svg viewBox="0 0 24 24" fill="none"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
+  eyeOff: `<svg viewBox="0 0 24 24" fill="none"><path d="M17.9 17.9A10.1 10.1 0 0112 20c-7 0-11-8-11-8a18.4 18.4 0 015-5.9M9.9 4.2A9 9 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.2 3.2"/><path d="M14.1 14.1a3 3 0 10-4.2-4.2"/><path d="M1 1l22 22"/></svg>`,
+  settings: `<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>`,
+}
 
 const open = reactive({ settings: false, cues: false, zoning: false, lasers: false })
 
@@ -153,6 +179,11 @@ function popout(view) {
 }
 .dock-btn:hover { background:rgba(255,255,255,0.14); }
 .dock-btn.active { background:rgba(72,224,122,0.18); border-color:#48e07a; color:#48e07a; }
-.dock-icon { font-size:24px; line-height:1; }
+.dock-icon { display:flex; align-items:center; justify-content:center; }
+.dock-icon :deep(svg) {
+  width:22px; height:22px;
+  stroke:currentColor; fill:none;
+  stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round;
+}
 .dock-label { font-size:12px; letter-spacing:0.5px; }
 </style>
