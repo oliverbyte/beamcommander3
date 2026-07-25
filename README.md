@@ -164,13 +164,16 @@ for how the packaged macOS/Windows builds are put together.
    brightness while held, then returns to whatever it was showing before.
    Blackout forces the real laser dark (the on-screen preview keeps
    playing) — handy for a quick "oh no" moment without losing your settings.
-5. **Cues**: the panel on the right holds 32 save slots. Turn on "Save
-   mode", click an empty numbered slot to store the current look, then
-   click any populated (green) slot any time to instantly recall it. Each
-   populated slot shows a small live preview icon of its shape, color and
-   motion (rotation, movement, rainbow, wave, dotted look) so you can see
-   what a cue looks like before recalling it. Right-click a slot to clear
-   it, or use "Move" to relocate a saved cue to a different slot.
+5. **Cues**: opens a 128-slot grid (16x8) that maximizes to fill your
+   screen — drag its edges/corners to resize and the buttons scale to
+   keep all 128 visible with no scrolling, or pop it out into its own
+   window. Turn on "Save mode", click an empty numbered slot to store the
+   current look, then click any populated (green) slot any time to
+   instantly recall it. Each populated slot shows a small live preview
+   icon of its shape, color and motion (rotation, movement, rainbow, wave,
+   dotted look) so you can see what a cue looks like before recalling it.
+   Right-click a slot to clear it, or use "Move" to relocate a saved cue
+   to a different slot.
 6. **Optional: MIDI controller or foot pedal** — if you plug in a USB MIDI
    controller (an Akai APC40 mkII works out of the box, matching the
    original BeamCommander's exact layout), its knobs and buttons drive the
@@ -277,7 +280,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /api/lasers` | Add a new laser: `{"name":"...","ip":"..."}` (`armed` defaults to `false`, i.e. configured but idle) |
 | `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y"}` - setting `armed` to `true` connects + streams this laser's own zone-calibrated output, `false` disconnects/idles it. `zone_x`/`zone_y` (-1..1, offset) and `zone_scale_x`/`zone_scale_y` (0.1..2, independent per-axis scale) are this laser's own pan/zoom calibration - set by dragging in the Zoning panel |
 | `DELETE /api/lasers/<id>` | Remove a laser |
-| `GET /api/cues` | List all populated cue slots (1-32) |
+| `GET /api/cues` | List all populated cue slots (1-128) |
 | `POST /api/cue/<n>/save` | Snapshot current show params into slot `n` |
 | `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the global `flash_release_ms` setting - see below) |
 | `POST /api/cue/<n>/clear` | Delete slot `n` |

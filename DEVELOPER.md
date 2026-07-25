@@ -13,6 +13,8 @@ frontend/
   src/components/ZoningPanel.vue    Drag-to-move/scale per-laser pan/zoom calibration
   src/components/LasersPanel.vue    Add/remove lasers (DACs), arm/disarm each one
   src/components/LaserScene.vue     Three.js 3D preview, renders WS point stream
+  src/components/TouchDock.vue      Bottom dock: opens panels, per-tab preview toggle
+  src/components/FloatingPanel.vue  Shared draggable/resizable/maximizable panel wrapper
   src/composables/useLaserSocket.js REST + WebSocket client, shared reactive state
 start.sh             Builds backend if needed, runs both processes, cleans up on Ctrl-C
 ```
