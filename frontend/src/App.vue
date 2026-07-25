@@ -10,6 +10,12 @@ import { connectSocket, fetchState, startStatusPolling } from './composables/use
 
 const persistenceMs = ref(5)
 
+// Whether the 3D laser preview renders/updates - purely a local UI
+// preference for *this* browser tab (toggled via TouchDock's eye icon).
+// Never sent to the backend, so it can never affect the real hardware
+// output or any other connected browser client's preview.
+const previewEnabled = ref(true)
+
 // A dedicated, separate browser window (opened via window.open from a
 // FloatingPanel's popout icon - see TouchDock.vue) loads this same app with
 // ?popup=<view> in the URL, and gets *only* that one panel full-screen so
@@ -40,9 +46,13 @@ onMounted(() => {
     <LasersPanel v-else-if="popupView === 'lasers'" popout />
   </template>
   <template v-else>
-    <LaserScene :persistence-ms="persistenceMs" />
+    <LaserScene :persistence-ms="persistenceMs" :enabled="previewEnabled" />
     <div class="logo">BeamCommander<span class="ver">3</span></div>
-    <TouchDock @update:persistence="persistenceMs = $event" />
+    <TouchDock
+      :preview-enabled="previewEnabled"
+      @update:persistence="persistenceMs = $event"
+      @update:preview-enabled="previewEnabled = $event"
+    />
   </template>
 </template>
 

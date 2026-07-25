@@ -1,5 +1,5 @@
 <template>
-  <canvas ref="canvasEl" class="laser-canvas"></canvas>
+  <canvas ref="canvasEl" class="laser-canvas" v-show="enabled"></canvas>
 </template>
 
 <script setup>
@@ -10,6 +10,10 @@ import { laserState, onPoints } from '../composables/useLaserSocket.js'
 
 const props = defineProps({
   persistenceMs: { type: Number, default: 5 },
+  // Purely a local, per-browser-tab preview toggle (see App.vue) - never
+  // sent to the backend, so it never affects the real hardware output or
+  // any other connected browser client's preview.
+  enabled: { type: Boolean, default: true },
 })
 
 const canvasEl = ref(null)
@@ -238,7 +242,12 @@ const SPOKE_FAR_EXTEND = 6
 const spokeBaseColors = new Float32Array(MAX_SCAN_POINTS * 4 * 3)
 let lastPoint = [0, 0]
 
+// Paused entirely (no rAF scheduled, no per-frame work) while `enabled` is
+// false, rather than just hiding the canvas via CSS - this is meant to
+// actually stop consuming GPU/CPU in the background, not just visually
+// hide it.
 function animate() {
+  if (!props.enabled) return
   animationId = requestAnimationFrame(animate)
   const now = performance.now() / 1000
 
@@ -305,6 +314,19 @@ onMounted(() => {
 // Clear stale points whenever laser armed state changes
 watch(() => laserState.armed, () => {
   clearPointBuffer()
+})
+
+// Resume the paused render loop when the preview is switched back on -
+// drop any stale backlog first so it doesn't burst-replay everything that
+// arrived while paused.
+watch(() => props.enabled, (enabled) => {
+  if (enabled) {
+    clearPointBuffer()
+    cancelAnimationFrame(animationId)
+    animate()
+  } else {
+    cancelAnimationFrame(animationId)
+  }
 })
 
 onBeforeUnmount(() => {

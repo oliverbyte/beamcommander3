@@ -9,6 +9,19 @@
       <span class="dock-icon">{{ item.icon }}</span>
       <span class="dock-label">{{ item.label }}</span>
     </button>
+
+    <!-- Local-only: pauses/hides the 3D preview in this browser tab alone.
+         Never touches the backend, so hardware output and every other
+         connected client's preview are completely unaffected. -->
+    <button
+      class="dock-btn"
+      :class="{ active: previewEnabled }"
+      @click="$emit('update:previewEnabled', !previewEnabled)"
+      :title="previewEnabled ? 'Hide preview (this browser only)' : 'Show preview (this browser only)'"
+    >
+      <span class="dock-icon">{{ previewEnabled ? '👁️' : '🙈' }}</span>
+      <span class="dock-label">Preview</span>
+    </button>
   </div>
 
   <FloatingPanel
@@ -73,7 +86,10 @@ import CuePanel from './CuePanel.vue'
 import ZoningPanel from './ZoningPanel.vue'
 import LasersPanel from './LasersPanel.vue'
 
-defineEmits(['update:persistence'])
+defineProps({
+  previewEnabled: { type: Boolean, default: true },
+})
+defineEmits(['update:persistence', 'update:previewEnabled'])
 
 const ITEMS = [
   { view: 'settings', icon: '⚙️', label: 'Settings' },
