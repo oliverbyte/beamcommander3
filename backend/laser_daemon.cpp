@@ -1096,7 +1096,10 @@ static void load_lasers_from_disk() {
 // drops/changes the current DAC links or their venue alignment. Persisted to
 // a small JSON file on disk so cues survive a daemon restart, mirroring the
 // cue system from the original BeamCommander (Python edition).
-static constexpr int MAX_CUES = 32;
+// Must match the frontend's CUE_COUNT (CuePanel.vue, 16x8 grid) - anything
+// higher there would be silently rejected by do_cue_save/recall/clear/move
+// below (they all range-check against MAX_CUES).
+static constexpr int MAX_CUES = 128;
 static std::map<int, LaserState> G_cues;
 static std::mutex                G_cues_mtx;
 static const std::string         CUES_FILE = resolve_data_file("cues.json");
