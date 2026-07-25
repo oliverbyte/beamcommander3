@@ -131,7 +131,12 @@ jobs:
           if git diff --cached --quiet; then
             echo "No screenshot changes to commit."
           else
-            git commit -m "docs: update screenshots [skip ci]"
+            # No "[skip ci]" here: this push needs to reach pages.yml (it
+            # triggers on docs/screenshots/** changes) so the homepage
+            # picks up the new screenshots. release.yml itself is already
+            # protected from re-triggering on this push via the
+            # paths-ignore: ["docs/screenshots/**"] above.
+            git commit -m "docs: update screenshots"
             git fetch origin main
             git rebase origin/main
             git push origin HEAD:main
