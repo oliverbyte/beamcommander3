@@ -69,7 +69,7 @@ import { ref, onMounted } from 'vue'
 import { cues, saveCue, recallCue, clearCue, moveCue, fetchCues } from '../composables/useLaserSocket.js'
 
 const { popout } = defineProps({ popout: { type: Boolean, default: false } })
-const CUE_COUNT = 32
+const CUE_COUNT = 128
 const saveArmed = ref(false)
 const moveArmed = ref(false)
 const moveSource = ref(null)
@@ -234,7 +234,7 @@ async function onClear(n) {
 
 <style scoped>
 #cue-panel {
-  position:fixed; top:12px; right:12px; width:220px;
+  position:fixed; top:12px; right:12px; width:1360px;
   background:rgba(8,10,18,0.88); border:1px solid rgba(120,130,200,0.25);
   border-radius:10px; padding:14px 16px; backdrop-filter:blur(6px);
   user-select:none; z-index:10; color:#cfd3e6;
@@ -249,10 +249,20 @@ async function onClear(n) {
   border:none; border-radius:0; box-sizing:border-box;
   padding:20px 22px 40px;
 }
+#cue-panel.popout .panel-body { display:flex; flex-direction:column; height:100%; }
+#cue-panel.popout .mode-row { flex:0 0 auto; }
 #cue-panel.popout .mode-btn { padding:14px 6px; font-size:13px; }
-#cue-panel.popout .cue-grid { gap:10px; }
-#cue-panel.popout .cue-num.empty { font-size:16px; }
-#cue-panel.popout .hint { font-size:12px; }
+/* Grid fills all remaining height after the mode row/hint - 8 fr-sized
+   rows (not a fixed/square button size) so all 128 slots always fit
+   exactly, with no internal scrolling, at whatever size the maximized
+   window ends up being. */
+#cue-panel.popout .cue-grid {
+  flex:1 1 auto; min-height:0; gap:10px;
+  grid-template-rows:repeat(8,1fr);
+}
+#cue-panel.popout .cue-btn { aspect-ratio:auto; }
+#cue-panel.popout .cue-num.empty { font-size:22px; }
+#cue-panel.popout .hint { flex:0 0 auto; font-size:12px; }
 .mode-row { display:flex; gap:6px; margin-bottom:10px; }
 .mode-btn {
   flex:1; min-width:0; padding:6px 4px; font-size:11px; letter-spacing:0.3px;
@@ -263,7 +273,8 @@ async function onClear(n) {
 .mode-btn:hover { background:rgba(255,255,255,0.14); }
 .save-mode-btn.active { background:rgba(255,60,60,0.25); border-color:#ff4040; color:#ff8080; }
 .move-mode-btn.active { background:rgba(143,227,255,0.2); border-color:#8fe3ff; color:#8fe3ff; }
-.cue-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; }
+/* 16 across x 8 down = 128 cue slots, each double the original size. */
+.cue-grid { display:grid; grid-template-columns:repeat(16,1fr); gap:8px; }
 .cue-btn {
   position:relative; aspect-ratio:1; background:rgba(255,255,255,0.05);
   border:1px solid rgba(255,255,255,0.15);
@@ -283,14 +294,14 @@ async function onClear(n) {
 }
 .cue-spin-group { transform-box:fill-box; transform-origin:center; }
 .cue-num {
-  position:absolute; bottom:1px; right:3px; font-size:9px; line-height:1;
+  position:absolute; bottom:2px; right:5px; font-size:13px; line-height:1;
   color:rgba(207,211,230,0.75); text-shadow:0 0 2px rgba(0,0,0,0.9);
   pointer-events:none;
 }
 .cue-num.empty {
   inset:0; bottom:auto; right:auto;
   display:flex; align-items:center; justify-content:center;
-  width:100%; height:100%; font-size:13px; color:inherit; text-shadow:none;
+  width:100%; height:100%; font-size:18px; color:inherit; text-shadow:none;
 }
 .hint { font-size:10px; color:#6a7090; margin:8px 0 0; line-height:1.4; }
 </style>
