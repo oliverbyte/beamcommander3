@@ -19,15 +19,22 @@ if [[ -s "$NVM_DIR/nvm.sh" ]]; then
     nvm use default >/dev/null
 fi
 
-# Kill child processes on exit/Ctrl-C — run only once
+# Kill child processes on exit/Ctrl-C — run only once.
+# Declared (empty) before the trap is armed so cleanup() never hits
+# "unbound variable" under `set -u` if we exit early (e.g. the backend
+# build fails) before either PID is actually assigned below.
+DAEMON_PID=""
+FRONTEND_PID=""
 _cleaned=0
 cleanup() {
     [[ $_cleaned -eq 1 ]] && return; _cleaned=1
     echo ""
     echo "[start.sh] Stopping..."
     trap '' INT TERM  # ignore further signals during cleanup
-    kill "$DAEMON_PID" "$FRONTEND_PID" 2>/dev/null || true
-    wait "$DAEMON_PID" "$FRONTEND_PID" 2>/dev/null || true
+    [[ -n "$DAEMON_PID" ]] && kill "$DAEMON_PID" 2>/dev/null || true
+    [[ -n "$FRONTEND_PID" ]] && kill "$FRONTEND_PID" 2>/dev/null || true
+    [[ -n "$DAEMON_PID" ]] && wait "$DAEMON_PID" 2>/dev/null || true
+    [[ -n "$FRONTEND_PID" ]] && wait "$FRONTEND_PID" 2>/dev/null || true
     echo "[start.sh] Done."
 }
 trap cleanup EXIT INT TERM
