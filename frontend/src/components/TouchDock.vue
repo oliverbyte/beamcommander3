@@ -40,7 +40,7 @@
     v-if="open.settings"
     title="Settings"
     :width="300"
-    :initial-x="pos(40)"
+    :initial-x="pos(40, false, 300)"
     :initial-y="pos(40, true)"
     @close="open.settings = false"
     @popout="popout('settings')"
@@ -51,9 +51,7 @@
   <FloatingPanel
     v-if="open.cues"
     title="Cues"
-    :width="260"
-    :initial-x="pos(360)"
-    :initial-y="pos(40, true)"
+    maximized
     @close="open.cues = false"
     @popout="popout('cues')"
   >
@@ -64,7 +62,7 @@
     v-if="open.zoning"
     title="Zoning"
     :width="320"
-    :initial-x="pos(640)"
+    :initial-x="pos(1400, false, 320)"
     :initial-y="pos(40, true)"
     @close="open.zoning = false"
     @popout="popout('zoning')"
@@ -76,7 +74,7 @@
     v-if="open.lasers"
     title="Lasers"
     :width="320"
-    :initial-x="pos(920)"
+    :initial-x="pos(1740, false, 320)"
     :initial-y="pos(40, true)"
     @close="open.lasers = false"
     @popout="popout('lasers')"
@@ -127,13 +125,18 @@ const ICONS = {
 const open = reactive({ settings: false, cues: false, zoning: false, lasers: false })
 
 // Cascaded default position for a panel, clamped to whatever the actual
-// viewport is (a small/secondary screen would otherwise place a panel
-// well off-screen). `margin` keeps at least a bit of the panel visible
-// on-screen so it stays reachable/draggable.
-function pos(preferred, vertical = false) {
-  const size = vertical ? window.innerHeight : window.innerWidth
-  const margin = 60
-  return Math.max(0, Math.min(preferred, size - margin))
+// viewport is (a small/secondary screen, e.g. an iPad, would otherwise
+// place a panel well off-screen). `panelSize` is the panel's own
+// width/height (in the same axis as `vertical`) so the clamp keeps the
+// *entire* panel on-screen, not just its top-left corner - previously this
+// only accounted for a flat margin, so a panel positioned near the right
+// edge of a narrower viewport than the desktop-tuned defaults (e.g.
+// Zoning/Lasers's cascaded x offsets) could end up only partially visible.
+function pos(preferred, vertical = false, panelSize = 0) {
+  const viewport = vertical ? window.innerHeight : window.innerWidth
+  const edgeGap = 12
+  const maxStart = Math.max(0, viewport - panelSize - edgeGap)
+  return Math.max(0, Math.min(preferred, maxStart))
 }
 
 // Keep track of already-opened popout windows per view - re-clicking the
@@ -149,6 +152,11 @@ function toggle(view) {
   open[view] = !open[view]
 }
 
+// Requested (width, height) per popped-out view, before being clamped to
+// what's actually available below. Cues (null) requests the full
+// available area (16x8 grid of double-size buttons, see CuePanel.vue) -
+// the rest just want a reasonably large default window.
+const REQUESTED_POPUP_SIZE = { cues: null, settings: [460, 820], zoning: [460, 820], lasers: [460, 820] }
 function popout(view) {
   open[view] = false
   const existing = openWindows[view]
@@ -157,7 +165,24 @@ function popout(view) {
     return
   }
   const url = `${location.origin}${location.pathname}?popup=${view}`
-  const win = window.open(url, `beamcommander-${view}`, 'width=460,height=820,resizable=yes')
+
+  // Always size/position against the *current* screen's actual available
+  // area (screen.avail*, excludes OS taskbar/menu bar) and explicitly
+  // center the window in it, rather than a fixed desktop-sized guess with
+  // no left/top - a plain 'width=460,height=820' with no position left it
+  // up to the browser/OS to place the window, which can render it partly
+  // off-screen on a smaller display (e.g. an iPad) that the app wasn't
+  // tuned for. Clamping width/height to the available area too means it
+  // can never request a window bigger than the screen it'll open on.
+  const availW = screen.availWidth, availH = screen.availHeight
+  const availLeft = screen.availLeft || 0, availTop = screen.availTop || 0
+  const [reqW, reqH] = REQUESTED_POPUP_SIZE[view] || [availW, availH]
+  const w = Math.min(reqW, availW)
+  const h = Math.min(reqH, availH)
+  const left = availLeft + Math.max(0, (availW - w) / 2)
+  const top = availTop + Math.max(0, (availH - h) / 2)
+
+  const win = window.open(url, `beamcommander-${view}`, `width=${w},height=${h},left=${left},top=${top},resizable=yes`)
   if (win) openWindows[view] = win
 }
 </script>
