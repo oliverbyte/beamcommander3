@@ -74,10 +74,17 @@ for i in $(seq 1 10); do
     [[ $BE_OK -eq 1 && $FE_OK -eq 1 ]] && break
 done
 
+# Both servers already bind to all interfaces (vite: server.host=true,
+# backend: svr.listen("0.0.0.0", ...)), so show the LAN IP too - makes it
+# obvious other devices on the network can reach this, not just localhost.
+LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
+
 echo ""
 echo "  BeamCommander3 is running"
 echo "  → http://localhost:5173"
+[[ -n "$LAN_IP" ]] && echo "  → http://$LAN_IP:5173  (LAN)"
 echo "  → API: http://localhost:8000/api/state"
+[[ -n "$LAN_IP" ]] && echo "  → API: http://$LAN_IP:8000/api/state  (LAN)"
 echo ""
 echo "  Press Ctrl-C to stop."
 echo ""
