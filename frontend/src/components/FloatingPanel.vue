@@ -1,7 +1,7 @@
 <template>
   <div
     class="floating-panel"
-    :class="{ maximized }"
+    :class="{ maximized, 'fp-draggable': canDrag }"
     :style="{
       left: x + 'px', top: y + 'px',
       width: curWidth + 'px',
@@ -47,7 +47,7 @@
 // never be flagged as an unsolicited popup - only the explicit "⤢" icon in
 // the header actually opens a real, separate browser window (a direct
 // click handler, same as before, so it still isn't blocked).
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 
 const props = defineProps({
   title: { type: String, required: true },
@@ -75,10 +75,15 @@ const y = ref(props.maximized ? MAX_MARGIN : props.initialY)
 
 // Once the user drags a resize handle themselves, their chosen size wins -
 // stop silently snapping back to fill the window on every resize event.
-let userResized = false
+// Also re-enables dragging a maximized panel (see onDragStart/canDrag
+// below) - a maximized panel that still fills the whole viewport has
+// nowhere meaningful to be dragged to, but once the user has shrunk it
+// there's free space around it again, so it should become movable.
+const userResized = ref(false)
+const canDrag = computed(() => !props.maximized || userResized.value)
 
 function fitToWindow() {
-  if (!props.maximized || userResized) return
+  if (!props.maximized || userResized.value) return
   curWidth.value = window.innerWidth - MAX_MARGIN * 2
   curHeight.value = window.innerHeight - MAX_MARGIN * 2
   x.value = MAX_MARGIN
@@ -99,10 +104,12 @@ let startPX = 0, startPY = 0, origX = 0, origY = 0
 
 function onDragStart(e) {
   // Let clicks on the header's own icon buttons through untouched instead
-  // of having the drag handler swallow them. A maximized panel already
-  // fills the screen, so there's nowhere meaningful to drag it to - only
-  // its resize handles (below) move it.
-  if (e.target.closest('.fp-btn') || props.maximized) return
+  // of having the drag handler swallow them. A maximized panel that still
+  // fills the screen has nowhere meaningful to be dragged to - only its
+  // resize handles (below) move it - but once the user has shrunk it
+  // (canDrag becomes true, see its comment above) there's free space
+  // around it again, so dragging should work just like a normal panel.
+  if (e.target.closest('.fp-btn') || !canDrag.value) return
   dragging = true
   startPX = e.clientX
   startPY = e.clientY
@@ -114,7 +121,11 @@ function onDragStart(e) {
 function onDragMove(e) {
   if (!dragging) return
   const margin = 40
-  x.value = Math.min(Math.max(origX + (e.clientX - startPX), -props.width + margin), window.innerWidth - margin)
+  // Use the panel's actual current width, not the (often-unused, defaults
+  // to 300) `width` prop - a maximized-then-shrunk panel (e.g. Cues) can be
+  // far wider than that default, and clamping against the wrong width let
+  // it be dragged much further off-screen to the left than intended.
+  x.value = Math.min(Math.max(origX + (e.clientX - startPX), -curWidth.value + margin), window.innerWidth - margin)
   y.value = Math.min(Math.max(origY + (e.clientY - startPY), 0), window.innerHeight - margin)
 }
 function onDragEnd() {
@@ -131,7 +142,7 @@ let rStartPX = 0, rStartPY = 0, rStartW = 0, rStartH = 0, rStartX = 0, rStartY =
 function onResizeStart(e, dir) {
   e.stopPropagation()
   e.preventDefault()
-  userResized = true
+  userResized.value = true
   resizeDir = dir
   rStartPX = e.clientX
   rStartPY = e.clientY
@@ -185,6 +196,7 @@ function onResizeEnd() {
   border-bottom:1px solid rgba(255,255,255,0.1); flex-shrink:0;
 }
 .floating-panel.maximized .fp-header { cursor:default; }
+.floating-panel.maximized.fp-draggable .fp-header { cursor:move; }
 .fp-title { font-size:13px; letter-spacing:1.5px; text-transform:uppercase; color:#8fe3ff; }
 .fp-actions { display:flex; gap:6px; }
 .fp-btn {

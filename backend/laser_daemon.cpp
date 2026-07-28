@@ -1768,7 +1768,15 @@ static void send_note(unsigned char channel, unsigned char note, unsigned char v
 // (independent of anything we send), so asserting the real color as fast
 // as possible after that minimizes the visible "wrong color" flash/blink
 // window instead of leaving it lit with stale state until the next tick.
-static void sync_shape_color_move_leds();
+// forceChannel/forceNumber (both -1 by default) name one specific pad that
+// must always be resent even if its computed velocity hasn't changed since
+// the last send - needed because a physical tap on that exact pad appears
+// to reset/re-derive its own LED state locally on this hardware, so the
+// normal "only send on change" dedup (see sync_group_leds()) would
+// otherwise leave it dark right after the very tap that selected it,
+// while the same selection made via REST/UI (which always sees a 0->127
+// change the first time) stays lit correctly.
+static void sync_shape_color_move_leds(int forceChannel = -1, int forceNumber = -1);
 
 static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
     const MIDIPacket* packet = &pktlist->packet[0];
@@ -1806,10 +1814,15 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
                         // Assert the correct LED color immediately for
                         // these groups too (see sync_shape_color_move_leds()'s
                         // forward-declaration comment above) instead of
-                        // waiting for the next periodic timer tick.
+                        // waiting for the next periodic timer tick. Force
+                        // the exact pad that was just tapped (channel, d1)
+                        // to be resent even if its velocity didn't change,
+                        // since a physical tap on this hardware can locally
+                        // reset that pad's own LED regardless of anything
+                        // we'd already sent it before.
                         if (match.action.rfind("shape:",0)==0 || match.action.rfind("move:",0)==0 ||
                             match.action.rfind("color:",0)==0 || match.action=="rainbow_preset_slowfull")
-                            sync_shape_color_move_leds();
+                            sync_shape_color_move_leds(channel, d1);
                         // These buttons default to a "Solo"-style blue LED
                         // on the controller itself (lit only while held) -
                         // not meaningful for this app's own use of them, so
@@ -1905,16 +1918,21 @@ static void sync_mirror_leds() {
 // sampling its swatch pixels), not just plain on/off. Only sends on a
 // detected per-pad change, same reasoning as sync_mirror_leds() above -
 // resending an unchanged velocity every tick made the pad visibly blink.
+// forceChannel/forceNumber (both -1 = no force) name one exact (channel,
+// note) pad that must be resent unconditionally, bypassing the dedup - see
+// sync_shape_color_move_leds()'s forward-declaration comment for why.
 static std::map<std::pair<int,int>, int> g_last_group_led; // keyed by (channel, note) -> last sent velocity
-static void sync_group_leds(const std::string& prefix, const std::function<int(const std::string&)>& velocityFor) {
+static void sync_group_leds(const std::string& prefix, const std::function<int(const std::string&)>& velocityFor,
+                            int forceChannel = -1, int forceNumber = -1) {
     std::vector<MidiBinding> bindings;
     { std::lock_guard<std::mutex> lk(G_midi_mtx); bindings = G_midi_bindings; }
     for (auto& b : bindings) {
         if (b.type != "note" || b.channel < 0 || b.action.rfind(prefix, 0) != 0) continue;
         int velocity = velocityFor(b.action);
         auto key = std::make_pair(b.channel, b.number);
+        bool forced = (b.channel == forceChannel && b.number == forceNumber);
         auto it = g_last_group_led.find(key);
-        if (it != g_last_group_led.end() && it->second == velocity) continue;
+        if (!forced && it != g_last_group_led.end() && it->second == velocity) continue;
         g_last_group_led[key] = velocity;
         send_note((unsigned char)b.channel, (unsigned char)b.number, (unsigned char)velocity);
     }
@@ -1926,26 +1944,26 @@ static void sync_group_leds(const std::string& prefix, const std::function<int(c
 // laser-toggle buttons - a fancier per-hue/dim-when-inactive palette
 // scheme was tried and reverted (see git history) since it caused visible
 // blinking on this hardware.
-static void sync_shape_color_move_leds() {
+static void sync_shape_color_move_leds(int forceChannel, int forceNumber) {
     LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap = G; }
 
     sync_group_leds("shape:", [&](const std::string& action) {
         return (action.substr(6) == snap.shape) ? 127 : 0;
-    });
+    }, forceChannel, forceNumber);
     sync_group_leds("move:", [&](const std::string& action) {
         return (action.substr(5) == snap.move_mode) ? 127 : 0;
-    });
+    }, forceChannel, forceNumber);
     bool rainbowActive = snap.rainbow_amount > 0.0f;
     sync_group_leds("rainbow_preset_slowfull", [&](const std::string&) {
         return rainbowActive ? 127 : 0;
-    });
+    }, forceChannel, forceNumber);
     sync_group_leds("color:", [&](const std::string& action) {
         float cr, cg, cb;
         if (!named_color_rgb(action.substr(6), cr, cg, cb)) return 0;
         const float eps = 0.02f;
         bool active = std::fabs(snap.r - cr) < eps && std::fabs(snap.g - cg) < eps && std::fabs(snap.b - cb) < eps;
         return active ? 127 : 0;
-    });
+    }, forceChannel, forceNumber);
 }
 
 static void midi_thread() {
