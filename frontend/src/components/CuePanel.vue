@@ -155,7 +155,7 @@ function cueRotateStyle(n) {
 // backend's calc_movement(), driven by a CSS custom property (--amp) so
 // the amplitude still reflects the cue's saved move_size, and a duration
 // from move_speed (cycles/sec, like rotation_speed).
-const MOVE_ANIM = { pan: 'cue-move-pan', tilt: 'cue-move-tilt', circle: 'cue-move-circle', eight: 'cue-move-eight', random: 'cue-move-random' }
+const MOVE_ANIM = { pan: 'cue-move-pan', tilt: 'cue-move-tilt', tiltup: 'cue-move-tiltup', tiltdown: 'cue-move-tiltdown', circle: 'cue-move-circle', eight: 'cue-move-eight', random: 'cue-move-random' }
 function cueMoveStyle(n) {
   const c = cues[n]
   const anim = c && MOVE_ANIM[c.move_mode]
@@ -332,6 +332,22 @@ async function onClear(n) {
   25%      { transform:translateY(calc(var(--amp) * -1)); }
   50%      { transform:translateY(0); }
   75%      { transform:translateY(var(--amp)); }
+}
+@keyframes cue-move-tiltup {
+  /* Continuous upward sweep, matching calc_movement()'s "tiltup" mode: a
+     linear ramp from bottom (+amp, translateY is SVG-down) to top (-amp),
+     then an instant snap back to the bottom - it never reverses back down
+     like plain "tilt" does. */
+  0%    { transform:translateY(var(--amp)); }
+  99.9% { transform:translateY(calc(var(--amp) * -1)); }
+  100%  { transform:translateY(var(--amp)); }
+}
+@keyframes cue-move-tiltdown {
+  /* Mirror of cue-move-tiltup: linear ramp from top (-amp) to bottom
+     (+amp), then an instant snap back to the top. */
+  0%    { transform:translateY(calc(var(--amp) * -1)); }
+  99.9% { transform:translateY(var(--amp)); }
+  100%  { transform:translateY(calc(var(--amp) * -1)); }
 }
 @keyframes cue-move-circle {
   0%, 100% { transform:translate(var(--amp), 0); }

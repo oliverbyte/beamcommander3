@@ -59,8 +59,10 @@
   { "type": "note", "channel": 0, "number": 17, "action": "move:circle" },
   { "type": "note", "channel": 0, "number": 18, "action": "move:pan" },
   { "type": "note", "channel": 0, "number": 19, "action": "move:tilt" },
-  { "type": "note", "channel": 0, "number": 20, "action": "move:eight" },
-  { "type": "note", "channel": 0, "number": 21, "action": "move:random" },
+  { "type": "note", "channel": 0, "number": 20, "action": "move:tiltup" },
+  { "type": "note", "channel": 0, "number": 21, "action": "move:tiltdown" },
+  { "type": "note", "channel": 0, "number": 22, "action": "move:eight" },
+  { "type": "note", "channel": 0, "number": 23, "action": "move:random" },
 
   { "type": "note", "channel": 0, "number": 64,  "action": "flash" },
   { "type": "note", "channel": 0, "number": 102, "action": "blackout_hold" },

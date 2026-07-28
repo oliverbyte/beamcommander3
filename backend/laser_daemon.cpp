@@ -185,7 +185,7 @@ struct LaserState {
     bool  mirror_x        = false;
 
     // Movement
-    std::string move_mode = "none";   // none circle pan tilt eight random
+    std::string move_mode = "none";   // none circle pan tilt tiltup tiltdown eight random
     float move_speed      = 0.30f;    // cycles/sec
     float move_size       = 0.50f;    // 0..6
 
@@ -443,6 +443,23 @@ static Pt calc_movement(const LaserState& s) {
     if (s.move_mode=="circle")  return {amp*std::cos(phase), amp*std::sin(phase)};
     if (s.move_mode=="pan")     return {amp*std::sin(phase), 0.0f};
     if (s.move_mode=="tilt")    return {0.0f, amp*std::sin(phase)};
+    if (s.move_mode=="tiltup") {
+        // Unidirectional/continuous vertical sweep: rises linearly from the
+        // bottom (-amp) to the top (+amp) as phase runs 0..tau, then wraps
+        // instantly back to the bottom - i.e. it never comes back down, it
+        // "re-enters" from the bottom once it exits the top of the screen.
+        // G_move_phase is already kept in [0,tau) via fmod (see the phase
+        // update loop below), so a plain linear map of that range is enough.
+        const float tau = 2.0f * std::acos(-1.0f);
+        return {0.0f, amp*(2.0f*(phase/tau) - 1.0f)};
+    }
+    if (s.move_mode=="tiltdown") {
+        // Mirror of tiltup: falls linearly from the top (+amp) to the
+        // bottom (-amp) as phase runs 0..tau, then wraps instantly back to
+        // the top - re-enters from the top once it exits the bottom.
+        const float tau = 2.0f * std::acos(-1.0f);
+        return {0.0f, amp*(1.0f - 2.0f*(phase/tau))};
+    }
     if (s.move_mode=="eight")   return {amp*std::sin(phase), amp*std::sin(2*phase)};
     if (s.move_mode=="random")  return {amp*(std::sin(phase*1.3f)+std::sin(phase*2.7f))/2,
                                         amp*(std::sin(phase*1.7f)+std::sin(phase*3.1f))/2};
@@ -1555,7 +1572,7 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
     }
     if (action.rfind("move:",0)==0) {
         // See shape:'s comment above - same alternating-LED pad behavior.
-        static const std::set<std::string> MOVES{"none","circle","pan","tilt","eight","random"};
+        static const std::set<std::string> MOVES{"none","circle","pan","tilt","tiltup","tiltdown","eight","random"};
         std::string m = action.substr(5);
         if (MOVES.count(m)) { std::lock_guard<std::mutex> lk(G_mtx); G.move_mode=m; }
         return;
@@ -2144,7 +2161,7 @@ int main(int argc, char* argv[]) {
     });
 
     // ── POST /move/mode/<mode> ─────────────────────────────────────────────────
-    static const std::set<std::string> MOVES{"none","circle","pan","tilt","eight","random"};
+    static const std::set<std::string> MOVES{"none","circle","pan","tilt","tiltup","tiltdown","eight","random"};
     svr.Post(R"(/move/mode/([a-z]+))",[](const httplib::Request& req,httplib::Response& res){
         std::string m=req.matches[1];
         if(!MOVES.count(m)){res.status=400;res.set_content("{\"error\":\"unknown mode\"}","application/json");return;}
@@ -2373,7 +2390,7 @@ int main(int argc, char* argv[]) {
               << "  POST /laser/shape/<circle|line|triangle|square|wave|staticwave>\n"
               << "  POST /laser/brightness/<0-1>  /laser/color/<r>/<g>/<b>\n"
               << "  POST /laser/position/<x>/<y>  /laser/rotation/speed/<v>\n"
-              << "  POST /move/mode/<none|circle|pan|tilt|eight|random>\n"
+              << "  POST /move/mode/<none|circle|pan|tilt|tiltup|tiltdown|eight|random>\n"
               << "  POST /laser/rainbow/amount/<v>  /laser/rainbow/speed/<v>\n"
               << "  POST /blackout/<0|1>  /flash/<0|1>  /mirror/x/<0|1>  /motion/hold/<0|1>\n"
               << "  POST /brightness/gate/<0|1>  /rotation/reset\n"

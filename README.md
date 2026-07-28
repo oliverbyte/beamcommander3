@@ -266,7 +266,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /laser/color/<r>/<g>/<b>` | Beam color, each channel 0..1 |
 | `POST /laser/position/<x>/<y>` | Shape offset, each axis -1..1 |
 | `POST /laser/rotation/speed/<v>` | Rotation speed in rotations/sec |
-| `POST /move/mode/<mode>` | `none`, `circle`, `pan`, `tilt`, `eight`, `random` |
+| `POST /move/mode/<mode>` | `none`, `circle`, `pan`, `tilt`, `tiltup`, `tiltdown`, `eight`, `random` |
 | `POST /move/speed/<v>` / `/move/size/<v>` | Movement cycle speed / amplitude |
 | `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow color blend / hue cycle speed |
 | `POST /blackout/<0\|1>` | Force *hardware* output dark (never affects the browser preview) |
