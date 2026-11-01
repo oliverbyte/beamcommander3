@@ -1,84 +1,93 @@
-// Generates the README screenshots against a *live* backend (see
-// release.yml's "screenshots" step in the build-macos job — it starts the
-// real built backend/laser_daemon, pointed at the built frontend/dist, then
-// runs this script against it). Not run in local dev.
-//
-// Fixed 1440x900 viewport (the default/logical MacBook Air resolution) so
-// image dimensions stay identical release over release. Captures one shot
-// of the idle preview (with a look applied via /api/state, so it isn't just
-// a blank blackout) plus one per dock menu button
-// (Settings/Cues/Zoning/Lasers), each named to match the release asset
-// names referenced from README.md.
-//
-// Note: backend/cues.json is gitignored (it's local runtime data, not
-// shipped) - a fresh checkout/CI runner has no saved cues at all, so this
-// applies a look directly via /api/state instead of relying on any
-// pre-existing cue, then saves it into slot 1 itself so the Cues panel
-// screenshot also shows a populated slot instead of an empty grid.
+// Capture the README and website screenshots from a real saved test cue
+// and its three tested preview positions. The release workflow runs the
+// backend with an isolated HOME, local-only laser addresses, and blackout
+// on, so this script cannot alter a user's show data or reach laser hardware.
 import { chromium } from 'playwright'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 
 const BASE_URL = process.env.BASE_URL || 'http://localhost:8000'
 const OUT_DIR = process.env.OUT_DIR || './screenshots'
 const VIEWPORT = { width: 1440, height: 900 }
+const PROFILE = JSON.parse(await readFile(new URL('./screenshot-profile.json', import.meta.url), 'utf8'))
+const SCREENSHOTS = [
+  { view: 'Shapes', file: 'settings' },
+  { view: 'Cues', file: 'cues' },
+  { view: 'Zoning', file: 'zoning' },
+  { view: 'Lasers', file: 'lasers' },
+]
 
-// A colorful, clearly-animated look for the screenshots - not just the
-// default plain green circle.
-const DEMO_STATE = {
-  blackout: false,
-  shape: 'circle',
-  r: 0.1, g: 0.9, b: 0.4,
-  rainbow_amount: 0.6,
-  rainbow_speed: 0.4,
-  move_mode: 'circle',
-  move_speed: 0.3,
-  move_size: 0.6,
-  rotation_speed: 0.05,
+async function prepareIsolatedBackend(page) {
+  if (process.env.BC3_SCREENSHOT_ISOLATED !== '1') {
+    throw new Error('Refusing to change backend state without BC3_SCREENSHOT_ISOLATED=1.')
+  }
+  if (!['localhost', '127.0.0.1', '::1'].includes(new URL(BASE_URL).hostname)) {
+    throw new Error('Screenshot backend must run on localhost.')
+  }
+
+  await page.evaluate(async (profile) => {
+    const request = async (path, body) => {
+      const response = await fetch(path, {
+        method: body === undefined ? 'GET' : 'POST',
+        headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
+      if (!response.ok) throw new Error(`${path} failed with HTTP ${response.status}`)
+      return response.json()
+    }
+
+    const existingLasers = await request('/api/lasers')
+    if (!Array.isArray(existingLasers) || existingLasers.length !== 0) {
+      throw new Error('Screenshot backend must start with an empty laser list.')
+    }
+
+    await request('/api/state', { ...profile.cue, blackout: true })
+    for (const laser of profile.lasers) {
+      const created = await request('/api/lasers', { name: laser.name, ip: '127.0.0.1' })
+      await request(`/api/lasers/${created.id}`, {
+        armed: true,
+        preview_x: laser.preview_x,
+        preview_y: laser.preview_y,
+      })
+    }
+    await request(`/api/cue/${profile.cueSlot}/save`, {})
+  }, PROFILE)
 }
 
-// Matches TouchDock.vue's ITEMS — dock button label -> output file suffix.
-const DOCK_VIEWS = [
-  { view: 'settings', label: 'Settings' },
-  { view: 'cues', label: 'Cues' },
-  { view: 'zoning', label: 'Zoning' },
-  { view: 'lasers', label: 'Lasers' },
-]
+async function selectView(page, label) {
+  await page.locator('.page-nav-button').filter({ hasText: label }).click()
+  await page.waitForTimeout(700)
+}
 
 async function main() {
   await mkdir(OUT_DIR, { recursive: true })
 
   const browser = await chromium.launch()
-  const page = await browser.newPage({ viewport: VIEWPORT })
+  try {
+    const page = await browser.newPage({ viewport: VIEWPORT })
+    await page.goto(BASE_URL, { waitUntil: 'load' })
+    await page.waitForSelector('.page-nav-button')
+    await page.waitForSelector('canvas.laser-canvas')
+    await prepareIsolatedBackend(page)
 
-  await page.goto(BASE_URL, { waitUntil: 'load' })
-  await page.waitForSelector('canvas.laser-canvas')
+    await selectView(page, 'Preview')
+    await page.waitForTimeout(4000)
+    await page.screenshot({ path: `${OUT_DIR}/screenshot-background.png` })
 
-  await page.evaluate((state) => fetch('/api/state', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(state),
-  }), DEMO_STATE)
-  await page.evaluate(() => fetch('/api/cue/1/save', { method: 'POST' }))
-  await page.waitForTimeout(4000) // let the WS-driven preview + beam persistence trail fill in
-  await page.screenshot({ path: `${OUT_DIR}/screenshot-background.png` })
-
-  for (const { view, label } of DOCK_VIEWS) {
-    const button = page.locator('.dock-btn', { hasText: label })
-    await button.click()
-    await page.waitForTimeout(500) // panel mount + layout settle
-    await page.screenshot({ path: `${OUT_DIR}/screenshot-${view}.png` })
-    // Close via the panel's own "✕" button rather than re-clicking the
-    // dock button: the Cues panel opens maximized (fills the viewport),
-    // which sits above the dock (z-index) and would otherwise intercept
-    // the click meant for the now-hidden dock button underneath it.
-    await page.locator('button[title="Close"]').click()
-    await page.waitForTimeout(200)
+    for (const { view, file } of SCREENSHOTS) {
+      await selectView(page, view)
+      const screenshotOptions = { path: `${OUT_DIR}/screenshot-${file}.png` }
+      if (view === 'Lasers') {
+        screenshotOptions.mask = [page.locator('.laser-row input.ip')]
+        screenshotOptions.maskColor = '#1b2025'
+      }
+      await page.screenshot(screenshotOptions)
+    }
+  } finally {
+    await browser.close()
   }
-
-  await browser.close()
 }
 
-main().catch((err) => {
-  console.error(err)
+main().catch((error) => {
+  console.error(error)
   process.exit(1)
 })

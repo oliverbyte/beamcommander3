@@ -1,0 +1,35 @@
+{
+  "sourceCueSlot": 39,
+  "cueSlot": 39,
+  "cue": {
+    "shape": "triangle",
+    "radius": 0.7,
+    "points": 300,
+    "rate_kpps": 30,
+    "r": 0,
+    "g": 1,
+    "b": 0.314,
+    "shape_scale": -0.58,
+    "pos_x": 0,
+    "pos_y": 0,
+    "rotation_speed": 0.1,
+    "rotation_phase": -0.8898,
+    "mirror_x": false,
+    "move_mode": "circle",
+    "move_speed": 0.3,
+    "move_size": 0.5,
+    "move_phase_degrees": 0,
+    "wave_frequency": 1,
+    "wave_amplitude": 0.45,
+    "wave_speed": 0,
+    "rainbow_amount": 0.93,
+    "rainbow_speed": 0.4,
+    "dot_amount": 1,
+    "flicker_hz": 0
+  },
+  "lasers": [
+    { "name": "L1", "preview_x": 0.358, "preview_y": 0.6666 },
+    { "name": "L2", "preview_x": 0.6061, "preview_y": 0.5066 },
+    { "name": "L3", "preview_x": 0.8666, "preview_y": 0.6845 }
+  ]
+}

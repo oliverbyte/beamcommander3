@@ -20,12 +20,12 @@ curious how it's built, or want to modify it, the rest of this file and
 ## Screenshots
 
 <p align="center">
-  <img src="docs/screenshots/screenshot-background.png" alt="BeamCommander3 live preview" width="820">
+   <img src="docs/screenshots/screenshot-background.png" alt="Three laser sources rendering a saved test cue in the live preview" width="820">
 </p>
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/screenshot-settings.png" alt="Magic Touch controls for shapes, colors, and movement"></td>
+<td width="50%"><img src="docs/screenshots/screenshot-settings.png" alt="Shapes view with labeled icons and touch-friendly faders"></td>
 <td width="50%"><img src="docs/screenshots/screenshot-cues.png" alt="Cues panel"></td>
 </tr>
 <tr>

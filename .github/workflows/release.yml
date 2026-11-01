@@ -94,30 +94,29 @@ jobs:
           npm ci
           npm run build
 
-      - name: Generate README screenshots
+      - name: Generate README screenshots from a real test cue
         run: |
           cd frontend
           npx playwright install chromium
 
-          # Run the real built backend against the built frontend (not a
-          # mock) so the screenshots reflect an actual working app - cwd
-          # doesn't matter for cues.json/midi_map.json (resolved relative
-          # to the binary itself, see resolve_data_file() in
-          # laser_daemon.cpp), only FRONTEND_DIST needs pointing at dist/.
-          FRONTEND_DIST="$PWD/dist" ../backend/laser_daemon --port 8000 &
+          # Keep screenshot state isolated from any user data. The script
+          # configures the saved test cue and three preview sources using
+          # loopback IPs, with Blackout on, so no laser hardware is contacted.
+          SCREENSHOT_HOME="$(mktemp -d)"
+          SCREENSHOT_DATA="$SCREENSHOT_HOME/Library/Application Support/BeamCommander3"
+          mkdir -p "$SCREENSHOT_DATA"
+          printf '{}\n' > "$SCREENSHOT_DATA/cues.json"
+          printf '[]\n' > "$SCREENSHOT_DATA/lasers.json"
+          printf '[]\n' > "$SCREENSHOT_DATA/midi_map.json"
+          HOME="$SCREENSHOT_HOME" FRONTEND_DIST="$PWD/dist" ../backend/laser_daemon --port 8000 &
           echo $! > /tmp/laser_daemon.pid
           for i in $(seq 1 30); do
             curl -sf http://localhost:8000/api/state >/dev/null && break
             sleep 1
           done
 
-          # A configured (but unarmed) example laser so the Lasers/Zoning
-          # panel screenshots aren't just empty-state placeholders.
-          curl -sf -X POST http://localhost:8000/api/lasers \
-            -H 'Content-Type: application/json' \
-            -d '{"name":"Stage Left","ip":"10.10.10.4"}' >/dev/null
-
-          BASE_URL=http://localhost:8000 OUT_DIR="$GITHUB_WORKSPACE/docs/screenshots" node scripts/screenshots.mjs
+          BC3_SCREENSHOT_ISOLATED=1 BASE_URL=http://localhost:8000 \
+            OUT_DIR="$GITHUB_WORKSPACE/docs/screenshots" node scripts/screenshots.mjs
 
       - name: Stop screenshot backend
         if: always()
