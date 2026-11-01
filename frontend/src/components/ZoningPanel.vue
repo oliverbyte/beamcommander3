@@ -10,9 +10,21 @@
       <div class="row" v-if="lasers.length">
         <select class="laser-select" v-model.number="selectedId">
           <option v-for="l in lasers" :key="l.id" :value="l.id">
-            {{ l.name }}{{ l.armed ? ' ●' : '' }}
+            {{ l.name }}
           </option>
         </select>
+      </div>
+      <div v-if="selectedLaser" class="laser-status-row" aria-label="Selected laser status">
+        <span
+          class="status-dot"
+          :class="{ on: selectedLaser.connected }"
+          :title="selectedLaser.connected ? 'Connected' : 'Not connected'"
+          aria-hidden="true"
+        ></span>
+        <span class="connection-label">{{ selectedLaser.connected ? 'Connected' : 'Not connected' }}</span>
+        <span class="arm-status" :class="{ active: selectedLaser.armed }">
+          {{ selectedLaser.armed ? '● Armed' : '○ Disarmed' }}
+        </span>
       </div>
       <p v-else class="empty">No lasers configured yet - add one in the Lasers panel first.</p>
 
@@ -204,6 +216,16 @@ h2 { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; margin:8px 
   padding:6px 8px; font-size:12px;
 }
 #zoning-panel.popout .laser-select { padding:10px; font-size:14px; }
+.laser-status-row { display:flex; align-items:center; gap:6px; margin:-2px 0 8px; min-height:20px; }
+.status-dot { width:7px; height:7px; border-radius:50%; background:#703030; flex:0 0 7px; }
+.status-dot.on { background:#48e07a; }
+.connection-label { flex:1; color:#6a7090; font-size:10px; }
+.arm-status {
+  border:1px solid rgba(255,255,255,0.18); border-radius:4px;
+  background:rgba(255,255,255,0.07); color:#cfd3e6;
+  padding:4px 8px; font-size:11px; white-space:nowrap;
+}
+.arm-status.active { background:rgba(72,224,122,0.18); border-color:#48e07a; color:#48e07a; }
 
 .stage {
   position:relative; margin:6px auto 10px; overflow:visible;
