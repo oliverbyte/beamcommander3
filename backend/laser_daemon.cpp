@@ -1520,6 +1520,7 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     if (action=="rainbow_speed")  { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_speed=out; return; }
     if (action=="move_size")      { std::lock_guard<std::mutex> lk(G_mtx); G.move_size=std::clamp(out,0.0f,6.0f); return; }
     if (action=="move_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.move_speed=std::max(0.0f,out); return; }
+    if (action=="move_phase_degrees") { std::lock_guard<std::mutex> lk(G_mtx); G.move_phase_degrees=std::clamp(out,0.0f,360.0f); return; }
     if (action=="rate_kpps")      { std::lock_guard<std::mutex> lk(G_mtx); G.rate_kpps=std::clamp(out,0.0f,G.max_rate_kpps); return; }
 }
 

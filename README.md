@@ -364,6 +364,8 @@ configured), this subsystem simply does nothing.
    with that exact controller. For any other controller, or if your APC40's
    firmware mode sends different numbers, **the console log is the source of
    truth** (see step 3).
+   On the APC40 mkII, the fader between **Wave speed** and **Dots** (channel 5,
+   CC 7) controls **Phase step per laser** from 0° to 360°.
 3. To calibrate: press a button / turn a knob on your controller and watch
    the daemon's console output. Every message that doesn't match a binding
    is logged, e.g. `[midi] unmapped cc ch=0 num=90 val=42` — add/edit the
