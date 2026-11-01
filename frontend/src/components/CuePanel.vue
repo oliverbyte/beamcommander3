@@ -13,7 +13,7 @@
         <button
           v-for="n in CUE_COUNT" :key="n"
           class="cue-btn"
-          :class="{ populated: !!cues[n], armed: saveArmed, 'move-armed': moveArmed, 'move-source': moveSource === n }"
+          :class="{ populated: !!cues[n], 'current-cue': isCurrentCue(n), armed: saveArmed, 'move-armed': moveArmed, 'move-source': moveSource === n }"
           @click="onClick(n)"
           @contextmenu.prevent="onClear(n)"
           :title="cueTitle(n)"
@@ -66,15 +66,34 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { cues, saveCue, recallCue, clearCue, moveCue, fetchCues } from '../composables/useLaserSocket.js'
+import { cues, laserState, saveCue, recallCue, clearCue, moveCue, fetchCues } from '../composables/useLaserSocket.js'
 
 const { popout } = defineProps({ popout: { type: Boolean, default: false } })
 const CUE_COUNT = 128
+const CUE_STATE_FIELDS = [
+  'shape', 'radius', 'points', 'rate_kpps', 'r', 'g', 'b', 'shape_scale',
+  'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed',
+  'move_size', 'wave_frequency', 'wave_amplitude', 'wave_speed',
+  'rainbow_amount', 'rainbow_speed', 'dot_amount', 'flicker_hz',
+]
 const saveArmed = ref(false)
 const moveArmed = ref(false)
 const moveSource = ref(null)
 
 onMounted(() => { fetchCues().catch(() => {}) })
+
+function isCurrentCue(n) {
+  const cue = cues[n]
+  if (!cue) return false
+  return CUE_STATE_FIELDS.every((field) => {
+    const saved = cue[field]
+    const current = laserState[field]
+    if (typeof saved === 'number' && typeof current === 'number') {
+      return Math.abs(saved - current) <= 0.00011
+    }
+    return saved === current
+  })
+}
 
 function toggleSaveMode() {
   saveArmed.value = !saveArmed.value
@@ -283,6 +302,11 @@ async function onClear(n) {
 }
 .cue-btn:hover { background:rgba(255,255,255,0.12); }
 .cue-btn.populated { background:rgba(20,22,32,0.9); border-color:#48e07a; color:#48e07a; }
+.cue-btn.current-cue {
+  border:3px solid #a8ff60;
+  box-shadow:inset 0 0 0 1px rgba(168,255,96,0.65),0 0 12px rgba(168,255,96,0.75);
+  color:#c2ff89;
+}
 .cue-btn.armed { border-color:#ff4040; }
 .cue-btn.armed:hover { background:rgba(255,60,60,0.2); }
 .cue-btn.move-armed { border-color:rgba(143,227,255,0.5); }

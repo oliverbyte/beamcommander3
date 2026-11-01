@@ -42,7 +42,7 @@ const WORLD_SCALE = 8
 // the pattern plane's world position stable, so the default camera can be
 // placed to always look straight down the beam axis at it.
 const BEAM_LEN = 22
-const MAX_SCAN_POINTS = 20000
+const MAX_SCAN_POINTS = 3000
 const PREVIEW_VIEW_HEIGHT = 18
 const FRONT_PLANE_Z = -8
 const PREVIEW_FOG_DENSITY = 0.008
@@ -52,9 +52,12 @@ const FRONT_PLANE = new THREE.Plane(new THREE.Vector3(0, 0, 1), -FRONT_PLANE_Z)
 let renderer, scene, camera, controls, laserTemplate
 let dust
 let spokeGeo, spokePositions, spokeColors, spokeTimestamps
+let hazeGeo, hazePositions, hazeBaseColors, hazeColors
 let spokeWriteIndex = 0
+let spokeCount = 0
 let animationId = 0
 const laserSources = new Map()
+const continuationSources = []
 const sourceRaycaster = new THREE.Raycaster()
 const sourceScreenPoint = new THREE.Vector2()
 const sourceWorldPosition = new THREE.Vector3()
@@ -63,6 +66,8 @@ const screenUp = new THREE.Vector3()
 const rayDirection = new THREE.Vector3()
 const sourceRelative = new THREE.Vector3()
 const continuationEndpoint = new THREE.Vector3()
+let edgeViewWidth = 1
+let edgeViewHeight = 1
 const drag = { id: null, offsetX: 0, offsetY: 0, marginX: 0, marginY: 0, moved: false }
 
 function previewPosition(entry) {
@@ -251,15 +256,35 @@ function setupScene() {
   spokeColors = new Float32Array(MAX_SCAN_POINTS * 4 * 3)
   spokeTimestamps = new Float64Array(MAX_SCAN_POINTS).fill(-Infinity)
   spokeGeo = new THREE.BufferGeometry()
+  spokeGeo.setDrawRange(0, 0)
   spokeGeo.setAttribute('position', new THREE.BufferAttribute(spokePositions, 3).setUsage(THREE.DynamicDrawUsage))
   spokeGeo.setAttribute('color', new THREE.BufferAttribute(spokeColors, 3).setUsage(THREE.DynamicDrawUsage))
+
+  hazePositions = new Float32Array(MAX_SCAN_POINTS * 9)
+  hazeBaseColors = new Float32Array(MAX_SCAN_POINTS * 9)
+  hazeColors = new Float32Array(MAX_SCAN_POINTS * 9)
+  hazeGeo = new THREE.BufferGeometry()
+  hazeGeo.setDrawRange(0, 0)
+  hazeGeo.setAttribute('position', new THREE.BufferAttribute(hazePositions, 3).setUsage(THREE.DynamicDrawUsage))
+  hazeGeo.setAttribute('color', new THREE.BufferAttribute(hazeColors, 3).setUsage(THREE.DynamicDrawUsage))
+  const hazeMesh = new THREE.Mesh(hazeGeo, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+    side: THREE.DoubleSide, fog: false, opacity: 0.02,
+  }))
+  hazeMesh.name = 'laser-haze'
+  const output = new THREE.Group()
+  output.name = 'laser-output'
+  output.add(hazeMesh)
+
   const spokeMat = new THREE.LineBasicMaterial({
     vertexColors: true, transparent: true,
     blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
   })
   const spokeSegments = new THREE.LineSegments(spokeGeo, spokeMat)
-  spokeSegments.name = 'laser-output'
-  laserTemplate.add(spokeSegments)
+  spokeSegments.name = 'laser-rays'
+  output.add(spokeSegments)
+  laserTemplate.add(output)
 
   const DUST_COUNT = 600
   const dustPos = new Float32Array(DUST_COUNT * 3)
@@ -290,41 +315,50 @@ function setupScene() {
 let currentFrame = []      // latest [x,y,r,g,b] points from the backend
 let emitIndex = 0          // fractional read position into currentFrame
 let lastEmitTime = 0       // performance.now()/1000 of the last emitted point
+let lastColor = [0, 0, 0]
 const MAX_EMIT_PER_TICK = 4000  // safety cap (e.g. tab was backgrounded)
 
 function handleIncomingPoints(msg) {
   currentFrame = msg.pts
 }
 
-function continuationEnd(wx, wy) {
+function prepareContinuation() {
   camera.updateMatrixWorld()
   screenRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize()
   screenUp.setFromMatrixColumn(camera.matrixWorld, 1).normalize()
 
-  const viewWidth = (camera.right - camera.left) / camera.zoom
-  const viewHeight = (camera.top - camera.bottom) / camera.zoom
-  let factor = 1
-
+  edgeViewWidth = (camera.right - camera.left) / camera.zoom
+  edgeViewHeight = (camera.top - camera.bottom) / camera.zoom
+  continuationSources.length = 0
   for (const [id, source] of laserSources) {
     const entry = id === '__virtual__' ? null : lasers.find((laser) => laser.id === id)
     if (entry?.armed === false) continue
-    rayDirection.set(entry?.mirror_x === true ? -wx : wx, wy, BEAM_LEN)
-    const normalizedDx = rayDirection.dot(screenRight) / viewWidth
-    const normalizedDy = -rayDirection.dot(screenUp) / viewHeight
     sourceRelative.subVectors(source.position, camera.position)
-    const sourceX = 0.5 + sourceRelative.dot(screenRight) / viewWidth
-    const sourceY = 0.5 - sourceRelative.dot(screenUp) / viewHeight
-    let edgeFactor = Infinity
-    if (normalizedDx > 1e-8) edgeFactor = Math.min(edgeFactor, (1 - sourceX) / normalizedDx)
-    else if (normalizedDx < -1e-8) edgeFactor = Math.min(edgeFactor, -sourceX / normalizedDx)
-    if (normalizedDy > 1e-8) edgeFactor = Math.min(edgeFactor, (1 - sourceY) / normalizedDy)
-    else if (normalizedDy < -1e-8) edgeFactor = Math.min(edgeFactor, -sourceY / normalizedDy)
-    if (Number.isFinite(edgeFactor) && edgeFactor > factor) factor = edgeFactor
+    continuationSources.push({
+      x: 0.5 + sourceRelative.dot(screenRight) / edgeViewWidth,
+      y: 0.5 - sourceRelative.dot(screenUp) / edgeViewHeight,
+      mirrorX: entry?.mirror_x === true,
+    })
   }
+}
 
+function continuationEnd(wx, wy) {
   rayDirection.set(wx, wy, BEAM_LEN)
   const screenDx = rayDirection.dot(screenRight)
   const screenDy = rayDirection.dot(screenUp)
+  const normalizedDy = -screenDy / edgeViewHeight
+  let factor = 1
+
+  for (const source of continuationSources) {
+    const normalizedDx = (source.mirrorX ? -screenDx : screenDx) / edgeViewWidth
+    let edgeFactor = Infinity
+    if (normalizedDx > 1e-8) edgeFactor = Math.min(edgeFactor, (1 - source.x) / normalizedDx)
+    else if (normalizedDx < -1e-8) edgeFactor = Math.min(edgeFactor, -source.x / normalizedDx)
+    if (normalizedDy > 1e-8) edgeFactor = Math.min(edgeFactor, (1 - source.y) / normalizedDy)
+    else if (normalizedDy < -1e-8) edgeFactor = Math.min(edgeFactor, -source.y / normalizedDy)
+    if (Number.isFinite(edgeFactor) && edgeFactor > factor) factor = edgeFactor
+  }
+
   return continuationEndpoint.copy(rayDirection)
     .addScaledVector(screenRight, screenDx * (factor - 1))
     .addScaledVector(screenUp, screenDy * (factor - 1))
@@ -359,6 +393,7 @@ function emitScanPoints(now) {
     // Daemon sends 0..1 floats; simulation sends 0..255 integers.
     const scale = (r > 1 || g > 1 || b > 1) ? 1 / 255 : 1
     const cr = r * scale, cg = g * scale, cb = b * scale
+    const fanBrightness = Math.min(1, Math.max(0.01, 5 / frame.length) * laserState.intensity)
 
     // Spoke: source (local origin) -> shape point -> far continuation.
     // Segment 1 (source->point) fades bright-to-dim; segment 2
@@ -367,6 +402,25 @@ function emitScanPoints(now) {
     // instead of hard-stopping exactly at the shape.
     const vi = spokeWriteIndex * 12   // 4 vertices * 3 floats
     const endpoint = continuationEnd(wx, wy)
+    const fi = spokeWriteIndex * 9
+    hazePositions[fi] = 0
+    hazePositions[fi + 1] = 0
+    hazePositions[fi + 2] = 0
+    hazePositions[fi + 3] = lastPoint[0] * WORLD_SCALE
+    hazePositions[fi + 4] = lastPoint[1] * WORLD_SCALE
+    hazePositions[fi + 5] = BEAM_LEN
+    hazePositions[fi + 6] = wx
+    hazePositions[fi + 7] = wy
+    hazePositions[fi + 8] = BEAM_LEN
+    hazeBaseColors[fi] = (lastColor[0] + cr) * 0.5 * fanBrightness
+    hazeBaseColors[fi + 1] = (lastColor[1] + cg) * 0.5 * fanBrightness
+    hazeBaseColors[fi + 2] = (lastColor[2] + cb) * 0.5 * fanBrightness
+    hazeBaseColors[fi + 3] = lastColor[0] * 0.1 * fanBrightness
+    hazeBaseColors[fi + 4] = lastColor[1] * 0.1 * fanBrightness
+    hazeBaseColors[fi + 5] = lastColor[2] * 0.1 * fanBrightness
+    hazeBaseColors[fi + 6] = cr * 0.1 * fanBrightness
+    hazeBaseColors[fi + 7] = cg * 0.1 * fanBrightness
+    hazeBaseColors[fi + 8] = cb * 0.1 * fanBrightness
     spokePositions[vi]      = 0
     spokePositions[vi + 1]  = 0
     spokePositions[vi + 2]  = 0
@@ -385,12 +439,17 @@ function emitScanPoints(now) {
     spokeBaseColors[vi + 9] = 0;                       spokeBaseColors[vi + 10] = 0;                      spokeBaseColors[vi + 11] = 0
     spokeTimestamps[spokeWriteIndex] = t
     spokeWriteIndex = (spokeWriteIndex + 1) % MAX_SCAN_POINTS
+    spokeCount = Math.min(spokeCount + 1, MAX_SCAN_POINTS)
 
     lastPoint = [x, y]
+    lastColor = [cr, cg, cb]
     emitIndex += 1
   }
   lastEmitTime += n * period
+  spokeGeo.setDrawRange(0, spokeCount * 4)
+  hazeGeo.setDrawRange(0, spokeCount * 3)
   spokeGeo.attributes.position.needsUpdate = true
+  hazeGeo.attributes.position.needsUpdate = true
 }
 
 // Brightness falloff along each spoke: bright near the source, dim at the
@@ -414,6 +473,7 @@ function animate() {
 
   controls.update()
   positionLaserSources()
+  prepareContinuation()
   emitScanPoints(now)
 
   const r = laserState.radius * WORLD_SCALE
@@ -431,15 +491,21 @@ function animate() {
   // would look to a viewer.
   const persistenceTau = Math.max(0.001, props.persistenceMs / 1000)
   const colorArr = spokeGeo.attributes.color.array
-  for (let i = 0; i < MAX_SCAN_POINTS; i++) {
+  const hazeColorArr = hazeGeo.attributes.color.array
+  for (let i = 0; i < spokeCount; i++) {
     const age = now - spokeTimestamps[i]
     const brightness = age < 0 ? 0 : Math.exp(-age / persistenceTau)
     const vi = i * 12
     for (let c = 0; c < 12; c++) {
       colorArr[vi + c] = spokeBaseColors[vi + c] * brightness
     }
+    const fi = i * 9
+    for (let c = 0; c < 9; c++) {
+      hazeColorArr[fi + c] = hazeBaseColors[fi + c] * brightness
+    }
   }
   spokeGeo.attributes.color.needsUpdate = true
+  hazeGeo.attributes.color.needsUpdate = true
 
   dust.rotation.y = now * 0.01
   dust.position.y = Math.sin(now * 0.1) * 0.3
@@ -462,13 +528,20 @@ function handleResize() {
 function clearPointBuffer() {
   spokeTimestamps.fill(-Infinity)
   spokeWriteIndex = 0
+  spokeCount = 0
   currentFrame = []
   emitIndex = 0
   lastEmitTime = performance.now() / 1000
   if (spokeGeo) {
+    spokeGeo.setDrawRange(0, 0)
+    hazeGeo.setDrawRange(0, 0)
     spokeGeo.attributes.position.needsUpdate = true
     spokeGeo.attributes.color.needsUpdate = true
+    hazeGeo.attributes.position.needsUpdate = true
+    hazeGeo.attributes.color.needsUpdate = true
   }
+  lastPoint = [0, 0]
+  lastColor = [0, 0, 0]
 }
 
 onMounted(() => {
