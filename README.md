@@ -3,8 +3,8 @@
 A laser show controller you run on your own laptop: it drives a real laser
 projector and gives you a live web page to control shapes, colors, movement,
 color effects, and "cues" (saved looks you can jump back to instantly) —
-plus an optional USB MIDI controller or foot pedal if you want hands-on
-faders and buttons instead of a mouse.
+with dedicated views and touch-friendly faders and buttons. An optional USB
+MIDI controller or foot pedal adds hands-on control too.
 
 You don't need to know how to code to use it — see
 ["Using the show"](#using-the-show-no-coding-needed) below. If you're
@@ -25,7 +25,7 @@ curious how it's built, or want to modify it, the rest of this file and
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/screenshot-settings.png" alt="Settings panel"></td>
+<td width="50%"><img src="docs/screenshots/screenshot-settings.png" alt="Magic Touch controls for shapes, colors, and movement"></td>
 <td width="50%"><img src="docs/screenshots/screenshot-cues.png" alt="Cues panel"></td>
 </tr>
 <tr>
@@ -157,18 +157,21 @@ for how the packaged macOS/Windows builds are put together.
    reflected there too. If no lasers are configured, a virtual beam remains
    so you can still preview show settings. Also make sure
    **Blackout** is off and **Output Gated** is switched to **Output Enabled**
-   in the Settings panel — both must be open for any real laser light, as a
+   in the Master view — both must be open for any real laser light, as a
    deliberate safety default.
    Every configured laser appears as a labeled preview marker. Drag markers
    to arrange them; positions are saved with each laser. In the **Lasers**
    panel, drag the grip to change installation order; this also determines
    MIDI laser numbering and movement phase offsets.
-3. **Play with the show**: pick a shape, drag the color picker, turn on
-   Rainbow, try a Movement pattern, adjust Speed/Size, and set **Phase step
-   per laser** to spread that movement across the installation order. Laser 1
-   starts at 0°; each following laser adds one slider step (e.g. 90° staggers
-   four lasers evenly). Preview and hardware use the same phase offsets. Every
-   change is instant, nothing needs to be "applied" or saved first.
+3. **Play with the show**: use the Color view for presets (including pure
+   red, green, and blue) or the custom color picker; choose a shape in Shapes
+   and a pattern in Move. Their buttons show icons and labels, while the larger
+   faders are comfortable to adjust by touch. In Beam, adjust Speed/Size and
+   set **Phase step per laser** to spread movement across the installation
+   order. Laser 1 starts at 0°; each following laser adds one slider step
+   (e.g. 90° staggers four lasers evenly). Preview and hardware use the same
+   phase offsets. Every change is instant, nothing needs to be "applied" or
+   saved first.
 4. **Flash / Blackout**: the ⚡ Flash button punches the beam to full white
    brightness while held, then returns to whatever it was showing before.
    Blackout forces the real laser dark (the on-screen preview keeps

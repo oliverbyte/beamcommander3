@@ -1,6 +1,6 @@
 <template>
   <canvas ref="canvasEl" class="laser-canvas" v-show="enabled"></canvas>
-  <div v-if="enabled && lasers.length" class="laser-layout" aria-label="Configured lasers">
+  <div v-if="enabled && showLayout && lasers.length" class="laser-layout" aria-label="Configured lasers">
     <button
       v-for="entry in lasers"
       :key="entry.id"
@@ -30,6 +30,7 @@ const props = defineProps({
   // sent to the backend, so it never affects the real hardware output or
   // any other connected browser client's preview.
   enabled: { type: Boolean, default: true },
+  showLayout: { type: Boolean, default: false },
 })
 
 const canvasEl = ref(null)
@@ -273,13 +274,6 @@ function setupScene() {
   )
   backWall.position.set(0, 20, -12)
   scene.add(backWall)
-
-  const truss = new THREE.Mesh(
-    new THREE.BoxGeometry(14, 0.25, 0.25),
-    new THREE.MeshBasicMaterial({ color: 0x14161f })
-  )
-  truss.position.set(0, 4.6, FRONT_PLANE_Z)
-  scene.add(truss)
 
   laserTemplate = new THREE.Group()
 
