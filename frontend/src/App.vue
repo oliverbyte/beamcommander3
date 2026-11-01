@@ -6,9 +6,9 @@ import CuePanel from './components/CuePanel.vue'
 import ZoningPanel from './components/ZoningPanel.vue'
 import LasersPanel from './components/LasersPanel.vue'
 import TouchDock from './components/TouchDock.vue'
-import { connectSocket, fetchState, startStatusPolling } from './composables/useLaserSocket.js'
+import { connectSocket, fetchLasers, fetchState, startStatusPolling } from './composables/useLaserSocket.js'
 
-const persistenceMs = ref(5)
+const persistenceMs = ref(20)
 
 // Whether the 3D laser preview renders/updates - purely a local UI
 // preference for *this* browser tab (toggled via TouchDock's eye icon).
@@ -34,6 +34,7 @@ if (popupView && POPUP_TITLES[popupView]) {
 onMounted(() => {
   connectSocket()
   fetchState().catch(() => {})
+  fetchLasers().catch(() => {})
   startStatusPolling()
 })
 </script>

@@ -151,12 +151,16 @@ for how the packaged macOS/Windows builds are put together.
    fixed address like `10.10.10.4` — check your laser's manual or network
    settings), then click **Arm** on it. You'll see its dot turn green
    ("connected") once it's linked up. Any number of lasers can be armed at
-   once — they all stream the exact same show in parallel. No laser armed
-   yet? Everything still works — the preview on screen always shows exactly
-   what would come out of the laser. Also make sure **Blackout** is off and
-   **Output Gated** is switched to **Output Enabled** in the Settings panel
-   — both must be open for any real laser light, as a deliberate safety
-   default.
+   once — they all stream the exact same show in parallel. Each configured
+   laser appears as a marker in the preview; its beam is shown while armed
+   and hidden while disarmed. If no lasers are configured, a virtual beam
+   remains so you can still preview show settings. Also make sure
+   **Blackout** is off and **Output Gated** is switched to **Output Enabled**
+   in the Settings panel — both must be open for any real laser light, as a
+   deliberate safety default.
+   Every configured laser also appears as a labeled marker in the preview.
+   Drag markers to arrange them; new lasers default to a horizontal row, and
+   each position is saved with that laser's configuration.
 3. **Play with the show**: pick a shape, drag the color picker, turn on
    Rainbow, try a Movement pattern, adjust Speed/Size — every change is
    instant, nothing needs to be "applied" or saved first.
@@ -276,9 +280,9 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /mirror/x/<0\|1>` | Flip the output horizontally (mirror around center); 1 = mirrored, 0 = normal |
 | `POST /motion/hold/<0\|1>` | Momentary freeze: 1 = press (stops movement, rotation, and the rainbow hue cycle in place, remembering the prior speeds), 0 = release (restores them) |
 | `POST /rotation/reset` | Snap the rotation angle back to 0 and stop it spinning (sets `rotation_speed` to 0) |
-| `GET /api/lasers` | List every configured laser (DAC): `[{"id","name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","connected"}, ...]` |
+| `GET /api/lasers` | List every configured laser (DAC): `[ {"id","name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","preview_x","preview_y","connected"}, ...]` |
 | `POST /api/lasers` | Add a new laser: `{"name":"...","ip":"..."}` (`armed` defaults to `false`, i.e. configured but idle) |
-| `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y"}` - setting `armed` to `true` connects + streams this laser's own zone-calibrated output, `false` disconnects/idles it. `zone_x`/`zone_y` (-1..1, offset) and `zone_scale_x`/`zone_scale_y` (0.1..2, independent per-axis scale) are this laser's own pan/zoom calibration - set by dragging in the Zoning panel |
+| `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","preview_x","preview_y"}` - setting `armed` to `true` connects + streams this laser's own zone-calibrated output, `false` disconnects/idles it. `mirror_x` flips this laser's output horizontally in hardware and preview. `zone_x`/`zone_y` (-1..1, offset) and `zone_scale_x`/`zone_scale_y` (0.1..2, independent per-axis scale) are this laser's own pan/zoom calibration - set by dragging in the Zoning panel. `preview_x`/`preview_y` (0..1) are its position in the browser preview and do not affect hardware output |
 | `DELETE /api/lasers/<id>` | Remove a laser |
 | `GET /api/cues` | List all populated cue slots (1-128) |
 | `POST /api/cue/<n>/save` | Snapshot current show params into slot `n` |
@@ -301,7 +305,7 @@ the fader/REST/MIDI - turning it down lowers the scan-rate fader's usable
 range too.
 
 Each laser's own configuration (`armed`, `zone_x`/`zone_y`/`zone_scale_x`/
-`zone_scale_y` - see `/api/lasers` above) is also excluded from cue state for
+`zone_scale_y`, `preview_x`/`preview_y` - see `/api/lasers` above) is also excluded from cue state for
 a similar reason — it's a physical connection/venue calibration, not a show
 look, so it survives cue saves/recalls and `/api/reset` untouched, and
 persists on its own in `lasers.json` (not `cues.json`).

@@ -4,6 +4,10 @@ set -euo pipefail
 LIBERA_DIR="${LIBERA_DIR:-/tmp/libera-laser}"
 LIBERA_LIB="${LIBERA_DIR}/build/release/liblibera-core.a"
 LIBUSB_FLAGS="$(pkg-config --cflags --libs libusb-1.0 2>/dev/null || echo "-L/usr/local/Cellar/libusb/1.0.30/lib -lusb-1.0")"
+LIBERA_EXTRA_LIBS=()
+if [[ -f "${LIBERA_DIR}/build/release/liblibera-miniz.a" ]]; then
+  LIBERA_EXTRA_LIBS+=("${LIBERA_DIR}/build/release/liblibera-miniz.a")
+fi
 
 # libera-laser lives under /tmp, which is not persistent (cleared on
 # reboot/by the OS). Self-heal by cloning + building it fresh if it's
@@ -27,6 +31,7 @@ clang++ -std=c++17 -O2 \
   -I"${LIBERA_DIR}/libs/helios_dac/sdk/cpp" \
   laser_daemon.cpp \
   "${LIBERA_DIR}/build/release/liblibera-core.a" \
+  "${LIBERA_EXTRA_LIBS[@]}" \
   ${LIBUSB_FLAGS} \
   -framework CoreFoundation -framework IOKit \
   -framework CoreAudio -framework AudioToolbox \

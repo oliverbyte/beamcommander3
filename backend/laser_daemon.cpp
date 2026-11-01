@@ -247,6 +247,7 @@ struct LaserConfig {
     float       zone_x = 0.0f, zone_y = 0.0f;             // -1..1, offset of the whole output
     float       zone_scale_x = 1.0f, zone_scale_y = 1.0f; // 0.1..2, independent per-axis multiplier
     bool        mirror_x = false; // this laser's own horizontal flip (hardware-only, applied before its zone offset/scale) - independent of the global LaserState::mirror_x
+    float       preview_x = 0.5f, preview_y = 0.5f; // normalized position in the browser preview
 };
 static std::vector<LaserConfig> G_lasers;
 static std::mutex               G_lasers_mtx;
@@ -1047,6 +1048,8 @@ static std::string laser_config_to_json(const LaserConfig& l) {
        << ",\"zone_scale_x\":" << l.zone_scale_x
        << ",\"zone_scale_y\":" << l.zone_scale_y
        << ",\"mirror_x\":" << (l.mirror_x ? "true" : "false")
+         << ",\"preview_x\":" << l.preview_x
+         << ",\"preview_y\":" << l.preview_y
        << ",\"connected\":" << (get_laser_connected(l.id) ? "true" : "false")
        << "}";
     return ss.str();
@@ -1063,6 +1066,7 @@ static void save_lasers_to_disk() {
            << ",\"zone_x\":" << l.zone_x << ",\"zone_y\":" << l.zone_y
            << ",\"zone_scale_x\":" << l.zone_scale_x << ",\"zone_scale_y\":" << l.zone_scale_y
            << ",\"mirror_x\":" << (l.mirror_x ? "true" : "false")
+           << ",\"preview_x\":" << l.preview_x << ",\"preview_y\":" << l.preview_y
            << "}";
     }
     ss << "]";
@@ -1076,33 +1080,52 @@ static void load_lasers_from_disk() {
     std::ostringstream buf; buf << f.rdbuf();
     std::string body = buf.str();
 
-    std::lock_guard<std::mutex> lk(G_lasers_mtx);
-    G_lasers.clear();
-    std::size_t i = body.find('{');
-    while (i != std::string::npos) {
-        int depth = 0; std::size_t j = i;
-        for (; j < body.size(); ++j) {
-            if (body[j] == '{') ++depth;
-            else if (body[j] == '}') { --depth; if (depth == 0) { ++j; break; } }
+    bool migrated = false;
+    {
+        std::lock_guard<std::mutex> lk(G_lasers_mtx);
+        G_lasers.clear();
+        std::size_t i = body.find('{');
+        while (i != std::string::npos) {
+            int depth = 0; std::size_t j = i;
+            for (; j < body.size(); ++j) {
+                if (body[j] == '{') ++depth;
+                else if (body[j] == '}') { --depth; if (depth == 0) { ++j; break; } }
+            }
+            if (depth != 0) break;
+            std::string obj = body.substr(i, j - i);
+            LaserConfig l;
+            l.id            = json_int(obj, "id", 0);
+            l.name          = json_str(obj, "name");
+            l.ip            = json_str(obj, "ip");
+            l.armed         = json_bool(obj, "armed", false);
+            l.zone_x        = json_float(obj, "zone_x", 0.0f);
+            l.zone_y        = json_float(obj, "zone_y", 0.0f);
+            l.zone_scale_x  = json_float(obj, "zone_scale_x", 1.0f);
+            l.zone_scale_y  = json_float(obj, "zone_scale_y", 1.0f);
+            l.mirror_x      = json_bool(obj, "mirror_x", false);
+            const bool hasPreviewPosition = obj.find("\"preview_x\"") != std::string::npos
+                && obj.find("\"preview_y\"") != std::string::npos;
+            l.preview_x     = json_float(obj, "preview_x", -1.0f);
+            l.preview_y     = json_float(obj, "preview_y", -1.0f);
+            if (l.id > 0) {
+                G_lasers.push_back(l);
+                G_next_laser_id = std::max(G_next_laser_id, l.id + 1);
+                migrated = migrated || !hasPreviewPosition;
+            }
+            i = body.find('{', j);
         }
-        if (depth != 0) break;
-        std::string obj = body.substr(i, j - i);
-        LaserConfig l;
-        l.id            = json_int(obj, "id", 0);
-        l.name          = json_str(obj, "name");
-        l.ip            = json_str(obj, "ip");
-        l.armed         = json_bool(obj, "armed", false);
-        l.zone_x        = json_float(obj, "zone_x", 0.0f);
-        l.zone_y        = json_float(obj, "zone_y", 0.0f);
-        l.zone_scale_x  = json_float(obj, "zone_scale_x", 1.0f);
-        l.zone_scale_y  = json_float(obj, "zone_scale_y", 1.0f);
-        l.mirror_x      = json_bool(obj, "mirror_x", false);
-        if (l.id > 0) {
-            G_lasers.push_back(l);
-            G_next_laser_id = std::max(G_next_laser_id, l.id + 1);
+
+        const float spacing = 1.0f / (G_lasers.size() + 1);
+        for (std::size_t index = 0; index < G_lasers.size(); ++index) {
+            auto& laser = G_lasers[index];
+            if (laser.preview_x < 0.0f || laser.preview_y < 0.0f) {
+                laser.preview_x = spacing * (index + 1);
+                laser.preview_y = 0.5f;
+                migrated = true;
+            }
         }
-        i = body.find('{', j);
     }
+    if (migrated) save_lasers_to_disk();
     std::cout << "[laser_daemon] Loaded " << G_lasers.size() << " laser(s) from " << LASERS_FILE << "\n";
 }
 
@@ -2301,6 +2324,8 @@ int main(int argc, char* argv[]) {
         { std::lock_guard<std::mutex> lk(G_lasers_mtx);
           l.id = G_next_laser_id++;
           l.name = json_str(req.body,"name"); if (l.name.empty()) l.name = "Laser " + std::to_string(l.id);
+                    l.preview_x = static_cast<float>(G_lasers.size() + 1) / static_cast<float>(G_lasers.size() + 2);
+                    l.preview_y = 0.5f;
           G_lasers.push_back(l);
         }
         save_lasers_to_disk();
@@ -2309,7 +2334,7 @@ int main(int argc, char* argv[]) {
 
     // ── POST /api/lasers/<id> — update name/ip/armed/zone calibration ──────────
     // Body: any of {"name", "ip", "armed":true|false, "zone_x", "zone_y",
-    // "zone_scale_x", "zone_scale_y"} - only fields present in the body are
+    // "zone_scale_x", "zone_scale_y", "preview_x", "preview_y"} - only fields present in the body are
     // changed. Setting "armed":true is what actually makes laser_thread()
     // connect to and stream this laser (see laser_thread()'s connect loop);
     // false disconnects/idles it. zone_x/zone_y/zone_scale_x/zone_scale_y
@@ -2329,6 +2354,8 @@ int main(int argc, char* argv[]) {
               l.zone_y       = json_float(req.body,"zone_y",l.zone_y);
               l.zone_scale_x = std::clamp(json_float(req.body,"zone_scale_x",l.zone_scale_x),0.1f,2.0f);
               l.zone_scale_y = std::clamp(json_float(req.body,"zone_scale_y",l.zone_scale_y),0.1f,2.0f);
+              l.preview_x    = std::clamp(json_float(req.body,"preview_x",l.preview_x),0.0f,1.0f);
+              l.preview_y    = std::clamp(json_float(req.body,"preview_y",l.preview_y),0.0f,1.0f);
               updated = l; found = true; break;
           } }
         if (!found) { res.status=404; res.set_content("{\"error\":\"unknown laser id\"}","application/json"); return; }

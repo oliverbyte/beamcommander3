@@ -106,7 +106,7 @@ const emit = defineEmits(['update:persistence'])
 
 const SHAPES = ['circle','line','triangle','square','wave','staticwave']
 const MOVES  = ['none','circle','pan','tilt','tiltup','tiltdown','eight','random']
-const persistenceMs = ref(5)
+const persistenceMs = ref(20)
 
 const connectedLaserCount = computed(() => lasers.filter(l => l.connected).length)
 
