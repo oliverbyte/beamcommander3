@@ -66,6 +66,8 @@
       <label>{{ lbl }} <span class="val">{{ fmt(laserState[key]) }}</span></label>
       <input type="range" :min="mn" :max="mx" :step="st" :value="laserState[key]" @input="push({[key]:+$event.target.value})" />
     </div>
+    <label title="Laser 1 uses 0°; each subsequent laser adds one phase step in Lasers-list order.">Phase step per laser (°) <span class="val">{{ fmt(laserState.move_phase_degrees) }}</span></label>
+    <input type="range" min="0" max="360" step="1" :value="laserState.move_phase_degrees" @input="push({ move_phase_degrees: +$event.target.value })" />
 
     <hr />
     <h2>Wave</h2>

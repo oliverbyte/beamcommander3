@@ -152,18 +152,23 @@ for how the packaged macOS/Windows builds are put together.
    settings), then click **Arm** on it. You'll see its dot turn green
    ("connected") once it's linked up. Any number of lasers can be armed at
    once — they all stream the exact same show in parallel. Each configured
-   laser appears as a marker in the preview; its beam is shown while armed
-   and hidden while disarmed. If no lasers are configured, a virtual beam
-   remains so you can still preview show settings. Also make sure
+   laser appears as its own labeled source and beam in the preview; its beam
+   is shown while armed and hidden while disarmed. Per-laser X mirroring is
+   reflected there too. If no lasers are configured, a virtual beam remains
+   so you can still preview show settings. Also make sure
    **Blackout** is off and **Output Gated** is switched to **Output Enabled**
    in the Settings panel — both must be open for any real laser light, as a
    deliberate safety default.
-   Every configured laser also appears as a labeled marker in the preview.
-   Drag markers to arrange them; new lasers default to a horizontal row, and
-   each position is saved with that laser's configuration.
+   Every configured laser appears as a labeled preview marker. Drag markers
+   to arrange them; positions are saved with each laser. In the **Lasers**
+   panel, drag the grip to change installation order; this also determines
+   MIDI laser numbering and movement phase offsets.
 3. **Play with the show**: pick a shape, drag the color picker, turn on
-   Rainbow, try a Movement pattern, adjust Speed/Size — every change is
-   instant, nothing needs to be "applied" or saved first.
+   Rainbow, try a Movement pattern, adjust Speed/Size, and set **Phase step
+   per laser** to spread that movement across the installation order. Laser 1
+   starts at 0°; each following laser adds one slider step (e.g. 90° staggers
+   four lasers evenly). Preview and hardware use the same phase offsets. Every
+   change is instant, nothing needs to be "applied" or saved first.
 4. **Flash / Blackout**: the ⚡ Flash button punches the beam to full white
    brightness while held, then returns to whatever it was showing before.
    Blackout forces the real laser dark (the on-screen preview keeps
@@ -175,7 +180,8 @@ for how the packaged macOS/Windows builds are put together.
    current look, then click any populated (green) slot any time to
    instantly recall it. Each populated slot shows a small live preview
    icon of its shape, color and motion (rotation, movement, rainbow, wave,
-   dotted look) so you can see what a cue looks like before recalling it.
+   dotted look) so you can see what a cue looks like before recalling it. The
+   active cue is outlined in bright green.
    Right-click a slot to clear it, or use "Move" to relocate a saved cue
    to a different slot.
 6. **Optional: MIDI controller or foot pedal** — if you plug in a USB MIDI
@@ -213,12 +219,16 @@ start.sh
 ```
 
 There is no Python and no separate daemon process — `laser_daemon` *is* the
-backend. It generates every frame once, streams it to the browser preview via
-WebSocket, and (for every armed laser that's connected) sends the same frame,
-transformed by that laser's own pan/zoom calibration, to that hardware in
-parallel. Preview and hardware output are decoupled: the preview keeps
-animating and responding to every parameter change even when no laser is
-connected.
+backend. It generates a shared show frame, or phase-offset frames per laser
+when movement phasing is enabled, streams those frames to the browser preview
+by laser ID, and sends the matching frame to each armed, connected laser with
+that laser's own pan/zoom calibration in parallel. The browser independently
+replays each received frame at the configured scan rate with a 20 ms eye-
+persistence fade and a subtle additive haze fan. Each source shares the same
+front-facing orientation; its position and X-mirror are per laser, and a
+disarmed laser keeps its marker/source but hides its beam. Preview and hardware
+output are decoupled: the preview keeps animating and responding to every
+parameter change even when no laser is connected.
 
 ## Quick start
 
@@ -272,6 +282,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /laser/rotation/speed/<v>` | Rotation speed in rotations/sec |
 | `POST /move/mode/<mode>` | `none`, `circle`, `pan`, `tilt`, `tiltup`, `tiltdown`, `eight`, `random` |
 | `POST /move/speed/<v>` / `/move/size/<v>` | Movement cycle speed / amplitude |
+| `POST /api/state` `move_phase_degrees` | Phase offset added per laser in configured order; laser 1 uses 0°, laser 2 uses 1× the value, laser 3 uses 2×, etc. Saved and recalled with cues |
 | `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow color blend / hue cycle speed |
 | `POST /blackout/<0\|1>` | Force *hardware* output dark (never affects the browser preview) |
 | `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate, *hardware-only* (never affects the browser preview - same treatment as blackout above): 1 = open instantly (renders the current brightness fader value), 0 = closed (fades to dark over `flash_release_ms`, or instantly if it's 0) — defaults **open**; `blackout` is the one safety gate that defaults on. Closing this only matters to rigs with a physical footswitch/pedal wired up. Never touches the `intensity` field itself |
@@ -281,6 +292,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /motion/hold/<0\|1>` | Momentary freeze: 1 = press (stops movement, rotation, and the rainbow hue cycle in place, remembering the prior speeds), 0 = release (restores them) |
 | `POST /rotation/reset` | Snap the rotation angle back to 0 and stop it spinning (sets `rotation_speed` to 0) |
 | `GET /api/lasers` | List every configured laser (DAC): `[ {"id","name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","preview_x","preview_y","connected"}, ...]` |
+| `POST /api/lasers/order` | Persist installation order: `{"ids":[3,1,2]}`; must contain every configured laser ID exactly once |
 | `POST /api/lasers` | Add a new laser: `{"name":"...","ip":"..."}` (`armed` defaults to `false`, i.e. configured but idle) |
 | `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","preview_x","preview_y"}` - setting `armed` to `true` connects + streams this laser's own zone-calibrated output, `false` disconnects/idles it. `mirror_x` flips this laser's output horizontally in hardware and preview. `zone_x`/`zone_y` (-1..1, offset) and `zone_scale_x`/`zone_scale_y` (0.1..2, independent per-axis scale) are this laser's own pan/zoom calibration - set by dragging in the Zoning panel. `preview_x`/`preview_y` (0..1) are its position in the browser preview and do not affect hardware output |
 | `DELETE /api/lasers/<id>` | Remove a laser |
@@ -289,12 +301,12 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the global `flash_release_ms` setting - see below) |
 | `POST /api/cue/<n>/clear` | Delete slot `n` |
 | `POST /api/cue/<from>/move/<to>` | Move slot `from`'s cue into slot `to` (overwriting it), clearing `from`. 404 if `from` is empty or `from == to` |
-| `WS /ws/points` | Live preview stream, `{"pts":[[x,y,r,g,b],...]}` at ~30fps |
+| `WS /ws/points` | Live preview stream, `{"pts":[[x,y,r,g,b],...]}` at ~30fps; when phase spreading is active, also includes `"laser_pts":{"<id>":[[x,y,r,g,b],...]}` for each configured laser |
 
 `POST /api/state` accepts a JSON body with any of: `shape`, `radius`, `points`,
 `rate_kpps`, `max_rate_kpps`, `intensity`, `flash_release_ms`, `r`, `g`, `b`,
 `shape_scale`, `pos_x`, `pos_y`, `rotation_speed`, `mirror_x`, `move_mode`,
-`move_speed`, `move_size`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
+`move_speed`, `move_size`, `move_phase_degrees`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
 `rainbow_amount`, `rainbow_speed`, `blackout`, `dot_amount`, `flicker_hz`.
 
 `flash_release_ms`, `intensity`, `blackout` and `max_rate_kpps` are *global*
@@ -304,17 +316,20 @@ when the cue was saved. `max_rate_kpps` also caps and defaults `rate_kpps` on
 the fader/REST/MIDI - turning it down lowers the scan-rate fader's usable
 range too.
 
-Each laser's own configuration (`armed`, `zone_x`/`zone_y`/`zone_scale_x`/
-`zone_scale_y`, `preview_x`/`preview_y` - see `/api/lasers` above) is also excluded from cue state for
-a similar reason — it's a physical connection/venue calibration, not a show
-look, so it survives cue saves/recalls and `/api/reset` untouched, and
-persists on its own in `lasers.json` (not `cues.json`).
+Each laser's own configuration (`armed`, `mirror_x`, zone calibration,
+preview position, and installation order - see `/api/lasers` above) is
+excluded from cue state because it is physical setup, not a show look. It
+survives cue saves/recalls and `/api/reset` untouched, and persists in
+`lasers.json`. `move_phase_degrees`, by contrast, is part of the show state
+and is saved/recalled with cues.
 
 ## Multi-client sync
 
 The frontend polls `GET /api/state` every second, so if you change settings
 from another browser tab or via `curl`, all connected UIs pick up the change
-automatically.
+automatically. UI changes are applied optimistically, and responses from
+older in-flight state requests are ignored so a slow response cannot undo a
+newer move-pattern selection.
 
 ## MIDI control (optional)
 

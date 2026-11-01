@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BeamCommander3 — Laser Show Control for Laser Operators</title>
-  <meta name="description" content="BeamCommander3 is a free, open-source laser show controller for laser operators: live shapes, colors, movement, cues, multi-laser zoning, and MIDI control from a web page — no coding needed.">
+  <meta name="description" content="BeamCommander3 is a free, open-source laser show controller: live multi-laser preview, phase-offset movement, 128 cues, per-laser zoning, and MIDI control from a web page.">
   <meta property="og:title" content="BeamCommander3 — Laser Show Control for Laser Operators">
-  <meta property="og:description" content="Run a real laser show from any browser: shapes, colors, movement, 128 saved cues, multi-laser zoning, and MIDI/foot pedal control. Free & open source.">
+  <meta property="og:description" content="Run a real laser show from any browser: movable per-laser previews, ordered phase-offset movement, 128 saved cues, zoning, and MIDI/foot pedal control. Free & open source.">
   <meta property="og:image" content="img/screenshot-background.png">
   <meta property="og:type" content="website">
   <link rel="stylesheet" href="style.css">
@@ -33,9 +33,9 @@
     <div class="container">
       <h1>Laser Show Control, Built for Laser Operators</h1>
       <p class="subtitle">
-        BeamCommander3 drives a real laser projector and gives you a live web page to control
-        shapes, colors, movement, and 128 instantly-recallable cues — with optional MIDI
-        controller or foot pedal support. No coding needed.
+        BeamCommander3 drives real laser projectors and gives you a live web page to control
+        shapes, colors, per-laser movement phases, and 128 instantly-recallable cues — with
+        optional MIDI controller or foot pedal support. No coding needed.
       </p>
       <div class="badges">
         <span class="badge">💎 Free &amp; Open Source</span>
@@ -96,22 +96,27 @@
         <div class="feature-card">
           <span class="icon">🔷</span>
           <h3>Shapes &amp; Live Preview</h3>
-          <p>Pick a shape, drag the color picker, adjust size/speed — the on-screen preview always shows exactly what the laser is outputting, even with nothing armed.</p>
+          <p>See a separate movable beam source for every configured laser. Preview beams follow per-laser mirroring and armed state, extend to the viewport edge, and keep running when hardware is disconnected.</p>
         </div>
         <div class="feature-card">
           <span class="icon">🌈</span>
           <h3>Color, Rainbow &amp; Movement</h3>
-          <p>Static colors or animated rainbow cycling, plus movement patterns — all adjustable instantly, nothing needs to be "applied" first.</p>
+          <p>Static colors or animated rainbow cycling, plus circle, pan, tilt, eight, and other movement patterns — all adjustable instantly.</p>
+        </div>
+        <div class="feature-card">
+          <span class="icon">〰️</span>
+          <h3>Movement Phasing</h3>
+          <p>Set a phase step per laser to stagger a shared movement pattern across the installation order. Laser 1 starts at 0°; each following laser adds one step.</p>
         </div>
         <div class="feature-card">
           <span class="icon">💾</span>
           <h3>128 Cue Slots</h3>
-          <p>Save the current look to a slot and recall it instantly later, in a maximizable, resizable 16x8 grid. Each populated cue shows a small live preview icon of its shape, color and motion.</p>
+          <p>Save and recall looks in a resizable 16x8 grid. Cue icons preview shape, color, and motion; the cue matching the current show is outlined in bright green.</p>
         </div>
         <div class="feature-card">
           <span class="icon">🔌</span>
           <h3>Multi-Laser Support</h3>
-          <p>Add any number of lasers by name and IP, arm them independently, and stream the same show to all of them in parallel — with live connection status.</p>
+          <p>Add lasers by name and IP, arm them independently, and drag to reorder. Installation order controls phase offsets and MIDI numbering; connection and armed status stay in sync across panels.</p>
         </div>
         <div class="feature-card">
           <span class="icon">🗺️</span>

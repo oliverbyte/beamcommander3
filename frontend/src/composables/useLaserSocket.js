@@ -23,6 +23,7 @@ export const laserState = reactive({
   move_mode:       'none',
   move_speed:      0.3,
   move_size:       0.5,
+  move_phase_degrees: 0,
   // Wave
   wave_frequency:  1.0,
   wave_amplitude:  0.45,
@@ -113,12 +114,31 @@ function applyState(s) {
   Object.assign(laserState, s)
 }
 
+// Guards against out-of-order network responses: if two state-mutating
+// requests are in flight at once (e.g. two quick clicks, each sent 80ms
+// apart but with overlapping round trips), nothing guarantees the FIRST
+// request's response arrives first too. Applying whichever response
+// resolves last - regardless of which request was actually issued last -
+// could silently revert a newer, already-applied value back to a stale
+// one. Each state-mutating call below grabs a ticket via nextStateSeq()
+// before awaiting its request, then only calls applyState() if no newer
+// request has been issued meanwhile (seq still matches); a now-stale
+// response is discarded instead of overwriting the correct current state.
+let stateSeq = 0
+function nextStateSeq() { return ++stateSeq }
+function applyStateIfCurrent(seq, s) {
+  if (seq === stateSeq) applyState(s)
+}
+
 // Guards against the background poll clobbering an optimistic local edit
 // that's still in flight (debounce + network round trip). Any local mutation
 // calls markLocalChange(); polled responses are ignored for a short window
 // afterwards so the just-changed value doesn't visibly "bounce back".
 let lastLocalChangeAt = 0
-export function markLocalChange() { lastLocalChangeAt = Date.now() }
+export function markLocalChange() {
+  lastLocalChangeAt = Date.now()
+  nextStateSeq()
+}
 
 function applyPolledState(s) {
   if (!s) return
@@ -134,12 +154,14 @@ export async function fetchState() {
 
 export async function updateState(partial) {
   markLocalChange()
-  applyState(await api('/state', { method: 'POST', body: JSON.stringify(partial) }))
+  const seq = nextStateSeq()
+  applyStateIfCurrent(seq, await api('/state', { method: 'POST', body: JSON.stringify(partial) }))
 }
 
 export async function resetState() {
   markLocalChange()
-  applyState(await api('/reset', { method: 'POST' }))
+  const seq = nextStateSeq()
+  applyStateIfCurrent(seq, await api('/reset', { method: 'POST' }))
 }
 
 export async function setShape(shape) {
@@ -150,7 +172,8 @@ export async function setShape(shape) {
 
 export async function setBrightness(v) {
   markLocalChange()
-  applyState(await laser(`/brightness/${v}`, { method: 'POST' }))
+  const seq = nextStateSeq()
+  applyStateIfCurrent(seq, await laser(`/brightness/${v}`, { method: 'POST' }))
 }
 
 // ── Lasers (DACs) ────────────────────────────────────────────────────────────
@@ -201,6 +224,21 @@ export async function deleteLaser(id) {
   await fetchLasers()
 }
 
+export async function reorderLasers(ids) {
+  markLaserLocalChange()
+  const byId = new Map(lasers.map((entry) => [entry.id, entry]))
+  const ordered = ids.map((id) => byId.get(Number(id))).filter(Boolean)
+  if (ordered.length !== lasers.length) throw new Error('Laser order must include every configured laser')
+  applyLasers(ordered)
+  try {
+    await api('/lasers/order', { method: 'POST', body: JSON.stringify({ ids: ordered.map((entry) => entry.id) }) })
+    await fetchLasers()
+  } catch (error) {
+    await fetchLasers().catch(() => {})
+    throw error
+  }
+}
+
 // Momentary flash: forces color to white *and* full brightness only while
 // held, restores the exact prior color and brightness on release - mirrors
 // the MIDI "flash" button (including a footswitch) so it behaves
@@ -208,11 +246,13 @@ export async function deleteLaser(id) {
 // transient action, not a persisted field.
 export async function flashPress() {
   markLocalChange()
-  applyState(await (await fetch('/flash/1', { method: 'POST' })).json())
+  const seq = nextStateSeq()
+  applyStateIfCurrent(seq, await (await fetch('/flash/1', { method: 'POST' })).json())
 }
 export async function flashRelease() {
   markLocalChange()
-  applyState(await (await fetch('/flash/0', { method: 'POST' })).json())
+  const seq = nextStateSeq()
+  applyStateIfCurrent(seq, await (await fetch('/flash/0', { method: 'POST' })).json())
 }
 
 // Opens/closes the master brightness gate (see laserState.brightness_gate_open
@@ -220,7 +260,8 @@ export async function flashRelease() {
 // CC64. Unlike flash, this is a persistent toggle, not momentary.
 export async function setBrightnessGate(open) {
   markLocalChange()
-  applyState(await (await fetch(`/brightness/gate/${open ? 1 : 0}`, { method: 'POST' })).json())
+  const seq = nextStateSeq()
+  applyStateIfCurrent(seq, await (await fetch(`/brightness/gate/${open ? 1 : 0}`, { method: 'POST' })).json())
 }
 
 // ── Cue save/recall ─────────────────────────────────────────────────────────────
@@ -241,7 +282,8 @@ export async function saveCue(n) {
 
 export async function recallCue(n) {
   markLocalChange()
-  applyState(await api(`/cue/${n}/recall`, { method: 'POST' }))
+  const seq = nextStateSeq()
+  applyStateIfCurrent(seq, await api(`/cue/${n}/recall`, { method: 'POST' }))
 }
 
 export async function clearCue(n) {

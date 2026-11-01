@@ -5,10 +5,26 @@
         address, then arm it to start streaming the show to it. Any number
         of lasers can be armed at once - they all output the exact same
         show in parallel (Zone 1), each transformed by its own calibration
-        set in the Zoning panel.</p>
+        set in the Zoning panel. Drag the grip to change installation order;
+        movement phase offsets follow that order.</p>
 
       <div class="laser-list">
-        <div v-for="l in lasers" :key="l.id" class="laser-row">
+        <div
+          v-for="l in lasers"
+          :key="l.id"
+          class="laser-row"
+          :class="{ 'drop-target': dropTargetId === l.id }"
+          @dragover.prevent="onDragOver($event, l.id)"
+          @drop.prevent="onDrop($event, l.id)"
+        >
+          <span
+            class="drag-handle"
+            draggable="true"
+            :title="`Drag to reorder ${l.name}`"
+            :aria-label="`Drag to reorder ${l.name}`"
+            @dragstart.stop="onDragStart($event, l.id)"
+            @dragend="onDragEnd"
+          >⠿</span>
           <span class="dot" :class="{ on: l.connected }" :title="l.connected ? 'connected' : 'not connected'"></span>
           <input
             class="name"
@@ -64,13 +80,15 @@
 // arming more lasers never adds lag to the ones already streaming. Each
 // laser's own pan/zoom calibration is set separately, in the Zoning panel.
 import { ref, onMounted } from 'vue'
-import { lasers, fetchLasers, addLaser, updateLaser, deleteLaser } from '../composables/useLaserSocket.js'
+import { lasers, fetchLasers, addLaser, updateLaser, deleteLaser, reorderLasers } from '../composables/useLaserSocket.js'
 
 const { popout } = defineProps({ popout: { type: Boolean, default: false } })
 
 const newName = ref('')
 const newIp = ref('')
 const error = ref(null)
+const draggedId = ref(null)
+const dropTargetId = ref(null)
 
 onMounted(() => { fetchLasers().catch(() => {}) })
 
@@ -101,6 +119,33 @@ async function toggleMirror(l) {
 async function onDelete(l) {
   try { await deleteLaser(l.id); error.value = null } catch (e) { error.value = String(e) }
 }
+
+function onDragStart(event, id) {
+  draggedId.value = id
+  event.dataTransfer.effectAllowed = 'move'
+  event.dataTransfer.setData('text/plain', String(id))
+}
+function onDragOver(event, id) {
+  if (draggedId.value == null || draggedId.value === id) return
+  event.dataTransfer.dropEffect = 'move'
+  dropTargetId.value = id
+}
+async function onDrop(event, targetId) {
+  const sourceId = Number(event.dataTransfer.getData('text/plain')) || draggedId.value
+  const ids = lasers.map((laser) => laser.id)
+  const sourceIndex = ids.indexOf(sourceId)
+  const targetIndex = ids.indexOf(targetId)
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return
+  ids.splice(sourceIndex, 1)
+  ids.splice(sourceIndex < targetIndex ? targetIndex - 1 : targetIndex, 0, sourceId)
+  try { await reorderLasers(ids); error.value = null }
+  catch (e) { error.value = String(e) }
+  onDragEnd()
+}
+function onDragEnd() {
+  draggedId.value = null
+  dropTargetId.value = null
+}
 </script>
 
 <style scoped>
@@ -126,6 +171,9 @@ h2 { font-size:10px; letter-spacing:1.5px; text-transform:uppercase; margin:8px 
   background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.1);
   border-radius:6px; padding:5px 6px;
 }
+.laser-row.drop-target { border-color:#48e07a; background:rgba(72,224,122,0.1); }
+.drag-handle { color:#8a90a8; cursor:grab; font-size:14px; line-height:1; user-select:none; }
+.drag-handle:active { cursor:grabbing; }
 .dot { width:7px; height:7px; border-radius:50%; background:#703030; flex-shrink:0; }
 .dot.on { background:#48e07a; }
 .empty { font-size:11px; color:#6a7090; }

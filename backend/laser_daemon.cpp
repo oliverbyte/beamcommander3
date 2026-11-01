@@ -188,6 +188,7 @@ struct LaserState {
     std::string move_mode = "none";   // none circle pan tilt tiltup tiltdown eight random
     float move_speed      = 0.30f;    // cycles/sec
     float move_size       = 0.50f;    // 0..6
+    float move_phase_degrees = 0.0f;  // additional phase per configured laser, degrees
 
     // Wave shape params
     float wave_frequency  = 1.0f;     // cycles across width
@@ -437,9 +438,11 @@ static void rotate_pts(std::vector<Pt>& pts, float angle) {
     for (auto& p : pts) { float nx=p.x*c-p.y*sv; p.y=p.x*sv+p.y*c; p.x=nx; }
 }
 
-static Pt calc_movement(const LaserState& s) {
+static Pt calc_movement(const LaserState& s, double phase_value) {
     if (s.move_mode == "none") return {0.0f,0.0f};
-    float phase = (float)G_move_phase;
+    const float tau = 2.0f * std::acos(-1.0f);
+    float phase = std::fmod((float)phase_value, tau);
+    if (phase < 0.0f) phase += tau;
     float amp   = s.move_size * 0.6f; // fraction of canvas
     if (s.move_mode=="circle")  return {amp*std::cos(phase), amp*std::sin(phase)};
     if (s.move_mode=="pan")     return {amp*std::sin(phase), 0.0f};
@@ -451,14 +454,12 @@ static Pt calc_movement(const LaserState& s) {
         // "re-enters" from the bottom once it exits the top of the screen.
         // G_move_phase is already kept in [0,tau) via fmod (see the phase
         // update loop below), so a plain linear map of that range is enough.
-        const float tau = 2.0f * std::acos(-1.0f);
         return {0.0f, amp*(2.0f*(phase/tau) - 1.0f)};
     }
     if (s.move_mode=="tiltdown") {
         // Mirror of tiltup: falls linearly from the top (+amp) to the
         // bottom (-amp) as phase runs 0..tau, then wraps instantly back to
         // the top - re-enters from the top once it exits the bottom.
-        const float tau = 2.0f * std::acos(-1.0f);
         return {0.0f, amp*(1.0f - 2.0f*(phase/tau))};
     }
     if (s.move_mode=="eight")   return {amp*std::sin(phase), amp*std::sin(2*phase)};
@@ -479,7 +480,7 @@ static void hsv_to_rgb(float h, float s, float v, float& r, float& g, float& b) 
     }
 }
 
-static core::Frame make_frame(const LaserState& s) {
+static core::Frame make_frame(const LaserState& s, double movement_phase) {
     auto base = gen_base_shape(s);
 
     // Rotation - always applied at the current phase, even when
@@ -497,7 +498,7 @@ static core::Frame make_frame(const LaserState& s) {
     // above), not the raw target s.pos_x/s.pos_y directly, so manual moves
     // - especially MIDI, whose 7-bit knobs would otherwise visibly step -
     // glide instead of jumping.
-    Pt mv = calc_movement(s);
+    Pt mv = calc_movement(s, movement_phase);
     float ox = G_pos_x_smooth + mv.x;
     float oy = G_pos_y_smooth + mv.y;
 
@@ -697,15 +698,32 @@ static core::Frame make_frame(const LaserState& s) {
 }
 
 // ── JSON helpers ───────────────────────────────────────────────────────────────
-static std::string frame_to_ws_json(const core::Frame& fr) {
+static std::string frame_to_ws_json(const core::Frame& fr,
+                                    const std::vector<std::pair<int, core::Frame>>& laserFrames) {
     std::ostringstream ss;
-    ss << std::fixed << std::setprecision(4) << "{\"pts\":[";
-    for (std::size_t i=0;i<fr.points.size();++i) {
-        if (i) ss<<',';
-        const auto& p=fr.points[i];
-        ss<<'['<<p.x<<','<<p.y<<','<<p.r<<','<<p.g<<','<<p.b<<']';
+    ss << std::fixed << std::setprecision(4);
+    auto writePoints = [&](const core::Frame& frame) {
+        ss << "[";
+        for (std::size_t i=0;i<frame.points.size();++i) {
+            if (i) ss<<',';
+            const auto& p=frame.points[i];
+            ss<<'['<<p.x<<','<<p.y<<','<<p.r<<','<<p.g<<','<<p.b<<']';
+        }
+        ss << "]";
+    };
+    ss << "{\"pts\":";
+    writePoints(fr);
+    if (!laserFrames.empty()) {
+        ss << ",\"laser_pts\":{";
+        for (std::size_t i=0;i<laserFrames.size();++i) {
+            if (i) ss << ',';
+            ss << '\"' << laserFrames[i].first << "\":";
+            writePoints(laserFrames[i].second);
+        }
+        ss << "}";
     }
-    ss << "]}"; return ss.str();
+    ss << "}";
+    return ss.str();
 }
 
 static std::string state_to_json() {
@@ -730,6 +748,7 @@ static std::string state_to_json() {
        << "\"move_mode\":\""   << G.move_mode      << "\","
        << "\"move_speed\":"    << G.move_speed     << ","
        << "\"move_size\":"     << G.move_size      << ","
+    << "\"move_phase_degrees\":" << G.move_phase_degrees << ","
        << "\"wave_frequency\":" << G.wave_frequency << ","
        << "\"wave_amplitude\":" << G.wave_amplitude << ","
        << "\"wave_speed\":"    << G.wave_speed     << ","
@@ -938,55 +957,52 @@ static void laser_thread() {
         }
 
         LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap = G; }
-        auto frame = make_frame(snap);
+        auto frame = make_frame(snap, G_move_phase);
+        std::vector<std::pair<int, core::Frame>> laserFrames;
+        const double phaseStep = snap.move_phase_degrees * (std::acos(-1.0) / 180.0);
+        if (snap.move_mode != "none" && std::abs(phaseStep) > 1e-9 && !lasers_snapshot.empty()) {
+            laserFrames.reserve(lasers_snapshot.size());
+            laserFrames.emplace_back(lasers_snapshot[0].id, frame);
+            for (std::size_t i = 1; i < lasers_snapshot.size(); ++i) {
+                const double laserPhase = G_move_phase + static_cast<double>(i) * phaseStep;
+                laserFrames.emplace_back(lasers_snapshot[i].id, make_frame(snap, laserPhase));
+            }
+        }
 
         if (previewDue) {
             last_preview = now_tp;
-            ws_broadcast(frame_to_ws_json(frame));
+            ws_broadcast(frame_to_ws_json(frame, laserFrames));
         }
 
         if (anyHardwareReady) {
-            // Blackout and the footswitch brightness gate only ever
-            // suppress/dim the *real* laser output, never the browser
-            // preview (which already got the true, full-brightness `frame`
-            // above) - computed once here as the shared "what actually goes
-            // to hardware" base frame (before each laser's own zone
-            // transform below), keeping the same point positions (safety-
-            // relevant for some controllers) but scaling/zeroing every
-            // channel's color. Blackout wins outright (full zero);
-            // otherwise the gate's current fade level (1.0 = fully open,
-            // decaying to 0.0 while closed/closing - see g_gate_level's
-            // comment) is applied as a multiplier.
-            core::Frame outFrame = frame;
-            if (snap.blackout) {
-                for (auto& p : outFrame.points) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
-            } else if (g_gate_level < 1.0f) {
-                for (auto& p : outFrame.points) {
-                    p.r *= g_gate_level; p.g *= g_gate_level; p.b *= g_gate_level;
-                }
-            }
-
-            // Fan the same base frame out to every armed+ready controller
-            // in parallel, applying *that laser's own* zone pan/zoom to its
-            // copy just before sending - see LaserConfig::zone_x/zone_y/
-            // zone_scale_x/zone_scale_y's comment: each physical laser can
-            // be calibrated to a different sub-region of its own range even
-            // though they're all showing the exact same content. Never
-            // applied to the browser preview (which already got the true,
-            // un-zoned `frame` above). Horizontal/vertical scale are
-            // independent per laser, and - same reasoning as make_frame()'s
-            // own off-screen handling - anything the zone pushes outside
-            // that laser's +-1 range is blanked (not clamped) rather than
-            // pinned/smeared against the edge.
+            // Each controller gets the frame for its configured list index;
+            // global blackout/gate and per-laser zone transforms are then
+            // applied only to that hardware-bound copy.
             for (auto& [id, rt] : runtimes) {
                 if (!rt.ctrl) continue;
                 if (!(rt.ctrl->isReadyForNewFrame() && (now_tp - rt.last_hw_send) >= 20ms)) continue;
                 rt.last_hw_send = now_tp;
 
                 const LaserConfig* cfg = nullptr;
-                for (const auto& l : lasers_snapshot) if (l.id == id) { cfg = &l; break; }
+                for (std::size_t i = 0; i < lasers_snapshot.size(); ++i) {
+                    if (lasers_snapshot[i].id == id) { cfg = &lasers_snapshot[i]; break; }
+                }
 
-                core::Frame toSend = outFrame;
+                const core::Frame* phaseFrame = &frame;
+                if (!laserFrames.empty()) {
+                    const int laserId = id;
+                    auto it = std::find_if(laserFrames.begin(), laserFrames.end(),
+                                           [laserId](const auto& item) { return item.first == laserId; });
+                    if (it != laserFrames.end()) phaseFrame = &it->second;
+                }
+                core::Frame toSend = *phaseFrame;
+                if (snap.blackout) {
+                    for (auto& p : toSend.points) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
+                } else if (g_gate_level < 1.0f) {
+                    for (auto& p : toSend.points) {
+                        p.r *= g_gate_level; p.g *= g_gate_level; p.b *= g_gate_level;
+                    }
+                }
                 if (cfg && (cfg->mirror_x || cfg->zone_scale_x != 1.0f || cfg->zone_scale_y != 1.0f ||
                             cfg->zone_x != 0.0f || cfg->zone_y != 0.0f)) {
                     for (auto& p : toSend.points) {
@@ -1029,6 +1045,26 @@ static bool json_bool(const std::string& b,const std::string& k,bool d) {
     return d;
 }
 static int json_int(const std::string& b,const std::string& k,int d){ return (int)json_float(b,k,(float)d); }
+static bool json_int_array(const std::string& body,const std::string& key,std::vector<int>& values) {
+    auto keyPos = body.find("\"" + key + "\"");
+    if (keyPos == std::string::npos) return false;
+    auto begin = body.find('[', keyPos);
+    auto end = begin == std::string::npos ? std::string::npos : body.find(']', begin);
+    if (begin == std::string::npos || end == std::string::npos) return false;
+    std::stringstream items(body.substr(begin + 1, end - begin - 1));
+    values.clear();
+    while (true) {
+        items >> std::ws;
+        if (items.eof()) return true;
+        int value;
+        if (!(items >> value)) return false;
+        values.push_back(value);
+        items >> std::ws;
+        if (items.eof()) return true;
+        char comma;
+        if (!(items >> comma) || comma != ',') return false;
+    }
+}
 
 // ── Laser (DAC) list persistence ────────────────────────────────────────────
 // See struct LaserConfig's comment (near G_lasers) for the data model. Same
@@ -1163,6 +1199,7 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"move_mode\":\""   << s.move_mode     << "\","
        << "\"move_speed\":"    << s.move_speed    << ","
        << "\"move_size\":"     << s.move_size     << ","
+    << "\"move_phase_degrees\":" << s.move_phase_degrees << ","
        << "\"wave_frequency\":" << s.wave_frequency << ","
        << "\"wave_amplitude\":" << s.wave_amplitude << ","
        << "\"wave_speed\":"    << s.wave_speed    << ","
@@ -1192,6 +1229,7 @@ static LaserState cue_state_from_json(const std::string& obj) {
     auto mv = json_str(obj,"move_mode");  if(!mv.empty()) s.move_mode = mv;
     s.move_speed      = json_float(obj,"move_speed",s.move_speed);
     s.move_size       = json_float(obj,"move_size",s.move_size);
+    s.move_phase_degrees = json_float(obj,"move_phase_degrees",s.move_phase_degrees);
     s.wave_frequency  = json_float(obj,"wave_frequency",s.wave_frequency);
     s.wave_amplitude  = json_float(obj,"wave_amplitude",s.wave_amplitude);
     s.wave_speed      = json_float(obj,"wave_speed",s.wave_speed);
@@ -2135,6 +2173,7 @@ int main(int argc, char* argv[]) {
         APPLY_B("mirror_x",mirror_x)
         APPLY_F("move_speed",move_speed)
         APPLY_F("move_size",move_size) APPLY_CLAMP("move_size",move_size,0,6)
+        APPLY_F("move_phase_degrees",move_phase_degrees) APPLY_CLAMP("move_phase_degrees",move_phase_degrees,0,360)
         APPLY_F("wave_frequency",wave_frequency)
         APPLY_F("wave_amplitude",wave_amplitude) APPLY_CLAMP("wave_amplitude",wave_amplitude,0,1)
         APPLY_F("wave_speed",wave_speed)
@@ -2313,6 +2352,35 @@ int main(int argc, char* argv[]) {
         for (std::size_t i=0;i<snapshot.size();++i) { if(i) ss<<","; ss<<laser_config_to_json(snapshot[i]); }
         ss << "]";
         res.set_content(ss.str(),"application/json");
+    });
+
+    // ── POST /api/lasers/order — persist installation order ───────────────────
+    // Body: {"ids":[3,1,2]} - must contain every configured laser exactly once.
+    svr.Post("/api/lasers/order",[](const httplib::Request& req,httplib::Response& res){
+        std::vector<int> ids;
+        if (!json_int_array(req.body, "ids", ids)) {
+            res.status=400; res.set_content("{\"error\":\"invalid laser order\"}","application/json"); return;
+        }
+        bool valid = false;
+        {
+            std::lock_guard<std::mutex> lk(G_lasers_mtx);
+            if (ids.size() == G_lasers.size()) {
+                std::set<int> seen;
+                std::vector<LaserConfig> reordered;
+                reordered.reserve(ids.size());
+                valid = true;
+                for (int id : ids) {
+                    auto it = std::find_if(G_lasers.begin(), G_lasers.end(),
+                                           [&](const LaserConfig& l) { return l.id == id; });
+                    if (it == G_lasers.end() || !seen.insert(id).second) { valid = false; break; }
+                    reordered.push_back(*it);
+                }
+                if (valid) G_lasers = std::move(reordered);
+            }
+        }
+        if (!valid) { res.status=400; res.set_content("{\"error\":\"order must contain every laser once\"}","application/json"); return; }
+        save_lasers_to_disk();
+        res.set_content("{\"ok\":true}","application/json");
     });
 
     // ── POST /api/lasers — add a new laser (DAC) ────────────────────────────────
