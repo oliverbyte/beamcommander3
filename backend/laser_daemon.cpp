@@ -1801,6 +1801,8 @@ static MIDIClientRef   g_midi_client   = 0;
 static MIDIPortRef     g_midi_in_port  = 0;
 static MIDIPortRef     g_midi_out_port = 0;
 static MIDIEndpointRef g_midi_out_dest = 0; // 0 = no output destination found yet
+static std::string     g_midi_out_dest_name;
+static bool            g_midi_led_wait_logged = false;
 
 // Sends a Note On (velocity>0) or Note Off (velocity 0) for (channel, note)
 // back to the controller, if an output destination has been found (see
@@ -1812,14 +1814,31 @@ static MIDIEndpointRef g_midi_out_dest = 0; // 0 = no output destination found y
 // back lets us force the LED to reflect our own toggle state instead
 // (lit while active, off otherwise) rather than the controller's default
 // light-on-press-only behavior.
-static void send_note(unsigned char channel, unsigned char note, unsigned char velocity) {
-    if (!g_midi_out_dest || !g_midi_out_port) return;
+static bool send_note(unsigned char channel, unsigned char note, unsigned char velocity) {
+    if (!g_midi_out_port || !g_midi_out_dest) {
+        if (!g_midi_led_wait_logged) {
+            std::cout << "[midi-led] send skipped: output port/destination unavailable (port="
+                      << (g_midi_out_port ? "yes" : "no") << ", destination="
+                      << (g_midi_out_dest ? "yes" : "no") << ")\n" << std::flush;
+            g_midi_led_wait_logged = true;
+        }
+        return false;
+    }
     Byte msg[3] = { (Byte)((velocity > 0 ? 0x90 : 0x80) | (channel & 0x0F)), note, velocity };
     Byte buffer[64];
     MIDIPacketList* pktlist = reinterpret_cast<MIDIPacketList*>(buffer);
     MIDIPacket* packet = MIDIPacketListInit(pktlist);
     packet = MIDIPacketListAdd(pktlist, sizeof(buffer), packet, 0, 3, msg);
-    if (packet) MIDISend(g_midi_out_port, g_midi_out_dest, pktlist);
+    if (!packet) {
+        std::cout << "[midi-led] packet allocation failed for ch=" << (int)channel
+                  << " note=" << (int)note << " velocity=" << (int)velocity << "\n" << std::flush;
+        return false;
+    }
+    const OSStatus status = MIDISend(g_midi_out_port, g_midi_out_dest, pktlist);
+    std::cout << "[midi-led] send ch=" << (int)channel << " note=" << (int)note
+              << " velocity=" << (int)velocity << " destination='" << g_midi_out_dest_name
+              << "' status=" << status << "\n" << std::flush;
+    return status == noErr;
 }
 
 // Forward-declared (defined further down, just before midi_thread()) so
@@ -1907,6 +1926,16 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
                             }
                             send_note(channel, d1, mirrored ? 127 : 0);
                         }
+                        if (match.action.rfind("laser_toggle:",0)==0) {
+                            int n = 0; try { n = std::stoi(match.action.substr(13)); } catch (...) { n = 0; }
+                            bool armed = false;
+                            if (n > 0) {
+                                std::lock_guard<std::mutex> lk(G_lasers_mtx);
+                                const int idx = n - 1;
+                                if (idx >= 0 && idx < static_cast<int>(G_lasers.size())) armed = G_lasers[idx].armed;
+                            }
+                            send_note(channel, d1, armed ? 127 : 0);
+                        }
                     } else {
                         midi_apply_cc_action(match.action, midi_cc_value(match, d2, channel));
                     }
@@ -1946,6 +1975,7 @@ static void midi_read_proc(const MIDIPacketList* pktlist, void*, void*) {
 // controller even when the color doesn't change, which looked like
 // constant blinking.
 static std::map<int, bool> g_last_mirror_led; // keyed by laser's 1-based position (matches laser_mirror_toggle:<n>)
+static std::map<int, bool> g_last_armed_led;
 static void sync_mirror_leds() {
     std::vector<std::pair<int, bool>> current; // (1-based position, mirror_x)
     {
@@ -1956,13 +1986,35 @@ static void sync_mirror_leds() {
     for (auto& [n, mirrored] : current) {
         auto it = g_last_mirror_led.find(n);
         if (it != g_last_mirror_led.end() && it->second == mirrored) continue;
-        g_last_mirror_led[n] = mirrored;
         std::string action = "laser_mirror_toggle:" + std::to_string(n);
         std::lock_guard<std::mutex> lk(G_midi_mtx);
         for (auto& b : G_midi_bindings) {
-            if (b.type == "note" && b.action == action && b.channel >= 0)
-                send_note((unsigned char)b.channel, (unsigned char)b.number, mirrored ? 127 : 0);
+            if (b.type == "note" && b.action == action && b.channel >= 0 &&
+                send_note((unsigned char)b.channel, (unsigned char)b.number, mirrored ? 127 : 0))
+                g_last_mirror_led[n] = mirrored;
         }
+    }
+}
+
+static void sync_armed_leds() {
+    std::vector<std::pair<int, bool>> current;
+    {
+        std::lock_guard<std::mutex> lk(G_lasers_mtx);
+        for (std::size_t i = 0; i < G_lasers.size(); ++i)
+            current.emplace_back(static_cast<int>(i) + 1, G_lasers[i].armed);
+    }
+    std::vector<MidiBinding> bindings;
+    { std::lock_guard<std::mutex> lk(G_midi_mtx); bindings = G_midi_bindings; }
+    for (const auto& [n, armed] : current) {
+        auto it = g_last_armed_led.find(n);
+        if (it != g_last_armed_led.end() && it->second == armed) continue;
+        const std::string action = "laser_toggle:" + std::to_string(n);
+        bool sent = false;
+        for (const auto& b : bindings) {
+            if (b.type == "note" && b.action == action && b.channel >= 0)
+                sent = send_note(static_cast<unsigned char>(b.channel), static_cast<unsigned char>(b.number), armed ? 127 : 0) || sent;
+        }
+        if (sent) g_last_armed_led[n] = armed;
     }
 }
 
@@ -1995,8 +2047,8 @@ static void sync_group_leds(const std::string& prefix, const std::function<int(c
         bool forced = (b.channel == forceChannel && b.number == forceNumber);
         auto it = g_last_group_led.find(key);
         if (!forced && it != g_last_group_led.end() && it->second == velocity) continue;
-        g_last_group_led[key] = velocity;
-        send_note((unsigned char)b.channel, (unsigned char)b.number, (unsigned char)velocity);
+        if (send_note((unsigned char)b.channel, (unsigned char)b.number, (unsigned char)velocity))
+            g_last_group_led[key] = velocity;
     }
 }
 
@@ -2028,6 +2080,71 @@ static void sync_shape_color_move_leds(int forceChannel, int forceNumber) {
     }, forceChannel, forceNumber);
 }
 
+static void find_midi_output_destination() {
+    if (!g_midi_out_port) return;
+    const ItemCount destinationCount = MIDIGetNumberOfDestinations();
+    const ItemCount sourceCount = MIDIGetNumberOfSources();
+    static bool waitingLogged = false;
+    MIDIEndpointRef bestDestination = 0;
+    std::string bestName;
+    int bestScore = -1;
+    for (ItemCount i = 0; i < sourceCount; ++i) {
+        MIDIEndpointRef source = MIDIGetSource(i);
+        CFStringRef sourceNameRef = nullptr;
+        MIDIObjectGetStringProperty(source, kMIDIPropertyDisplayName, &sourceNameRef);
+        char sourceName[256] = "?";
+        if (sourceNameRef) {
+            CFStringGetCString(sourceNameRef, sourceName, sizeof(sourceName), kCFStringEncodingUTF8);
+            CFRelease(sourceNameRef);
+        }
+        const std::string inputName(sourceName);
+        if (inputName.find("IAC") != std::string::npos) continue;
+        for (ItemCount j = 0; j < destinationCount; ++j) {
+            MIDIEndpointRef destination = MIDIGetDestination(j);
+            CFStringRef destinationNameRef = nullptr;
+            MIDIObjectGetStringProperty(destination, kMIDIPropertyDisplayName, &destinationNameRef);
+            char destinationName[256] = "?";
+            if (destinationNameRef) {
+                CFStringGetCString(destinationNameRef, destinationName, sizeof(destinationName), kCFStringEncodingUTF8);
+                CFRelease(destinationNameRef);
+            }
+            const std::string outputName(destinationName);
+            if (outputName != inputName || outputName.find("IAC") != std::string::npos) continue;
+            const int score = outputName.find("APC40") != std::string::npos ? 100 : 10;
+            if (score > bestScore) {
+                bestScore = score;
+                bestDestination = destination;
+                bestName = outputName;
+            }
+        }
+    }
+    if (bestDestination) {
+        const bool changed = g_midi_out_dest != bestDestination;
+        g_midi_out_dest = bestDestination;
+        g_midi_out_dest_name = bestName;
+        g_midi_led_wait_logged = false;
+        if (changed) {
+            g_last_mirror_led.clear();
+            g_last_armed_led.clear();
+            g_last_group_led.clear();
+            std::cout << "[midi] output destination selected: " << bestName
+                      << (bestScore == 100 ? " (APC40 preferred)" : " (hardware fallback)")
+                      << "\n" << std::flush;
+        }
+    } else {
+        g_midi_out_dest = 0;
+        g_midi_out_dest_name.clear();
+        g_last_mirror_led.clear();
+        g_last_armed_led.clear();
+        g_last_group_led.clear();
+    }
+    if (!bestDestination && !waitingLogged) {
+        std::cout << "[midi-led] matching output destination not found; APC LED feedback waiting ("
+                  << sourceCount << " MIDI source(s), " << destinationCount << " destination(s))\n" << std::flush;
+        waitingLogged = true;
+    }
+}
+
 static void midi_thread() {
     load_midi_map(resolve_data_file("midi_map.json"));
 
@@ -2052,26 +2169,9 @@ static void midi_thread() {
                 connected.insert(src);
                 std::cout << "[midi] connected: " << name << "\n" << std::flush;
 
-                // Find this same controller's MIDI *output* destination
-                // (matched by display name) so send_note_off() can send
-                // LED-override messages back to it.
-                if (g_midi_out_port && !g_midi_out_dest) {
-                    ItemCount dn = MIDIGetNumberOfDestinations();
-                    for (ItemCount di = 0; di < dn; ++di) {
-                        MIDIEndpointRef dst = MIDIGetDestination(di);
-                        CFStringRef dNameRef = nullptr;
-                        MIDIObjectGetStringProperty(dst, kMIDIPropertyDisplayName, &dNameRef);
-                        char dName[256] = "?";
-                        if (dNameRef) { CFStringGetCString(dNameRef, dName, sizeof(dName), kCFStringEncodingUTF8); CFRelease(dNameRef); }
-                        if (std::string(dName) == std::string(name)) {
-                            g_midi_out_dest = dst;
-                            std::cout << "[midi] output destination: " << dName << "\n" << std::flush;
-                            break;
-                        }
-                    }
-                }
             }
         }
+        find_midi_output_destination();
     };
     scan();
     std::cout << "[midi] " << connected.size() << " source(s) connected"
@@ -2088,7 +2188,7 @@ static void midi_thread() {
     // without waiting for (or being tied to) the 3s device-rescan cadence.
     CFRunLoopTimerRef ledTimer = CFRunLoopTimerCreateWithHandler(
         kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + 0.2, 0.2, 0, 0,
-        ^(CFRunLoopTimerRef) { sync_mirror_leds(); sync_shape_color_move_leds(); });
+        ^(CFRunLoopTimerRef) { sync_mirror_leds(); sync_armed_leds(); sync_shape_color_move_leds(); });
     CFRunLoopAddTimer(CFRunLoopGetCurrent(), ledTimer, kCFRunLoopDefaultMode);
 
     CFRunLoopRun(); // pumps MIDI + the rescan timer forever
