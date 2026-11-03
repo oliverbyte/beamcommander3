@@ -286,6 +286,27 @@ export async function recallCue(n) {
   applyStateIfCurrent(seq, await api(`/cue/${n}/recall`, { method: 'POST' }))
 }
 
+const CUE_STATE_FIELDS = [
+  'shape', 'radius', 'points', 'rate_kpps', 'r', 'g', 'b', 'shape_scale',
+  'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed',
+  'move_size', 'move_phase_degrees', 'wave_frequency', 'wave_amplitude', 'wave_speed',
+  'rainbow_amount', 'rainbow_speed', 'dot_amount', 'flicker_hz',
+]
+
+// True when cue slot n is populated and every saved field equals the live state.
+export function isCueCurrent(n) {
+  const cue = cues[n]
+  if (!cue) return false
+  return CUE_STATE_FIELDS.every((field) => {
+    const saved = cue[field]
+    const current = laserState[field]
+    if (typeof saved === 'number' && typeof current === 'number') {
+      return Math.abs(saved - current) <= 0.00011
+    }
+    return saved === current
+  })
+}
+
 export async function clearCue(n) {
   await api(`/cue/${n}/clear`, { method: 'POST' })
   await fetchCues()

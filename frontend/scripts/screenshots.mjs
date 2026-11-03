@@ -12,6 +12,7 @@ const PROFILE = JSON.parse(await readFile(new URL('./screenshot-profile.json', i
 const SCREENSHOTS = [
   { view: 'Shapes', file: 'settings' },
   { view: 'Cues', file: 'cues' },
+  { view: 'Magic Touch', file: 'magictouch' },
   { view: 'Zoning', file: 'zoning' },
   { view: 'Lasers', file: 'lasers' },
 ]

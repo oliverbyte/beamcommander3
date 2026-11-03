@@ -149,6 +149,8 @@
           </section>
         </div>
 
+        <MagicTouchBuilder v-else-if="activePage === 'builder'" />
+
         <div v-else-if="activePage === 'zoning'" class="magic-existing-panel">
           <ZoningPanel popout />
         </div>
@@ -220,6 +222,8 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import CuePanel from './CuePanel.vue'
 import ZoningPanel from './ZoningPanel.vue'
 import LasersPanel from './LasersPanel.vue'
+import MagicTouchBuilder from './MagicTouchBuilder.vue'
+import { MOVE_ICONS, SHAPE_ICONS } from './magicIcons.js'
 import { flashPress, flashRelease, laserState, lasers, markLocalChange, resetState, setBrightnessGate, updateState } from '../composables/useLaserSocket.js'
 
 const props = defineProps({
@@ -230,6 +234,9 @@ const props = defineProps({
 const emit = defineEmits(['update:persistence', 'update:previewEnabled', 'page-change'])
 
 const PAGES = [
+  { id: 'master', label: 'Master', title: 'Master', description: 'Control brightness, flash, and output safety.' },
+  { id: 'preview', label: 'Preview', title: 'Preview', description: 'Inspect the live 3D stage and place laser markers.' },
+  { id: 'builder', label: 'Magic Touch', title: 'Magic Touch', description: 'Build your own control surface and use it live.' },
   { id: 'cues', label: 'Cues', title: 'Cues', description: 'Recall, save, and arrange live looks.' },
   { id: 'color', label: 'Color', title: 'Color', description: 'Set a solid color or add animated rainbow.' },
   { id: 'shapes', label: 'Shapes', title: 'Shapes', description: 'Choose a shape and tune its geometry.' },
@@ -237,8 +244,6 @@ const PAGES = [
   { id: 'beam', label: 'Beam', title: 'Beam', description: 'Adjust scan rate, dot density, and preview.' },
   { id: 'zoning', label: 'Zoning', title: 'Zoning', description: 'Calibrate the output area for each laser.' },
   { id: 'lasers', label: 'Lasers', title: 'Lasers', description: 'Configure and arm connected laser projectors.' },
-  { id: 'preview', label: 'Preview', title: 'Preview', description: 'Inspect the live 3D stage and place laser markers.' },
-  { id: 'master', label: 'Master', title: 'Master', description: 'Control brightness, flash, and output safety.' },
 ]
 const PAGE_ICONS = {
   cues: '<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v18M16 3v18M3 8h5M16 8h5M3 16h5M16 16h5"/></svg>',
@@ -246,6 +251,7 @@ const PAGE_ICONS = {
   shapes: '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8"/><path d="m12 4 8 16H4L12 4Z"/></svg>',
   move: '<svg viewBox="0 0 24 24" fill="none"><path d="M12 3v18M3 12h18M12 3l-3 3m3-3 3 3M21 12l-3-3m3 3-3 3M12 21l3-3m-3 3-3-3M3 12l3 3m-3-3 3-3"/></svg>',
   beam: '<svg viewBox="0 0 24 24" fill="none"><path d="M3 12h5m8 0h5M8 7l8 10M8 17l8-10"/><circle cx="12" cy="12" r="2"/></svg>',
+  builder: '<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1"/><path d="M14 3v7m3-7v7m3-7v7M4 15h16M4 19h10"/></svg>',
   master: '<svg viewBox="0 0 24 24" fill="none"><path d="M12 3v18M5 7h14M7 17h10"/><circle cx="8" cy="7" r="2"/><circle cx="16" cy="17" r="2"/></svg>',
   zoning: '<svg viewBox="0 0 24 24" fill="none"><polygon points="2 6 9 3 15 6 22 3 22 18 15 21 9 18 2 21"/><path d="M9 3v15M15 6v15"/></svg>',
   lasers: '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 010 8.4M7.8 7.8a6 6 0 000 8.4M19 4.9a10 10 0 010 14.2M5 4.9a10 10 0 000 14.2"/></svg>',
@@ -260,24 +266,6 @@ const COLOR_PRESETS = [
 ]
 const SHAPES = ['circle', 'line', 'triangle', 'square', 'wave', 'staticwave']
 const MOVES = ['none', 'circle', 'pan', 'tilt', 'tiltup', 'tiltdown', 'eight', 'random']
-const SHAPE_ICONS = {
-  circle: '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8"/></svg>',
-  line: '<svg viewBox="0 0 24 24" fill="none"><path d="M4 12h16"/></svg>',
-  triangle: '<svg viewBox="0 0 24 24" fill="none"><path d="m12 4 9 16H3L12 4Z"/></svg>',
-  square: '<svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>',
-  wave: '<svg viewBox="0 0 24 24" fill="none"><path d="M3 12c2.25 0 2.25-6 4.5-6S9.75 18 12 18s2.25-12 4.5-12S18.75 12 21 12"/></svg>',
-  staticwave: '<svg viewBox="0 0 24 24" fill="none"><path d="M3 12c2.25 0 2.25-6 4.5-6S9.75 18 12 18s2.25-12 4.5-12S18.75 12 21 12"/><circle cx="18" cy="6" r="1.5"/></svg>',
-}
-const MOVE_ICONS = {
-  none: '<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8"/><path d="M10 9v6m4-6v6"/></svg>',
-  circle: '<svg viewBox="0 0 24 24" fill="none"><path d="M19 8a8 8 0 1 0 1 6"/><path d="M16 5h4v4"/><circle cx="12" cy="12" r="1"/></svg>',
-  pan: '<svg viewBox="0 0 24 24" fill="none"><path d="M4 12h16m-4-4 4 4-4 4M8 8l-4 4 4 4"/></svg>',
-  tilt: '<svg viewBox="0 0 24 24" fill="none"><path d="M12 4v16m-4-4 4 4 4-4M8 8l4-4 4 4"/></svg>',
-  tiltup: '<svg viewBox="0 0 24 24" fill="none"><path d="M5 19 19 5m-6 0h6v6"/></svg>',
-  tiltdown: '<svg viewBox="0 0 24 24" fill="none"><path d="M5 5 19 19m0-6v6h-6"/></svg>',
-  eight: '<svg viewBox="0 0 24 24" fill="none"><path d="M12 12c-2-2-4-5-6-4s-1 5 2 6 7-3 10-6 5-1 4 2-4 5-6 4-7-3-10-6-5-1-4 2 4 5 6 4 3-2 4-2Z"/></svg>',
-  random: '<svg viewBox="0 0 24 24" fill="none"><path d="M4 7h3c4 0 6 10 10 10h3m-4-4 4 4-4 4M4 17h3c1.5 0 2.7-1.6 3.8-3.5M14 9.5C15 8 16 7 17 7h3m-4-4 4 4-4 4"/></svg>',
-}
 const COLOR_CONTROLS = [
   { label: 'Rainbow amount', key: 'rainbow_amount', min: 0, max: 1, step: 0.01, decimals: 2 },
   { label: 'Rainbow speed', key: 'rainbow_speed', min: 0, max: 4, step: 0.1, decimals: 1 },
@@ -428,6 +416,8 @@ h1 { margin: 0; font-size: 23px; line-height: 1.2; }
 .laser-status { display: flex; align-items: center; gap: 8px; padding: 9px 12px; color: var(--mt-muted); border: 1px solid var(--mt-line); border-radius: 8px; font-size: 12px; white-space: nowrap; }
 .laser-status.online { color: var(--mt-text); }
 .magic-content { flex: 1 1 auto; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.magic-content.page-builder { display: flex; flex-direction: column; overflow: hidden; }
+.magic-content.page-builder > * { flex: 1 1 auto; min-height: 0; }
 .page-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 14px; padding: 18px 22px 24px; }
 .control-section { min-width: 0; padding: 18px; background: var(--mt-panel); border: 1px solid var(--mt-line); border-radius: 8px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }

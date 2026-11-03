@@ -32,6 +32,9 @@ curious how it's built, or want to modify it, the rest of this file and
 <td width="50%"><img src="docs/screenshots/screenshot-zoning.png" alt="Zoning panel"></td>
 <td width="50%"><img src="docs/screenshots/screenshot-lasers.png" alt="Lasers panel"></td>
 </tr>
+<tr>
+<td colspan="2" align="center"><img src="docs/screenshots/screenshot-magictouch.png" alt="Magic Touch: a custom live control surface" width="50%"></td>
+</tr>
 </table>
 
 ## ⚠️ Safety warning: lasers can cause permanent eye injury and are heavily regulated
@@ -187,14 +190,25 @@ for how the packaged macOS/Windows builds are put together.
    active cue is outlined in bright green.
    Right-click a slot to clear it, or use "Move" to relocate a saved cue
    to a different slot.
-6. **Optional: MIDI controller or foot pedal** — if you plug in a USB MIDI
+6. **Magic Touch**: build your own control surface. The page ships with a compact
+   "Live" layout (master fader, white flash and footswitch-style master brightness
+   flash, blackout and output gate, color/shape/move pads with icons, a few knobs,
+   and cue pads with live previews). Switch to **Edit mode** to add faders, knobs
+   and buttons, drag them around (they snap to a grid and align to other elements),
+   resize them, and pick any control function for each one in the side panel
+   (brightness, color, shape, movement, beam values, cues, laser arming, flash,
+   blackout, ...). Add more pages with the **+** tab for different setups. Back in
+   **Run mode** the elements just work by touch. The layout is stored in your
+   browser (not shared between devices) and "Restore default layout" resets it.
+   Everything goes through the normal REST API, like the other pages.
+7. **Optional: MIDI controller or foot pedal** — if you plug in a USB MIDI
    controller (an Akai APC40 mkII works out of the box, matching the
    original BeamCommander's exact layout), its knobs and buttons drive the
    same controls as the web page. A foot pedal can be wired up as a
    "brightness on while held" switch. None of this is required — the web
    page alone is a complete remote control. See ["MIDI control"](#midi-control-optional)
    below if you want to set one up.
-7. **Optional: Zoning** — the Zoning panel lets you pan/scale the output to
+8. **Optional: Zoning** — the Zoning panel lets you pan/scale the output to
    fit a physical sub-region of a laser's range (e.g. a wall or truss
    segment), independently of everything else you set up above. Pick a
    laser from the dropdown, then drag its green box to move it, or drag one
