@@ -1,21 +1,7 @@
 <template>
   <section class="mtb" :class="{ editing }">
-    <header class="mtb-bar">
-      <div class="mtb-bar-left">
-        <button class="mtb-btn mode" :class="{ active: editing }" :aria-pressed="editing" @click="editing = !editing">
-          {{ editing ? 'Edit mode' : 'Run mode' }}
-        </button>
-        <template v-if="editing">
-          <button class="mtb-btn" @click="addWidget('fader')">+ Fader</button>
-          <button class="mtb-btn" @click="addWidget('button')">+ Button</button>
-          <button class="mtb-btn" @click="addWidget('knob')">+ Knob</button>
-        </template>
-      </div>
-      <p class="mtb-hint">{{ editing ? 'Drag to move, drag the corner to resize, select to configure.' : 'Touch the controls to operate them.' }}</p>
-    </header>
-
-    <div class="mtb-body">
-      <div ref="canvasEl" class="mtb-canvas" @pointerdown.self="selectedId = null">
+    <div ref="bodyEl" class="mtb-body">
+      <div ref="canvasEl" class="mtb-canvas" @pointerdown.self="selectedIds = []">
         <p v-if="!widgets.length" class="mtb-empty">
           {{ editing ? 'Add an element to get started.' : 'Nothing here yet. Switch to edit mode to add controls.' }}
         </p>
@@ -23,12 +9,13 @@
         <div
           v-for="w in widgets" :key="w.id"
           class="mtb-widget"
-          :class="{ selected: editing && selectedId === w.id }"
-          :style="{ left: w.x + 'px', top: w.y + 'px', width: w.w + 'px', height: w.h + 'px' }"
+          :class="{ selected: editing && selectedIds.includes(w.id) }"
+          :style="{ left: w.x + 'px', top: w.y + 'px', width: w.w + 'px', height: w.h + 'px', '--cs': (w.controlScale ?? 100) / 100 }"
           @pointerdown="onWidgetDown($event, w)"
+          @contextmenu.prevent="onContextMenu($event, w)"
         >
           <template v-if="w.type === 'fader'">
-            <div class="mtb-label">{{ w.label }}</div>
+            <div v-if="w.showLabel !== false" class="mtb-label" :style="textStyle(w, 'labelScale', 12)">{{ w.label }}</div>
             <div
               class="mtb-fader"
               @pointerdown="onFaderDown($event, w)"
@@ -38,14 +25,14 @@
             >
               <div class="mtb-track">
                 <div class="mtb-fill" :style="{ height: percent(w) + '%' }"></div>
-                <div class="mtb-thumb" :style="{ bottom: `calc(${percent(w)}% - 10px)` }"></div>
+                <div class="mtb-thumb" :style="{ bottom: `calc(${percent(w)}% - 10px * var(--cs, 1))` }"></div>
               </div>
             </div>
-            <div class="mtb-value">{{ display(w) }}</div>
+            <div v-if="w.showValue !== false" class="mtb-value" :style="textStyle(w, 'valueScale', 12)">{{ display(w) }}</div>
           </template>
 
           <template v-else-if="w.type === 'knob'">
-            <div class="mtb-label">{{ w.label }}</div>
+            <div v-if="w.showLabel !== false" class="mtb-label" :style="textStyle(w, 'labelScale', 12)">{{ w.label }}</div>
             <div
               class="mtb-knob"
               @pointerdown="onKnobDown($event, w)"
@@ -60,7 +47,7 @@
                 <line x1="50" y1="50" x2="50" y2="18" class="knob-pointer" :transform="`rotate(${-135 + percent(w) * 2.7} 50 50)`" />
               </svg>
             </div>
-            <div class="mtb-value">{{ display(w) }}</div>
+            <div v-if="w.showValue !== false" class="mtb-value" :style="textStyle(w, 'valueScale', 12)">{{ display(w) }}</div>
           </template>
 
           <template v-else>
@@ -76,7 +63,7 @@
             >
               <CuePreview v-if="defFor(w).cuePad && cues[w.param]" :cue="cues[w.param]" />
               <span v-if="defFor(w).icon" class="mtb-pad-icon" aria-hidden="true" v-html="defFor(w).icon"></span>
-              <span :class="{ 'mtb-pad-text-small': defFor(w).icon }">{{ w.label }}</span>
+              <span v-if="w.showLabel !== false" :class="{ 'mtb-pad-text-small': defFor(w).icon }" :style="textStyle(w, 'labelScale', defFor(w).icon ? 9 : 12)">{{ w.label }}</span>
             </button>
           </template>
 
@@ -88,38 +75,84 @@
         </template>
       </div>
 
-      <aside v-if="editing" class="mtb-inspector" aria-label="Element settings">
-        <template v-if="selected">
-          <h2>{{ TYPE_NAMES[selected.type] }}</h2>
-          <label>Label
-            <input v-model="selected.label" type="text" maxlength="24" />
-          </label>
-          <label>Function
-            <select :value="selected.fn" @change="onFunctionChange(selected, $event.target.value)">
-              <optgroup v-for="group in groupedFunctions(selected.type)" :key="group.name" :label="group.name">
-                <option v-for="item in group.items" :key="item.id" :value="item.id">{{ item.label }}</option>
-              </optgroup>
-            </select>
-          </label>
-          <label v-if="defFor(selected).param">{{ defFor(selected).param.label }}
-            <input type="number" :min="defFor(selected).param.min" :max="defFor(selected).param.max" :value="selected.param" @change="onParamChange(selected, $event.target.value)" />
-          </label>
-          <button class="mtb-btn danger" @click="removeSelected">Delete element</button>
-        </template>
-        <template v-else>
-          <h2>Page</h2>
-          <label>Name
-            <input v-model="activePage.name" type="text" maxlength="20" />
-          </label>
-          <div class="mtb-row">
-            <button class="mtb-btn" :disabled="pages[0].id === activePage.id" @click="movePage(-1)">Move left</button>
-            <button class="mtb-btn" :disabled="pages[pages.length - 1].id === activePage.id" @click="movePage(1)">Move right</button>
-          </div>
-          <button class="mtb-btn danger" :disabled="pages.length < 2" @click="removePage">Delete page</button>
-          <p class="mtb-muted">Select an element to edit it.</p>
-          <button class="mtb-btn" @click="resetLayout">Restore default layout</button>
-        </template>
-      </aside>
+      <div v-if="menu" class="mtb-menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }" @pointerdown.stop @contextmenu.prevent>
+        <button @click="duplicateSelected">Duplicate</button>
+        <button class="danger" @click="removeSelected(); closeMenu()">Delete</button>
+      </div>
+
+      <div
+        v-if="editing" ref="editorEl" class="mtb-editor" role="dialog" aria-label="Editor"
+        :style="editorPos ? { left: editorPos.x + 'px', top: editorPos.y + 'px' } : { right: '16px', top: '16px' }"
+      >
+        <div
+          class="mtb-editor-head"
+          @pointerdown="onEditorDown"
+          @pointermove="onEditorMove"
+          @pointerup="onEditorUp"
+          @pointercancel="onEditorUp"
+        >
+          <span>Editor</span>
+          <button class="mtb-editor-collapse" :aria-expanded="!editorCollapsed" aria-label="Collapse editor" @pointerdown.stop @click="editorCollapsed = !editorCollapsed">{{ editorCollapsed ? '+' : '−' }}</button>
+        </div>
+        <div v-show="!editorCollapsed" class="mtb-editor-body">
+          <section>
+            <h2>Add element</h2>
+            <div class="mtb-row">
+              <button class="mtb-btn" @click="addWidget('fader')">Fader</button>
+              <button class="mtb-btn" @click="addWidget('knob')">Knob</button>
+              <button class="mtb-btn" @click="addWidget('button')">Button</button>
+            </div>
+          </section>
+          <section>
+            <template v-if="selected">
+              <h2>{{ TYPE_NAMES[selected.type] }}</h2>
+              <label>Label
+                <input v-model="selected.label" class="mtb-field" type="text" maxlength="24" />
+              </label>
+              <label>Function
+                <select class="mtb-field" :value="selected.fn" @change="onFunctionChange(selected, $event.target.value)">
+                  <optgroup v-for="group in groupedFunctions(selected.type)" :key="group.name" :label="group.name">
+                    <option v-for="item in group.items" :key="item.id" :value="item.id">{{ item.label }}</option>
+                  </optgroup>
+                </select>
+              </label>
+              <label v-if="defFor(selected).param">{{ defFor(selected).param.label }}
+                <input class="mtb-field" type="number" :min="defFor(selected).param.min" :max="defFor(selected).param.max" :value="selected.param" @change="onParamChange(selected, $event.target.value)" />
+              </label>
+              <label class="mtb-check">
+                <input type="checkbox" :checked="selected.showLabel !== false" @change="selected.showLabel = $event.target.checked" /> Show label
+              </label>
+              <label v-if="selected.type !== 'button'" class="mtb-check">
+                <input type="checkbox" :checked="selected.showValue !== false" @change="selected.showValue = $event.target.checked" /> Show value
+              </label>
+              <div v-for="item in sizeControls(selected)" :key="item.key" class="mtb-size">
+                <span>{{ item.label }}</span>
+                <input type="range" min="30" max="250" step="5" :value="selected[item.key] ?? 100" @input="setSize(selected, item.key, $event.target.value)" />
+                <button class="mtb-size-auto" :disabled="selected[item.key] === undefined" @click="delete selected[item.key]">{{ selected[item.key] === undefined ? 'Auto' : selected[item.key] + '% ✕' }}</button>
+              </div>
+              <button class="mtb-btn danger" @click="removeSelected">Delete element</button>
+            </template>
+            <template v-else-if="selectedIds.length > 1">
+              <h2>{{ selectedIds.length }} elements</h2>
+              <p class="mtb-muted">Drag any of them to move together.</p>
+              <button class="mtb-btn danger" @click="removeSelected">Delete elements</button>
+            </template>
+            <p v-else class="mtb-muted">Select an element to edit it. Shift-click selects several.</p>
+          </section>
+          <section>
+            <h2>Page</h2>
+            <label>Name
+              <input v-model="activePage.name" class="mtb-field" type="text" maxlength="20" />
+            </label>
+            <div class="mtb-row">
+              <button class="mtb-btn" :disabled="pages[0].id === activePage.id" @click="movePage(-1)">◂ Left</button>
+              <button class="mtb-btn" :disabled="pages[pages.length - 1].id === activePage.id" @click="movePage(1)">Right ▸</button>
+            </div>
+            <button class="mtb-btn danger" :disabled="pages.length < 2" @click="removePage">Delete page</button>
+            <button class="mtb-btn" @click="resetLayout">Restore default layout</button>
+          </section>
+        </div>
+      </div>
     </div>
 
     <nav class="mtb-pages" aria-label="Pages">
@@ -272,21 +305,56 @@ const widgets = computed({
   get: () => activePage.value.widgets,
   set: (list) => { activePage.value.widgets = list },
 })
-const editing = ref(false)
-const selectedId = ref(null)
+// Edit/run mode is toggled from the page header in MagicTouchPanel.
+const props = defineProps({ editing: { type: Boolean, default: false } })
+const editing = computed(() => props.editing)
+
+// Floating editor window: free position (persisted), translucent, collapsible.
+const EDITOR_POS_KEY = 'bc3.magicTouch.editorPos.v1'
+const editorEl = ref(null)
+const editorCollapsed = ref(false)
+const editorPos = ref((() => {
+  try {
+    const p = JSON.parse(localStorage.getItem(EDITOR_POS_KEY) || 'null')
+    return Number.isFinite(p?.x) && Number.isFinite(p?.y) ? p : null
+  } catch { return null }
+})())
+let editorDrag = null
+function onEditorDown(event) {
+  const el = editorEl.value
+  editorDrag = { startX: event.clientX, startY: event.clientY, x: el.offsetLeft, y: el.offsetTop }
+  event.currentTarget.setPointerCapture(event.pointerId)
+}
+function onEditorMove(event) {
+  if (!editorDrag) return
+  const el = editorEl.value
+  const body = el.offsetParent
+  const maxX = Math.max(0, body.clientWidth - el.offsetWidth)
+  const maxY = Math.max(0, body.clientHeight - 40)
+  editorPos.value = {
+    x: Math.min(maxX, Math.max(0, editorDrag.x + event.clientX - editorDrag.startX)),
+    y: Math.min(maxY, Math.max(0, editorDrag.y + event.clientY - editorDrag.startY)),
+  }
+}
+function onEditorUp() {
+  if (!editorDrag) return
+  editorDrag = null
+  localStorage.setItem(EDITOR_POS_KEY, JSON.stringify(editorPos.value))
+}
+const selectedIds = ref([])
 const heldId = ref(null)
 const canvasEl = ref(null)
-const selected = computed(() => widgets.value.find((w) => w.id === selectedId.value) || null)
+const selected = computed(() => (selectedIds.value.length === 1 ? widgets.value.find((w) => w.id === selectedIds.value[0]) || null : null))
 
 watch(pages, (list) => localStorage.setItem(STORAGE_KEY, JSON.stringify({ pages: list })), { deep: true })
 watch(editing, (on) => {
   if (on) releaseHeldButton()
-  else selectedId.value = null
+  else selectedIds.value = []
 })
 
 function selectPage(id) {
   releaseHeldButton()
-  selectedId.value = null
+  selectedIds.value = []
   activePageId.value = id
 }
 function addPage() {
@@ -320,11 +388,11 @@ function addWidget(type) {
   const [w, h] = DEFAULT_SIZE[type]
   const widget = materialize({ type, fn, x: 24 + offset, y: 24 + offset, w, h })
   widgets.value.push(widget)
-  selectedId.value = widget.id
+  selectedIds.value = [widget.id]
 }
 function removeSelected() {
-  widgets.value = widgets.value.filter((w) => w.id !== selectedId.value)
-  selectedId.value = null
+  widgets.value = widgets.value.filter((w) => !selectedIds.value.includes(w.id))
+  selectedIds.value = []
 }
 function onFunctionChange(w, fn) {
   const previousLabel = defaultLabel(w)
@@ -334,6 +402,47 @@ function onFunctionChange(w, fn) {
   else delete w.param
   if (w.label === previousLabel) w.label = defaultLabel(w)
 }
+// Optional per-element size overrides in percent; undefined keeps the automatic fit.
+function textStyle(w, key, base) {
+  return w[key] === undefined ? null : { fontSize: `${(base * w[key]) / 100}px` }
+}
+function sizeControls(w) {
+  const list = [{ key: 'controlScale', label: w.type === 'button' ? 'Icon size' : 'Control size' }]
+  if (w.showLabel !== false) list.push({ key: 'labelScale', label: 'Label size' })
+  if (w.type !== 'button' && w.showValue !== false) list.push({ key: 'valueScale', label: 'Value size' })
+  return list
+}
+function setSize(w, key, value) { w[key] = Number(value) }
+
+// Right-click menu (edit mode): acts on the selection.
+const bodyEl = ref(null)
+const menu = ref(null)
+function onContextMenu(event, w) {
+  if (!editing.value) return
+  if (!selectedIds.value.includes(w.id)) selectedIds.value = [w.id]
+  const rect = bodyEl.value.getBoundingClientRect()
+  menu.value = {
+    x: Math.max(0, Math.min(event.clientX - rect.left, rect.width - 150)),
+    y: Math.max(0, Math.min(event.clientY - rect.top, rect.height - 90)),
+  }
+  window.addEventListener('pointerdown', closeMenu)
+  window.addEventListener('keydown', onMenuKey)
+}
+function onMenuKey(event) { if (event.key === 'Escape') closeMenu() }
+function closeMenu() {
+  menu.value = null
+  window.removeEventListener('pointerdown', closeMenu)
+  window.removeEventListener('keydown', onMenuKey)
+}
+function duplicateSelected() {
+  const copies = widgets.value
+    .filter((w) => selectedIds.value.includes(w.id))
+    .map((w) => ({ ...JSON.parse(JSON.stringify(w)), id: newId(), x: w.x + GRID, y: w.y + GRID }))
+  widgets.value.push(...copies)
+  selectedIds.value = copies.map((w) => w.id)
+  closeMenu()
+}
+
 function onParamChange(w, value) {
   const param = defFor(w).param
   const previousLabel = defaultLabel(w)
@@ -394,13 +503,24 @@ function snapAxis(pos, size, others, fractions) {
 }
 
 function onWidgetDown(event, w) {
-  if (!editing.value) return
-  selectedId.value = w.id
-  drag = { kind: 'move', id: w.id, startX: event.clientX, startY: event.clientY, orig: { x: w.x, y: w.y } }
+  if (!editing.value || event.button !== 0) return
+  if (event.shiftKey) {
+    // Shift toggles membership; a freshly added element can be dragged right away.
+    if (selectedIds.value.includes(w.id)) {
+      selectedIds.value = selectedIds.value.filter((id) => id !== w.id)
+      return
+    }
+    selectedIds.value = [...selectedIds.value, w.id]
+  } else if (!selectedIds.value.includes(w.id)) {
+    selectedIds.value = [w.id]
+  }
+  const origs = {}
+  for (const item of widgets.value) if (selectedIds.value.includes(item.id)) origs[item.id] = { x: item.x, y: item.y }
+  drag = { kind: 'move', id: w.id, startX: event.clientX, startY: event.clientY, origs }
   attachDrag()
 }
 function onResizeDown(event, w) {
-  selectedId.value = w.id
+  selectedIds.value = [w.id]
   drag = { kind: 'resize', id: w.id, startX: event.clientX, startY: event.clientY, orig: { w: w.w, h: w.h } }
   attachDrag()
 }
@@ -422,14 +542,26 @@ function onDragMove(event) {
   if (!w) return
   const dx = event.clientX - drag.startX
   const dy = event.clientY - drag.startY
-  const others = widgets.value.filter((o) => o.id !== w.id)
   if (drag.kind === 'move') {
-    const sx = snapAxis(drag.orig.x + dx, w.w, others.map((o) => [o.x, o.w]), [0, 0.5, 1])
-    const sy = snapAxis(drag.orig.y + dy, w.h, others.map((o) => [o.y, o.h]), [0, 0.5, 1])
-    w.x = Math.max(0, sx.pos)
-    w.y = Math.max(0, sy.pos)
+    // The grabbed element snaps against everything not being moved; the rest of the selection follows its offset.
+    const moving = Object.keys(drag.origs)
+    const fixed = widgets.value.filter((o) => !moving.includes(o.id))
+    const orig = drag.origs[w.id]
+    const sx = snapAxis(orig.x + dx, w.w, fixed.map((o) => [o.x, o.w]), [0, 0.5, 1])
+    const sy = snapAxis(orig.y + dy, w.h, fixed.map((o) => [o.y, o.h]), [0, 0.5, 1])
+    const minX = Math.min(...moving.map((id) => drag.origs[id].x))
+    const minY = Math.min(...moving.map((id) => drag.origs[id].y))
+    const deltaX = Math.max(sx.pos - orig.x, -minX)
+    const deltaY = Math.max(sy.pos - orig.y, -minY)
+    for (const item of widgets.value) {
+      const start = drag.origs[item.id]
+      if (!start) continue
+      item.x = start.x + deltaX
+      item.y = start.y + deltaY
+    }
     guides.value = [...sx.guides.map((x) => ({ x })), ...sy.guides.map((y) => ({ y }))]
   } else {
+    const others = widgets.value.filter((o) => o.id !== w.id)
     const [minW, minH] = MIN_SIZE[w.type]
     const sx = snapAxis(w.x + Math.max(minW, drag.orig.w + dx), 0, others.map((o) => [o.x, o.w]), [0])
     const sy = snapAxis(w.y + Math.max(minH, drag.orig.h + dy), 0, others.map((o) => [o.y, o.h]), [0])
@@ -497,6 +629,7 @@ function releaseHeldButton() {
 }
 
 onBeforeUnmount(() => {
+  closeMenu()
   endDrag()
   releaseHeldButton()
   clearTimeout(timer)
@@ -506,21 +639,22 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .mtb { display: flex; flex-direction: column; height: 100%; min-height: 0; color: #e7f0ed; }
-.mtb-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 22px; border-bottom: 1px solid rgba(159,190,187,.16); }
+.mtb-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 10px; border-bottom: 1px solid rgba(159,190,187,.16); }
+.mtb-bar .mtb-btn { min-height: 28px; padding: 2px 10px; font-size: 12px; }
 .mtb-bar-left { display: flex; gap: 8px; }
 .mtb-hint, .mtb-muted { margin: 0; color: #91a6a2; font-size: 12px; }
 .mtb-btn { min-height: 38px; padding: 6px 14px; color: inherit; background: rgba(255,255,255,.04); border: 1px solid rgba(159,190,187,.16); border-radius: 7px; font: inherit; font-size: 13px; cursor: pointer; touch-action: manipulation; }
 .mtb-btn.active { color: #eafff3; background: rgba(101,230,165,.13); border-color: #65e6a5; }
 .mtb-btn.danger { color: #ffaaa1; border-color: rgba(255,124,111,.45); }
-.mtb-body { flex: 1 1 auto; display: flex; min-height: 0; }
+.mtb-body { position: relative; flex: 1 1 auto; display: flex; min-height: 0; }
 .mtb-canvas { position: relative; flex: 1 1 auto; min-width: 0; overflow: auto; touch-action: none; }
 .editing .mtb-canvas { background-image: radial-gradient(rgba(159,190,187,.22) 1px, transparent 1px); background-size: 24px 24px; }
 .mtb-empty { margin: 24px; color: #91a6a2; font-size: 13px; pointer-events: none; }
-.mtb-widget { position: absolute; display: flex; flex-direction: column; box-sizing: border-box; padding: 10px; background: #11191f; border: 1px solid rgba(159,190,187,.16); border-radius: 8px; user-select: none; }
+.mtb-widget { position: absolute; display: flex; flex-direction: column; box-sizing: border-box; container-type: size; padding: clamp(3px, 7cqmin, 10px); background: #11191f; border: 1px solid rgba(159,190,187,.16); border-radius: 8px; user-select: none; }
 .editing .mtb-widget { cursor: move; border-style: dashed; }
 .mtb-widget.selected { border-color: #65e6a5; box-shadow: 0 0 0 2px rgba(101,230,165,.25); }
-.mtb-label { font-size: 12px; text-align: center; color: #c7d4d0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mtb-fader, .mtb-knob { flex: 1 1 auto; display: flex; justify-content: center; min-height: 0; padding: 10px 0; touch-action: none; cursor: pointer; }
+.mtb-label { flex: 0 1 auto; min-height: 0; font-size: clamp(6px, 9cqh, 12px); line-height: 1.15; text-align: center; color: #c7d4d0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mtb-fader, .mtb-knob { flex: 1 1 auto; display: flex; justify-content: center; min-height: 0; padding: clamp(1px, 4cqmin, 10px) 0; touch-action: none; cursor: pointer; }
 .editing .mtb-fader, .editing .mtb-knob, .editing .mtb-pad { pointer-events: none; }
 .mtb-track { position: relative; width: 12px; height: 100%; background: rgba(255,255,255,.08); border-radius: 999px; }
 .mtb-fill { position: absolute; left: 0; right: 0; bottom: 0; background: #65e6a5; border-radius: 999px; }
@@ -531,7 +665,7 @@ onBeforeUnmount(() => {
 .knob-track { stroke: rgba(255,255,255,.08); stroke-dasharray: 75 200; }
 .knob-arc { stroke: #65e6a5; }
 .knob-pointer { stroke: #eafff3; stroke-width: 4; stroke-linecap: round; }
-.mtb-value { text-align: center; font-size: 12px; color: #65e6a5; font-variant-numeric: tabular-nums; }
+.mtb-value { flex: 0 1 auto; min-height: 0; text-align: center; font-size: clamp(6px, 9cqh, 12px); line-height: 1.15; color: #65e6a5; font-variant-numeric: tabular-nums; }
 .mtb-pad { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; flex: 1 1 auto; min-height: 0; padding: 4px; color: #fff3cc; background: linear-gradient(135deg, #7d461c, #3e291b); border: 1px solid rgba(255,188,89,.55); border-radius: 8px; font: inherit; font-size: 12px; font-weight: 700; text-transform: uppercase; cursor: pointer; touch-action: none; user-select: none; }
 .mtb-pad.down { background: #e59036; color: #17120c; }
 .mtb-pad.cue { position: relative; overflow: hidden; align-items: flex-end; justify-content: flex-end; color: #6a7090; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.15); font-size: 13px; font-weight: 500; text-shadow: 0 0 2px rgba(0,0,0,.9); }
@@ -549,13 +683,31 @@ onBeforeUnmount(() => {
 .mtb-page-tab.add { min-width: 44px; padding-inline: 12px; }
 .mtb-pad-icon { display: grid; place-items: center; flex: 1 1 auto; width: 100%; min-height: 0; }
 .mtb-pad-icon :deep(svg) { width: 100%; height: 100%; max-width: 64px; max-height: 64px; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.mtb-pad-text-small { font-size: 9px; font-weight: 500; line-height: 1.1; }
+.mtb-pad-text-small { font-size: clamp(5px, 11cqh, 9px); font-weight: 500; line-height: 1.1; }
+.mtb-size { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; align-items: center; color: #c7d4d0; font-size: 12px; }
+.mtb-size input[type="range"] { grid-column: 1 / -1; grid-row: 2; width: 100%; margin: 0; accent-color: #65e6a5; }
+.mtb-size-auto { padding: 2px 8px; color: inherit; background: rgba(255,255,255,.06); border: 1px solid rgba(159,190,187,.16); border-radius: 6px; font: inherit; font-size: 11px; cursor: pointer; }
+.mtb-size-auto:disabled { opacity: .5; cursor: default; }
+.mtb-track { width: calc(12px * var(--cs, 1)); }
+.mtb-thumb { width: calc(36px * var(--cs, 1)); height: calc(20px * var(--cs, 1)); margin-left: calc(-18px * var(--cs, 1)); }
+.mtb-knob svg { transform: scale(var(--cs, 1)); }
+.mtb-pad-icon :deep(svg) { transform: scale(var(--cs, 1)); }
+.mtb-menu { position: absolute; z-index: 6; display: flex; flex-direction: column; min-width: 140px; padding: 4px; background: rgba(17,25,31,.96); border: 1px solid rgba(159,190,187,.3); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.5); }
+.mtb-menu button { padding: 8px 12px; color: #e7f0ed; background: transparent; border: 0; border-radius: 6px; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.mtb-menu button:hover { background: rgba(101,230,165,.13); }
+.mtb-menu button.danger { color: #ffaaa1; }
+.mtb-check { flex-direction: row !important; align-items: center; gap: 8px !important; }
 .mtb-guide { position: absolute; pointer-events: none; background: #ff4fd8; }
 .mtb-guide.v { top: 0; bottom: 0; width: 1px; }
 .mtb-guide.h { left: 0; right: 0; height: 1px; }
 .mtb-resize { position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #65e6a5 50%); border-bottom-right-radius: 8px; touch-action: none; }
-.mtb-inspector { display: flex; flex-direction: column; gap: 12px; flex: 0 0 240px; padding: 16px; background: rgba(17,25,31,.9); border-left: 1px solid rgba(159,190,187,.16); }
-.mtb-inspector h2 { margin: 0; font-size: 15px; }
-.mtb-inspector label { display: flex; flex-direction: column; gap: 6px; color: #c7d4d0; font-size: 12px; }
-.mtb-inspector input, .mtb-inspector select { padding: 8px; color: inherit; background: #0c1116; border: 1px solid rgba(159,190,187,.16); border-radius: 6px; font: inherit; font-size: 13px; }
+.mtb-editor { position: absolute; z-index: 5; display: flex; flex-direction: column; width: 240px; max-height: calc(100% - 32px); background: rgba(17,25,31,.82); backdrop-filter: blur(6px); border: 1px solid rgba(159,190,187,.3); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.45); }
+.mtb-editor-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 8px 8px 12px; font-size: 12px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: #91a6a2; cursor: move; touch-action: none; user-select: none; border-bottom: 1px solid rgba(159,190,187,.16); }
+.mtb-editor-collapse { width: 28px; height: 28px; color: inherit; background: rgba(255,255,255,.06); border: 1px solid rgba(159,190,187,.16); border-radius: 6px; font: inherit; cursor: pointer; }
+.mtb-editor-body { display: flex; flex-direction: column; gap: 14px; padding: 12px; overflow-y: auto; }
+.mtb-editor-body section { display: flex; flex-direction: column; gap: 10px; }
+.mtb-editor-body section + section { padding-top: 12px; border-top: 1px solid rgba(159,190,187,.16); }
+.mtb-editor-body h2 { margin: 0; font-size: 14px; }
+.mtb-editor-body label { display: flex; flex-direction: column; gap: 5px; color: #c7d4d0; font-size: 12px; }
+.mtb-field { min-height: 36px; padding: 6px 8px; color: inherit; background: rgba(12,17,22,.85); border: 1px solid rgba(159,190,187,.16); border-radius: 6px; font: inherit; font-size: 13px; }
 </style>

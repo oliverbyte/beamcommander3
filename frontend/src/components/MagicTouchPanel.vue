@@ -25,9 +25,18 @@
           <h1>{{ activePageMeta.title }}</h1>
           <p class="page-description">{{ activePageMeta.description }}</p>
         </div>
-        <div class="laser-status" :class="{ online: connectedLaserCount > 0 }">
-          <span class="status-light" :class="{ connected: connectedLaserCount > 0 }"></span>
-          <span>{{ connectedLaserCount }} / {{ lasers.length }} lasers</span>
+        <div class="header-actions">
+          <button
+            v-if="activePage === 'builder'"
+            class="edit-toggle"
+            :class="{ active: builderEditing }"
+            :aria-pressed="builderEditing"
+            @click="builderEditing = !builderEditing"
+          >{{ builderEditing ? 'Edit mode' : 'Run mode' }}</button>
+          <div class="laser-status" :class="{ online: connectedLaserCount > 0 }">
+            <span class="status-light" :class="{ connected: connectedLaserCount > 0 }"></span>
+            <span>{{ connectedLaserCount }} / {{ lasers.length }} lasers</span>
+          </div>
         </div>
       </header>
 
@@ -149,7 +158,7 @@
           </section>
         </div>
 
-        <MagicTouchBuilder v-else-if="activePage === 'builder'" />
+        <MagicTouchBuilder v-else-if="activePage === 'builder'" :editing="builderEditing" />
 
         <div v-else-if="activePage === 'zoning'" class="magic-existing-panel">
           <ZoningPanel popout />
@@ -296,6 +305,7 @@ const BEAM_CONTROLS = [
 ]
 
 const activePage = ref('cues')
+const builderEditing = ref(false)
 const persistenceMs = ref(props.persistenceMs)
 const activePageMeta = computed(() => PAGES.find((item) => item.id === activePage.value))
 const connectedLaserCount = computed(() => lasers.filter((laser) => laser.connected).length)
@@ -413,6 +423,9 @@ onBeforeUnmount(() => {
 .eyebrow { margin: 0 0 4px; color: var(--mt-accent); font-size: 10px; font-weight: 700; letter-spacing: 1.4px; }
 h1 { margin: 0; font-size: 23px; line-height: 1.2; }
 .page-description { margin: 5px 0 0; color: var(--mt-muted); font-size: 13px; }
+.header-actions { display: flex; align-items: center; gap: 10px; }
+.edit-toggle { min-height: 36px; padding: 6px 14px; color: var(--mt-text); background: rgba(255,255,255,.04); border: 1px solid var(--mt-line); border-radius: 8px; font: inherit; font-size: 12px; cursor: pointer; touch-action: manipulation; white-space: nowrap; }
+.edit-toggle.active { color: #eafff3; background: rgba(101,230,165,.13); border-color: var(--mt-accent); }
 .laser-status { display: flex; align-items: center; gap: 8px; padding: 9px 12px; color: var(--mt-muted); border: 1px solid var(--mt-line); border-radius: 8px; font-size: 12px; white-space: nowrap; }
 .laser-status.online { color: var(--mt-text); }
 .magic-content { flex: 1 1 auto; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
