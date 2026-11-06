@@ -1,5 +1,5 @@
 <template>
-  <section class="mtb" :class="{ editing }">
+  <section class="mtb" :class="{ editing, loading: !loaded }">
     <div ref="bodyEl" class="mtb-body">
       <div ref="canvasEl" class="mtb-canvas" @pointerdown.self="selectedIds = []">
         <p v-if="!widgets.length" class="mtb-empty">
@@ -171,13 +171,15 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   flashPress, flashRelease, cues, isCueCurrent, laserState, lasers, markLocalChange, recallCue, resetState,
-  setBrightnessGate, updateLaser, updateState,
+  setBrightnessGate, updateLaser, updateState, magicTouch, fetchMagicTouch, saveMagicTouch,
 } from '../composables/useLaserSocket.js'
 import CuePreview from './CuePreview.vue'
 import { MOVE_ICONS, SHAPE_ICONS } from './magicIcons.js'
 import { buildDefaultPages, colorFnId, COLORS, MOVES, SHAPES } from './magicLayout.js'
 
-const STORAGE_KEY = 'bc3.magicTouch.layout.v3'
+// Pages live on the backend (GET/POST /api/magic-touch) so every client shares one layout.
+// This old per-browser key is only read once, to migrate a layout into an empty backend.
+const LEGACY_STORAGE_KEY = 'bc3.magicTouch.layout.v3'
 const MIN_SIZE = { fader: [70, 140], knob: [80, 100], button: [70, 50] }
 const DEFAULT_SIZE = { fader: [110, 280], knob: [120, 150], button: [120, 80] }
 const DEFAULT_FN = { fader: 'master_brightness', knob: 'release_time', button: 'flash' }
@@ -288,17 +290,22 @@ function cleanWidgets(list) {
 function defaultPages() {
   return buildDefaultPages().map((p) => ({ id: newId(), name: p.name, widgets: p.widgets.map(materialize) }))
 }
-function loadPages() {
+// Returns null when `stored` holds no usable pages.
+function parsePages(stored) {
+  if (!Array.isArray(stored?.pages) || !stored.pages.length) return null
+  return stored.pages.map((p) => ({ id: p.id || newId(), name: String(p.name || 'Page'), widgets: cleanWidgets(p.widgets) }))
+}
+function loadLegacyPages() {
   try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null')
-    if (Array.isArray(stored?.pages) && stored.pages.length) {
-      return stored.pages.map((p) => ({ id: p.id || newId(), name: String(p.name || 'Page'), widgets: cleanWidgets(p.widgets) }))
-    }
-  } catch { /* fall through to defaults */ }
-  return defaultPages()
+    return parsePages(JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY) || 'null'))
+  } catch { return null }
 }
 
-const pages = ref(loadPages())
+// The pages are shared by all clients; the open page, selection, edit mode and editor window
+// stay per client. Starts from the last layout this tab saw (instant on remount); hidden until
+// the backend answered once.
+const pages = ref(parsePages(magicTouch.layout) || defaultPages())
+const loaded = ref(!!magicTouch.layout)
 const activePageId = ref(pages.value[0].id)
 const activePage = computed(() => pages.value.find((p) => p.id === activePageId.value) || pages.value[0])
 const widgets = computed({
@@ -309,7 +316,7 @@ const widgets = computed({
 const props = defineProps({ editing: { type: Boolean, default: false } })
 const editing = computed(() => props.editing)
 
-// Floating editor window: free position (persisted), translucent, collapsible.
+// Floating editor window: free position (persisted per browser), translucent, collapsible.
 const EDITOR_POS_KEY = 'bc3.magicTouch.editorPos.v1'
 const editorEl = ref(null)
 const editorCollapsed = ref(false)
@@ -346,7 +353,6 @@ const heldId = ref(null)
 const canvasEl = ref(null)
 const selected = computed(() => (selectedIds.value.length === 1 ? widgets.value.find((w) => w.id === selectedIds.value[0]) || null : null))
 
-watch(pages, (list) => localStorage.setItem(STORAGE_KEY, JSON.stringify({ pages: list })), { deep: true })
 watch(editing, (on) => {
   if (on) releaseHeldButton()
   else selectedIds.value = []
@@ -628,7 +634,73 @@ function releaseHeldButton() {
   heldWidget = null
 }
 
+// ── Shared layout sync ──────────────────────────────────────────────────────
+// Edits stay local while this client is in edit mode and are published to the backend
+// when it switches back to run mode (or leaves the page), so other clients keep their
+// current layout until the editor is done. A client in run mode checks every second for
+// a newer published revision and applies it. While editing, remote revisions are ignored;
+// the last client to publish wins.
+let lastSynced = null
+let saving = false
+let retryTimer = null
+const serialize = () => JSON.stringify({ pages: pages.value })
+
+async function publish() {
+  clearTimeout(retryTimer)
+  retryTimer = null
+  if (saving) { retryTimer = setTimeout(publish, 300); return }
+  const body = serialize()
+  if (body === lastSynced) return
+  saving = true
+  try {
+    await saveMagicTouch(body)
+    lastSynced = body
+    localStorage.removeItem(LEGACY_STORAGE_KEY)
+  } catch (error) {
+    console.error(error)
+    retryTimer = setTimeout(publish, 2000)
+  } finally {
+    saving = false
+  }
+}
+watch(editing, (on) => { if (!on && loaded.value) publish() })
+// Closing or reloading the tab mid-edit still publishes (keepalive survives the unload).
+function publishOnUnload() {
+  const body = serialize()
+  if (!editing.value || !loaded.value || body === lastSynced) return
+  fetch('/api/magic-touch', { method: 'POST', body, keepalive: true, headers: { 'Content-Type': 'application/json' } })
+}
+window.addEventListener('pagehide', publishOnUnload)
+
+function applyServerLayout() {
+  const fromServer = parsePages(magicTouch.layout)
+  // Empty backend: seed it with this browser's old local layout, or the defaults.
+  const next = fromServer || loadLegacyPages() || defaultPages()
+  pages.value = next
+  if (!next.some((p) => p.id === activePageId.value)) activePageId.value = next[0].id
+  selectedIds.value = []
+  lastSynced = fromServer ? serialize() : null
+  loaded.value = true
+  if (!fromServer) publish()
+}
+const busy = () => editing.value || saving || retryTimer !== null || serialize() !== lastSynced
+async function pollLayout() {
+  if (loaded.value && busy()) return
+  try {
+    const changed = await fetchMagicTouch()
+    if ((changed || !loaded.value) && !(loaded.value && busy())) applyServerLayout()
+  } catch { /* backend unreachable: keep the current layout and retry */ }
+}
+// Remount: start from the cached layout right away, then check for a newer one.
+if (magicTouch.layout) applyServerLayout()
+pollLayout()
+const layoutPoll = setInterval(pollLayout, 1000)
+
 onBeforeUnmount(() => {
+  clearInterval(layoutPoll)
+  window.removeEventListener('pagehide', publishOnUnload)
+  // Leaving the Magic Touch page counts as done editing.
+  if (loaded.value) publish()
   closeMenu()
   endDrag()
   releaseHeldButton()
@@ -639,6 +711,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .mtb { display: flex; flex-direction: column; height: 100%; min-height: 0; color: #e7f0ed; }
+.mtb.loading > * { visibility: hidden; }
+.mtb.loading::before { content: 'Loading layout from the laser server…'; position: absolute; padding: 16px; opacity: .6; }
 .mtb-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 10px; border-bottom: 1px solid rgba(159,190,187,.16); }
 .mtb-bar .mtb-btn { min-height: 28px; padding: 2px 10px; font-size: 12px; }
 .mtb-bar-left { display: flex; gap: 8px; }

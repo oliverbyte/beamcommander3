@@ -2200,6 +2200,54 @@ static void midi_thread() {
 }
 #endif
 
+// ── Magic Touch layout (shared by all web clients) ─────────────────────────────
+// The Magic Touch builder's pages/widgets live here instead of each
+// browser's localStorage, so every connected client shows the same control
+// surface. The backend treats the layout as an opaque JSON object owned by
+// the frontend - it only checks it looks like an object and persists it
+// verbatim. G_magic_rev changes on every save; clients poll
+// GET /api/magic-touch?rev=<their rev> and only receive the full layout when
+// it differs. It's seeded from the clock so a daemon restart can never
+// reuse a revision number a client still holds.
+static std::mutex        G_magic_mtx;
+static std::string       G_magic_layout; // empty = nothing saved yet
+static long long         G_magic_rev = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::system_clock::now().time_since_epoch()).count();
+static const std::string MAGIC_FILE = resolve_data_file("magic_touch.json");
+static constexpr std::size_t MAGIC_MAX_BYTES = 4 * 1024 * 1024;
+
+static std::string trim_ws(const std::string& s) {
+    auto b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    auto e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
+
+static void load_magic_from_disk() {
+    std::ifstream f(MAGIC_FILE);
+    if (!f) return;
+    std::ostringstream buf; buf << f.rdbuf();
+    std::string body = trim_ws(buf.str());
+    if (body.size() >= 2 && body.front() == '{' && body.back() == '}') {
+        std::lock_guard<std::mutex> lk(G_magic_mtx);
+        G_magic_layout = body;
+    }
+}
+
+// Writes via a temp file + rename so a crash mid-write can't corrupt the layout.
+static void save_magic_to_disk(const std::string& body) {
+    std::string tmp = MAGIC_FILE + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::trunc);
+        if (!f) return;
+        f << body;
+        if (!f) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, MAGIC_FILE, ec);
+    if (ec) std::cerr << "[magic-touch] could not save " << MAGIC_FILE << ": " << ec.message() << "\n";
+}
+
 #define APPLY_F(key, field) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) G.field=_v; }
 #define APPLY_S(key, field) { auto _v=json_str(req.body,key); if(!_v.empty()) G.field=_v; }
 #define APPLY_B(key, field) { if(req.body.find("\""+std::string(key)+"\"")!=std::string::npos) G.field=json_bool(req.body,key,G.field); }
@@ -2221,6 +2269,7 @@ int main(int argc, char* argv[]) {
 
     load_cues_from_disk();
     load_lasers_from_disk();
+    load_magic_from_disk();
 
     std::thread laser_t(laser_thread);
     std::thread midi_t(midi_thread);
@@ -2591,6 +2640,35 @@ int main(int argc, char* argv[]) {
         res.set_content("{\"moved\":"+std::to_string(from)+",\"to\":"+std::to_string(to)+"}","application/json");
     });
 
+    // ── GET /api/magic-touch[?rev=<n>] — shared Magic Touch layout ─────────────
+    // Returns {"rev":<n>,"layout":<object|null>}. If ?rev matches the current
+    // revision, "layout" is omitted (nothing changed) - keeps polling cheap.
+    svr.Get("/api/magic-touch",[](const httplib::Request& req,httplib::Response& res){
+        std::lock_guard<std::mutex> lk(G_magic_mtx);
+        std::string rev = std::to_string(G_magic_rev);
+        if (req.has_param("rev") && req.get_param_value("rev") == rev) {
+            res.set_content("{\"rev\":"+rev+"}","application/json");
+            return;
+        }
+        res.set_content("{\"rev\":"+rev+",\"layout\":"+(G_magic_layout.empty()?std::string("null"):G_magic_layout)+"}","application/json");
+    });
+
+    // ── POST /api/magic-touch — replace the shared layout (body: JSON object) ──
+    svr.Post("/api/magic-touch",[](const httplib::Request& req,httplib::Response& res){
+        std::string body = trim_ws(req.body);
+        if (body.size() < 2 || body.front() != '{' || body.back() != '}' || body.size() > MAGIC_MAX_BYTES) {
+            res.status=400; res.set_content("{\"error\":\"layout must be a JSON object\"}","application/json"); return;
+        }
+        long long rev;
+        {
+            std::lock_guard<std::mutex> lk(G_magic_mtx);
+            G_magic_layout = body;
+            rev = ++G_magic_rev;
+            save_magic_to_disk(body);
+        }
+        res.set_content("{\"rev\":"+std::to_string(rev)+"}","application/json");
+    });
+
     // ── WebSocket /ws/points ───────────────────────────────────────────────────
     svr.WebSocket("/ws/points",[](const httplib::Request&,httplib::ws::WebSocket& ws){
         {std::lock_guard<std::mutex> lk(G_ws_mtx);G_ws_clients.insert(&ws);}
@@ -2610,6 +2688,7 @@ int main(int argc, char* argv[]) {
               << "  POST /blackout/<0|1>  /flash/<0|1>  /mirror/x/<0|1>  /motion/hold/<0|1>\n"
               << "  POST /brightness/gate/<0|1>  /rotation/reset\n"
               << "  GET /api/lasers   POST /api/lasers   POST /api/lasers/<id>   DELETE /api/lasers/<id>\n"
+              << "  GET/POST /api/magic-touch   (shared Magic Touch layout)\n"
               << "  WS   /ws/points\n"
               << "  MIDI: optional, see backend/midi_map.json (Akai APC40 mkII or any USB controller)\n";
 

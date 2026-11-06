@@ -317,6 +317,28 @@ export async function moveCue(from, to) {
   await fetchCues()
 }
 
+// ── Magic Touch layout (shared by all clients, see /api/magic-touch) ──────────
+// Last layout seen from / sent to the backend, kept at module level so the
+// builder can show it instantly when it is mounted again.
+export const magicTouch = { rev: null, layout: null }
+
+// Returns true when the backend has a layout revision this client hasn't seen yet.
+export async function fetchMagicTouch() {
+  const data = await api(`/magic-touch${magicTouch.rev === null ? '' : `?rev=${magicTouch.rev}`}`)
+  if (!('layout' in data)) return false
+  magicTouch.rev = data.rev
+  magicTouch.layout = data.layout
+  return true
+}
+
+// `body` is the already serialized layout object.
+// The cache is updated before the request so a quick remount already shows the new layout.
+export async function saveMagicTouch(body) {
+  magicTouch.layout = JSON.parse(body)
+  const data = await api('/magic-touch', { method: 'POST', body })
+  magicTouch.rev = data.rev
+}
+
 // ── Status polling ─────────────────────────────────────────────────────────────
 // Keeps this client's view of laserState in sync even when another client
 // (a different browser tab, curl, etc.) changes settings on the backend.
