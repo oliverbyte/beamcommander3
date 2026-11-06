@@ -924,6 +924,7 @@ static void laser_thread() {
                 && now_tp >= rt.next_connect_attempt) {
                 if (rt.ctrl) { rt.ctrl->setArmed(false); rt.ctrl.reset(); }
                 etherdream::EtherDreamControllerInfo info(l.ip, "Ether Dream", l.ip, 7765, 4095);
+                info.setDriverId("libera.builtin.etherdream");
                 rt.ctrl = sys.connectController(info);
                 if (!rt.ctrl) {
                     std::cout << "[laser] connect failed " << l.name << " (" << l.ip << ")\n" << std::flush;
