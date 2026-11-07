@@ -250,6 +250,7 @@ const VALUE_FNS = {
   color_b: num('Color', 'Blue', 'b', 0, 1),
   rainbow_amount: num('Color', 'Rainbow amount', 'rainbow_amount', 0, 1),
   rainbow_speed: num('Color', 'Rainbow speed', 'rainbow_speed', 0, 4, 1),
+  rainbow_phase: num('Color', 'Rainbow phase per laser', 'rainbow_phase_degrees', 0, 360, 0, '°'),
   radius: num('Shapes', 'Radius', 'radius', 0.05, 1),
   shape_scale: num('Shapes', 'Shape scale', 'shape_scale', -1, 1),
   points: num('Shapes', 'Points', 'points', 8, 1000, 0),

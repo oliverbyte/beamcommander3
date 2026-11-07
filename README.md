@@ -175,8 +175,12 @@ for how the packaged macOS/Windows builds are put together.
    set **Phase step per laser** to spread movement across the installation
    order. Laser 1 starts at 0°; each following laser adds one slider step
    (e.g. 90° staggers four lasers evenly). Preview and hardware use the same
-   phase offsets. Every change is instant, nothing needs to be "applied" or
-   saved first.
+   phase offsets. In Color, **Rainbow amount** fades from the current beam
+   color into a rainbow (0 = off, higher = ever smaller color bands), and
+   **Rainbow phase per laser** makes the rainbow run from laser to laser:
+   laser 1 changes color first, each following laser follows one phase step
+   later, and inside each line/wave the new colors run in from the left.
+   Every change is instant, nothing needs to be "applied" or saved first.
 4. **Flash / Blackout**: the ⚡ Flash button punches the beam to full white
    brightness while held, then returns to whatever it was showing before.
    Blackout forces the real laser dark (the on-screen preview keeps
@@ -325,7 +329,8 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /move/mode/<mode>` | `none`, `circle`, `pan`, `tilt`, `tiltup`, `tiltdown`, `eight`, `random` |
 | `POST /move/speed/<v>` / `/move/size/<v>` | Movement cycle speed / amplitude |
 | `POST /api/state` `move_phase_degrees` | Phase offset added per laser in configured order; laser 1 uses 0°, laser 2 uses 1× the value, laser 3 uses 2×, etc. Saved and recalled with cues |
-| `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow color blend / hue cycle speed |
+| `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow amount (0 = off, rising = ever smaller color bands, 1 = 24 rainbow cycles across the shape; always starts from the current beam color and fades in over the first 10% so turning it up is seamless) / hue cycle speed |
+| `POST /laser/rainbow/phase/<deg>` (or `/api/state` `rainbow_phase_degrees`) | Rainbow delay per laser in configured order, 0-360° (360° = one full hue cycle). Every laser runs the same rainbow animation; laser 2 runs 1× the value behind laser 1, laser 3 2×, etc., so new colors pass from laser to laser (left to right inside lines/waves). After switching the rainbow on, all lasers start at the beam color and join one after another. Needs `rainbow_speed` ≠ 0. Saved and recalled with cues |
 | `POST /blackout/<0\|1>` | Force *hardware* output dark (never affects the browser preview) |
 | `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate, *hardware-only* (never affects the browser preview - same treatment as blackout above): 1 = open instantly (renders the current brightness fader value), 0 = closed (fades to dark over `flash_release_ms`, or instantly if it's 0) — defaults **open**; `blackout` is the one safety gate that defaults on. Closing this only matters to rigs with a physical footswitch/pedal wired up. Never touches the `intensity` field itself |
 | `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (always restores them instantly - `flash_release_ms` does not apply here, only to the footswitch gate above) |
@@ -351,7 +356,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 `rate_kpps`, `max_rate_kpps`, `intensity`, `flash_release_ms`, `r`, `g`, `b`,
 `shape_scale`, `pos_x`, `pos_y`, `rotation_speed`, `mirror_x`, `move_mode`,
 `move_speed`, `move_size`, `move_phase_degrees`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
-`rainbow_amount`, `rainbow_speed`, `blackout`, `dot_amount`, `flicker_hz`.
+`rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `blackout`, `dot_amount`, `flicker_hz`.
 
 `flash_release_ms`, `intensity`, `blackout` and `max_rate_kpps` are *global*
 daemon settings, not part of a cue's show state: saving a cue never captures
@@ -364,8 +369,8 @@ Each laser's own configuration (`armed`, `mirror_x`, zone calibration,
 preview position, and installation order - see `/api/lasers` above) is
 excluded from cue state because it is physical setup, not a show look. It
 survives cue saves/recalls and `/api/reset` untouched, and persists in
-`lasers.json`. `move_phase_degrees`, by contrast, is part of the show state
-and is saved/recalled with cues.
+`lasers.json`. `move_phase_degrees` and `rainbow_phase_degrees`, by
+contrast, are part of the show state and are saved/recalled with cues.
 
 ## Multi-client sync
 
@@ -443,7 +448,7 @@ applied, matching the original BeamCommander's MIDI mapper:
 curve fields above):**
 `r`, `g`, `b`, `intensity`, `shape_scale`, `rotation_speed`, `pos_x`, `pos_y`,
 `dot_amount`, `flicker_hz`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
-`rainbow_amount`, `rainbow_speed`, `move_size`, `move_speed`, `rate_kpps`,
+`rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `move_size`, `move_speed`, `rate_kpps`,
 `flash_release_ms` (0-2000ms; ported from the original BeamCommander's
 `flashReleaseMs` knob - the shipped binding uses `relative: true` since the
 APC40's "Cue Level" knob this is mapped to is an endless encoder, not an
@@ -467,7 +472,7 @@ pressed).
 `move:<none|circle|pan|tilt|eight|random>`,
 `color:<red|green|blue|white>` (plus `orange`, `yellow`, `cyan`, `magenta` if
 you want to bind extra buttons to them),
-`rainbow_preset_slowfull` (full rainbow blend at a slow speed, one press),
+`rainbow_preset_slowfull` (rainbow amount 1 - the densest color bands - at a slow speed, one press),
 `blackout_toggle` / `blackout_hold` (dark until pressed again, vs. dark only
 while held — the original APC40 mapping uses `_hold`),
 `flash` (forces color to white *and* full brightness only while held - also

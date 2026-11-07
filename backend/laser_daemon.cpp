@@ -198,6 +198,7 @@ struct LaserState {
     // Rainbow
     float rainbow_amount  = 0.0f;     // 0..1 blend
     float rainbow_speed   = 0.0f;     // hue cycles/sec
+    float rainbow_phase_degrees = 0.0f; // hue offset per configured laser, degrees (360 = one full hue cycle)
 
     // FX
     // Blackout is a global daemon safety setting, not part of the per-cue
@@ -289,7 +290,7 @@ static double G_time = 0.0;
 static double             G_move_phase     = 0.0; // radians
 static std::atomic<double> G_rotation_phase{0.0}; // radians
 static double             G_wave_phase     = 0.0; // radians
-static double             G_rainbow_phase  = 0.0; // cycles (0..1, wraps via fmod)
+static double             G_rainbow_phase  = 0.0; // cycles, *unwrapped* (0 = rainbow just switched on) - see laser_thread()
 
 // Exponential position smoothing (ported from the original BeamCommander's
 // ofApp.cpp `smoothOne`): pos_x/pos_y are treated as a *target*, and the
@@ -468,6 +469,19 @@ static Pt calc_movement(const LaserState& s, double phase_value) {
     return {0.0f,0.0f};
 }
 
+// Simple RGB->HSV (all 0..1; h = 0 for grey/white/black)
+static void rgb_to_hsv(float r, float g, float b, float& h, float& s, float& v) {
+    float mx = std::max({r, g, b}), mn = std::min({r, g, b}), d = mx - mn;
+    v = mx;
+    s = mx > 0.0f ? d / mx : 0.0f;
+    if (d <= 0.0f) { h = 0.0f; return; }
+    if (mx == r)      h = (g - b) / d;
+    else if (mx == g) h = 2.0f + (b - r) / d;
+    else              h = 4.0f + (r - g) / d;
+    h /= 6.0f;
+    if (h < 0.0f) h += 1.0f;
+}
+
 // Simple HSV->RGB (h 0..1)
 static void hsv_to_rgb(float h, float s, float v, float& r, float& g, float& b) {
     if (s == 0) { r=g=b=v; return; }
@@ -480,7 +494,7 @@ static void hsv_to_rgb(float h, float s, float v, float& r, float& g, float& b) 
     }
 }
 
-static core::Frame make_frame(const LaserState& s, double movement_phase) {
+static core::Frame make_frame(const LaserState& s, double movement_phase, double rainbow_cycles) {
     auto base = gen_base_shape(s);
 
     // Rotation - always applied at the current phase, even when
@@ -601,8 +615,24 @@ static core::Frame make_frame(const LaserState& s, double movement_phase) {
         frame_blank = (phase > period * 0.5);
     }
 
-    // Rainbow phase
-    float rainbow_phase = (float)std::fmod(G_rainbow_phase, 1.0);
+    // Rainbow: anchored to the current beam color so turning rainbow_amount
+    // up from 0 starts *at* that color instead of jumping to red. The hue
+    // starts at the beam color's hue (rainbow_cycles is this laser's
+    // animated hue position, 0 when the rainbow was just switched on - see
+    // the per-laser delay in laser_thread()), and over the first
+    // kRainbowFadeIn of the amount range saturation/brightness glide from
+    // the beam color's own S/V to the full rainbow S=V=1. So a pure beam
+    // color, white or a dimmed color all blend in without a step.
+    constexpr float kRainbowFadeIn = 0.1f;
+    float rb_fade = std::clamp(s.rainbow_amount / kRainbowFadeIn, 0.0f, 1.0f);
+    rb_fade = rb_fade * rb_fade * (3.0f - 2.0f * rb_fade); // smoothstep
+    float beam_h, beam_s, beam_v;
+    rgb_to_hsv(std::clamp(s.r, 0.0f, 1.0f), std::clamp(s.g, 0.0f, 1.0f), std::clamp(s.b, 0.0f, 1.0f),
+               beam_h, beam_s, beam_v);
+    const float rb_sat = beam_s + (1.0f - beam_s) * rb_fade;
+    const float rb_val = beam_v + (1.0f - beam_v) * rb_fade;
+    float rainbow_phase = (float)std::fmod(beam_h + rainbow_cycles, 1.0);
+    if (rainbow_phase < 0.0f) rainbow_phase += 1.0f;
 
     core::Frame frame;
     int n = n0;
@@ -625,21 +655,28 @@ static core::Frame make_frame(const LaserState& s, double movement_phase) {
         float fr = s.r, fg = s.g, fb = s.b;
 
         // Spatial rainbow, ported from the original BeamCommander's
-        // colorForX(): once rainbow_amount > 0, points get a *full*
+        // colorForX(): once rainbow_amount > 0 (past the short fade-in
+        // from the beam color, see rb_fade above), points get a *full*
         // saturated HSV rainbow color (fully replacing the selected beam
-        // color, not a washed-out lerp blend with it) - amount only
-        // controls how many color bands repeat across the shape (0 =
-        // dense rainbow stripes, 1 = the whole shape is a single solid
-        // hue), while rainbow_speed animates that hue over time via
+        // color, not a washed-out lerp blend with it) - amount
+        // controls how many color bands repeat across the shape (0 = no
+        // rainbow at all, just above 0 = one wide hue band, growing
+        // towards 1 = ever smaller bands, up to 24 rainbow cycles across
+        // the shape), while rainbow_speed animates that hue over time via
         // rainbow_phase. Skipped while a white flash is held so flash
         // always wins - matches the original app's whiteFlash check,
         // which short-circuits colorForX the same way.
         if (s.rainbow_amount > 0.0f && !g_flash_active) {
             float x_norm = n > 1 ? (float)i / (float)(n - 1) : 0.0f;
-            float cycles_across = (1.0f - s.rainbow_amount) * 24.0f;
-            float hue = std::fmod(rainbow_phase + x_norm * cycles_across, 1.0f);
+            float cycles_across = s.rainbow_amount * 24.0f;
+            // Minus, not plus: as rainbow_phase advances, each hue band then
+            // moves towards higher x_norm, so new colors enter at the start
+            // of the shape (left for lines/waves) and run to the other end -
+            // the same left-to-right direction the per-laser rainbow delay
+            // chain (laser_thread()) passes them from laser to laser.
+            float hue = std::fmod(rainbow_phase - x_norm * cycles_across, 1.0f);
             if (hue < 0.0f) hue += 1.0f;
-            hsv_to_rgb(hue, 1.0f, 1.0f, fr, fg, fb);
+            hsv_to_rgb(hue, rb_sat, rb_val, fr, fg, fb);
         }
 
         // Master brightness. The footswitch gate (g_gate_level) is
@@ -754,6 +791,7 @@ static std::string state_to_json() {
        << "\"wave_speed\":"    << G.wave_speed     << ","
        << "\"rainbow_amount\":" << G.rainbow_amount << ","
        << "\"rainbow_speed\":" << G.rainbow_speed  << ","
+       << "\"rainbow_phase_degrees\":" << G.rainbow_phase_degrees << ","
        << "\"blackout\":"      << (G.blackout?"true":"false") << ","
        << "\"dot_amount\":"    << G.dot_amount     << ","
        << "\"flicker_hz\":"    << G.flicker_hz     << ","
@@ -847,7 +885,12 @@ static void laser_thread() {
             // animation rate gradually instead of snapping to a new speed
             // instantly - matching the same glide the value knobs get.
             G_wave_phase     = std::fmod(G_wave_phase     + G_wave_speed_smooth * dt * tau, tau);
-            G_rainbow_phase  = std::fmod(G_rainbow_phase  + G.rainbow_speed  * dt, 1.0);
+            // Held at 0 while the rainbow is off, so turning it back on
+            // always starts at the current beam color (see make_frame()).
+            // Deliberately not wrapped: the per-laser rainbow delay below
+            // needs to know how far the hue has travelled since switch-on.
+            G_rainbow_phase  = G.rainbow_amount > 0.0f
+                ? G_rainbow_phase + G.rainbow_speed * dt : 0.0;
 
             // Slew the rendered position toward the latest pos_x/pos_y
             // target (see smooth_toward's comment above).
@@ -1002,15 +1045,37 @@ static void laser_thread() {
         }
 
         LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap = G; }
-        auto frame = make_frame(snap, G_move_phase);
+        auto frame = make_frame(snap, G_move_phase, G_rainbow_phase);
         std::vector<std::pair<int, core::Frame>> laserFrames;
+        // Per-laser offsets: laser i (Lasers-list order, laser 1 = 0) gets
+        // i * move_phase_degrees added to its movement phase, so the
+        // movement runs "one after another" across the rig instead of in
+        // unison. The rainbow works as a delay chain instead: laser i runs
+        // the exact same hue animation as laser 1, just i *
+        // rainbow_phase_degrees (360 = one full hue cycle) behind it. Right
+        // after the rainbow is switched on every laser therefore still
+        // shows the beam color, laser 1 starts cycling first and the others
+        // follow one after another - no laser jumps to an offset hue - and
+        // once the chain has caught up it is a steady hue spread.
         const double phaseStep = snap.move_phase_degrees * (std::acos(-1.0) / 180.0);
-        if (snap.move_mode != "none" && std::abs(phaseStep) > 1e-9 && !lasers_snapshot.empty()) {
+        const double rainbowStep = snap.rainbow_phase_degrees / 360.0; // hue cycles
+        const bool movePhased = snap.move_mode != "none" && std::abs(phaseStep) > 1e-9;
+        const bool rainbowPhased = snap.rainbow_amount > 0.0f && std::abs(rainbowStep) > 1e-9;
+        if ((movePhased || rainbowPhased) && !lasers_snapshot.empty()) {
             laserFrames.reserve(lasers_snapshot.size());
             laserFrames.emplace_back(lasers_snapshot[0].id, frame);
             for (std::size_t i = 1; i < lasers_snapshot.size(); ++i) {
-                const double laserPhase = G_move_phase + static_cast<double>(i) * phaseStep;
-                laserFrames.emplace_back(lasers_snapshot[i].id, make_frame(snap, laserPhase));
+                const double k = static_cast<double>(i);
+                const double laserPhase = G_move_phase + (movePhased ? k * phaseStep : 0.0);
+                double laserHue = G_rainbow_phase;
+                if (rainbowPhased) {
+                    // Lag behind laser 1 along the direction of travel,
+                    // but never past the switch-on point (hue position 0).
+                    laserHue = G_rainbow_phase >= 0.0
+                        ? std::max(0.0, G_rainbow_phase - k * rainbowStep)
+                        : std::min(0.0, G_rainbow_phase + k * rainbowStep);
+                }
+                laserFrames.emplace_back(lasers_snapshot[i].id, make_frame(snap, laserPhase, laserHue));
             }
         }
 
@@ -1253,6 +1318,7 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"wave_speed\":"    << s.wave_speed    << ","
        << "\"rainbow_amount\":" << s.rainbow_amount << ","
        << "\"rainbow_speed\":" << s.rainbow_speed << ","
+       << "\"rainbow_phase_degrees\":" << s.rainbow_phase_degrees << ","
        << "\"dot_amount\":"    << s.dot_amount    << ","
        << "\"flicker_hz\":"    << s.flicker_hz
        << "}";
@@ -1283,6 +1349,7 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.wave_speed      = json_float(obj,"wave_speed",s.wave_speed);
     s.rainbow_amount  = json_float(obj,"rainbow_amount",s.rainbow_amount);
     s.rainbow_speed   = json_float(obj,"rainbow_speed",s.rainbow_speed);
+    s.rainbow_phase_degrees = json_float(obj,"rainbow_phase_degrees",s.rainbow_phase_degrees);
     s.dot_amount      = json_float(obj,"dot_amount",s.dot_amount);
     s.flicker_hz      = json_float(obj,"flicker_hz",s.flicker_hz);
     return s;
@@ -1566,6 +1633,7 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     if (action=="wave_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.wave_speed=out; return; }
     if (action=="rainbow_amount") { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_amount=std::clamp(out,0.0f,1.0f); return; }
     if (action=="rainbow_speed")  { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_speed=out; return; }
+    if (action=="rainbow_phase_degrees") { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_phase_degrees=std::clamp(out,0.0f,360.0f); return; }
     if (action=="move_size")      { std::lock_guard<std::mutex> lk(G_mtx); G.move_size=std::clamp(out,0.0f,6.0f); return; }
     if (action=="move_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.move_speed=std::max(0.0f,out); return; }
     if (action=="move_phase_degrees") { std::lock_guard<std::mutex> lk(G_mtx); G.move_phase_degrees=std::clamp(out,0.0f,360.0f); return; }
@@ -2377,6 +2445,7 @@ int main(int argc, char* argv[]) {
         APPLY_F("wave_speed",wave_speed)
         APPLY_F("rainbow_amount",rainbow_amount) APPLY_CLAMP("rainbow_amount",rainbow_amount,0,1)
         APPLY_F("rainbow_speed",rainbow_speed)
+        APPLY_F("rainbow_phase_degrees",rainbow_phase_degrees) APPLY_CLAMP("rainbow_phase_degrees",rainbow_phase_degrees,0,360)
         APPLY_F("dot_amount",dot_amount) APPLY_CLAMP("dot_amount",dot_amount,0,1)
         APPLY_F("flicker_hz",flicker_hz)
         APPLY_B("blackout",blackout)
@@ -2460,6 +2529,11 @@ int main(int argc, char* argv[]) {
     // ── POST /laser/rainbow/amount/<val>  /speed/<val> ─────────────────────────
     svr.Post(R"(/laser/rainbow/amount/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
         try{std::lock_guard<std::mutex> lk(G_mtx);G.rainbow_amount=std::clamp(std::stof(std::string(req.matches[1])),0.0f,1.0f);}catch(...){}
+        res.set_content(state_to_json(),"application/json");
+    });
+    // ── POST /laser/rainbow/phase/<deg> ─ hue offset per laser, 0..360 ────────
+    svr.Post(R"(/laser/rainbow/phase/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
+        try{std::lock_guard<std::mutex> lk(G_mtx);G.rainbow_phase_degrees=std::clamp(std::stof(std::string(req.matches[1])),0.0f,360.0f);}catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
     svr.Post(R"(/laser/rainbow/speed/(-?[\d.]+))",[](const httplib::Request& req,httplib::Response& res){

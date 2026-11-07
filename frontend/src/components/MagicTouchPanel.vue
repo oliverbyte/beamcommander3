@@ -280,6 +280,7 @@ const MOVES = ['none', 'circle', 'pan', 'tilt', 'tiltup', 'tiltdown', 'eight', '
 const COLOR_CONTROLS = [
   { label: 'Rainbow amount', key: 'rainbow_amount', min: 0, max: 1, step: 0.01, decimals: 2 },
   { label: 'Rainbow speed', key: 'rainbow_speed', min: 0, max: 4, step: 0.1, decimals: 1 },
+  { label: 'Rainbow phase per laser', key: 'rainbow_phase_degrees', min: 0, max: 360, step: 1, decimals: 0, suffix: '°' },
 ]
 const SHAPE_CONTROLS = [
   { label: 'Radius', key: 'radius', min: 0.05, max: 1, step: 0.01, decimals: 2 },

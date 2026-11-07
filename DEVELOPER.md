@@ -338,6 +338,18 @@ that point forward; the current position in the cycle is preserved and the
 animation stays smooth. These globals are never locked - only
 `laser_thread()` ever touches them, matching the existing `G_time` pattern.
 
+`G_rainbow_phase` is the one exception to the wrapping: it is *not* kept in
+0..1, and it is held at 0 while `rainbow_amount` is 0. `make_frame()` takes
+the hue position as a parameter and adds it to the beam color's own hue, so
+switching the rainbow on always starts at the current color (saturation and
+brightness also glide from the beam color to full over the first 10% of
+`rainbow_amount`). The unwrapped value lets `laser_thread()` run
+`rainbow_phase_degrees` as a delay chain: laser *i* gets
+`max(0, G_rainbow_phase - i * step)`, i.e. the same animation, *i* steps
+later, never earlier than the switch-on point. The spatial bands use
+`hue = phase - x * cycles`, so they travel towards higher x (left to right on
+lines/waves) - the same direction the chain passes colors between lasers.
+
 `rotation_speed`'s sign is negated at the single point where its phase is
 integrated (not in every setter) so the rotation direction is reversed
 uniformly regardless of which API set it.
