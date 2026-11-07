@@ -1,7 +1,12 @@
 <template>
   <section class="mtb" :class="{ editing, loading: !loaded }">
     <div ref="bodyEl" class="mtb-body">
-      <div ref="canvasEl" class="mtb-canvas" @pointerdown.self="selectedIds = []">
+      <div
+        ref="canvasEl" class="mtb-canvas"
+        @pointerdown.self="selectedIds = []"
+        @pointerdown.capture="onPanDown" @pointermove.capture="onPanMove"
+        @pointerup.capture="onPanUp" @pointercancel.capture="onPanUp"
+      >
         <p v-if="!widgets.length" class="mtb-empty">
           {{ editing ? 'Add an element to get started.' : 'Nothing here yet. Switch to edit mode to add controls.' }}
         </p>
@@ -50,6 +55,22 @@
             <div v-if="w.showValue !== false" class="mtb-value" :style="textStyle(w, 'valueScale', 12)">{{ display(w) }}</div>
           </template>
 
+          <template v-else-if="w.type === 'xy'">
+            <div v-if="w.showLabel !== false" class="mtb-label" :style="textStyle(w, 'labelScale', 12)">{{ w.label }}</div>
+            <div
+              class="mtb-xy"
+              @pointerdown="onXYDown($event, w)"
+              @pointermove="onXYMove($event, w)"
+              @pointerup="onXYUp"
+              @pointercancel="onXYUp"
+            >
+              <div class="mtb-xy-line v" :style="{ left: ratio(w) * 100 + '%' }"></div>
+              <div class="mtb-xy-line h" :style="{ top: (1 - axisRatio(w, defForY(w), w.invY)) * 100 + '%' }"></div>
+              <div class="mtb-xy-dot" :style="{ left: ratio(w) * 100 + '%', top: (1 - axisRatio(w, defForY(w), w.invY)) * 100 + '%' }"></div>
+            </div>
+            <div v-if="w.showValue !== false" class="mtb-value" :style="textStyle(w, 'valueScale', 12)">{{ display(w) }} · {{ displayY(w) }}</div>
+          </template>
+
           <template v-else>
             <button
               class="mtb-pad"
@@ -63,12 +84,14 @@
             >
               <CuePreview v-if="defFor(w).cuePad && cues[w.param]" :cue="cues[w.param]" />
               <span v-if="defFor(w).icon" class="mtb-pad-icon" aria-hidden="true" v-html="defFor(w).icon"></span>
-              <span v-if="w.showLabel !== false" :class="{ 'mtb-pad-text-small': defFor(w).icon }" :style="textStyle(w, 'labelScale', defFor(w).icon ? 9 : 12)">{{ w.label }}</span>
+              <span v-if="w.showLabel !== false" class="mtb-pad-text" :class="{ 'mtb-pad-text-small': defFor(w).icon }" :style="textStyle(w, 'labelScale', defFor(w).icon ? 9 : 12)"><span v-fit="`${w.label}|${w.labelScale}`" class="mtb-fit">{{ w.label }}</span></span>
             </button>
           </template>
 
           <div v-if="editing" class="mtb-resize" @pointerdown.stop="onResizeDown($event, w)"></div>
         </div>
+        <!-- Stretches the scroll area past the outermost element (layouts built on wider screens). -->
+        <div class="mtb-spacer" :style="{ left: `${contentSize.w}px`, top: `${contentSize.h}px` }" aria-hidden="true"></div>
         <template v-for="(g, i) in guides" :key="i">
           <div v-if="g.x !== undefined" class="mtb-guide v" :style="{ left: g.x + 'px' }"></div>
           <div v-else class="mtb-guide h" :style="{ top: g.y + 'px' }"></div>
@@ -101,6 +124,7 @@
               <button class="mtb-btn" @click="addWidget('fader')">Fader</button>
               <button class="mtb-btn" @click="addWidget('knob')">Knob</button>
               <button class="mtb-btn" @click="addWidget('button')">Button</button>
+              <button class="mtb-btn" @click="addWidget('xy')">X/Y pad</button>
             </div>
           </section>
           <section>
@@ -109,21 +133,42 @@
               <label>Label
                 <input v-model="selected.label" class="mtb-field" type="text" maxlength="24" />
               </label>
-              <label>Function
+              <label>{{ selected.type === 'xy' ? 'X function (horizontal)' : 'Function' }}
                 <select class="mtb-field" :value="selected.fn" @change="onFunctionChange(selected, $event.target.value)">
                   <optgroup v-for="group in groupedFunctions(selected.type)" :key="group.name" :label="group.name">
                     <option v-for="item in group.items" :key="item.id" :value="item.id">{{ item.label }}</option>
                   </optgroup>
                 </select>
               </label>
+              <label v-if="selected.type !== 'button'" class="mtb-check">
+                <input type="checkbox" :checked="!!selected.inv" @change="selected.inv = $event.target.checked || undefined" /> Invert{{ selected.type === 'xy' ? ' X' : '' }}
+              </label>
+              <template v-if="selected.type === 'xy'">
+                <label>Y function (vertical)
+                  <select class="mtb-field" :value="selected.fnY" @change="onFunctionYChange(selected, $event.target.value)">
+                    <optgroup v-for="group in groupedFunctions('xy')" :key="group.name" :label="group.name">
+                      <option v-for="item in group.items" :key="item.id" :value="item.id">{{ item.label }}</option>
+                    </optgroup>
+                  </select>
+                </label>
+                <label class="mtb-check">
+                  <input type="checkbox" :checked="!!selected.invY" @change="selected.invY = $event.target.checked || undefined" /> Invert Y
+                </label>
+              </template>
               <label v-if="defFor(selected).param">{{ defFor(selected).param.label }}
                 <input class="mtb-field" type="number" :min="defFor(selected).param.min" :max="defFor(selected).param.max" :value="selected.param" @change="onParamChange(selected, $event.target.value)" />
+              </label>
+              <label v-if="defFor(selected).momentaryOption" class="mtb-check" title="The cue is only active while the button is held; releasing restores the previous look">
+                <input type="checkbox" :checked="!!selected.momentary" @change="selected.momentary = $event.target.checked || undefined" /> Momentary (only while held)
               </label>
               <label class="mtb-check">
                 <input type="checkbox" :checked="selected.showLabel !== false" @change="selected.showLabel = $event.target.checked" /> Show label
               </label>
               <label v-if="selected.type !== 'button'" class="mtb-check">
                 <input type="checkbox" :checked="selected.showValue !== false" @change="selected.showValue = $event.target.checked" /> Show value
+              </label>
+              <label v-if="selected.type !== 'button'" class="mtb-check" title="Value changes slowly at first and faster towards the end (around the centre for functions centred on 0)">
+                <input type="checkbox" :checked="!!selected.log" @change="selected.log = $event.target.checked || undefined" /> Logarithmic curve
               </label>
               <div v-for="item in sizeControls(selected)" :key="item.key" class="mtb-size">
                 <span>{{ item.label }}</span>
@@ -155,15 +200,18 @@
       </div>
     </div>
 
-    <nav class="mtb-pages" aria-label="Pages">
-      <button
-        v-for="page in pages" :key="page.id"
-        class="mtb-page-tab"
-        :class="{ active: page.id === activePage.id }"
-        @click="selectPage(page.id)"
-      >{{ page.name }}</button>
-      <button v-if="editing" class="mtb-page-tab add" aria-label="Add page" @click="addPage">+</button>
-    </nav>
+    <!-- Page tabs live in the Magic Touch header, left of the Run/Edit toggle (frees the bottom row). -->
+    <Teleport defer to="#mtb-page-slot">
+      <nav class="mtb-pages" aria-label="Pages">
+        <button
+          v-for="page in pages" :key="page.id"
+          class="mtb-page-tab"
+          :class="{ active: page.id === activePage.id }"
+          @click="selectPage(page.id)"
+        >{{ page.name }}</button>
+        <button v-if="editing" class="mtb-page-tab add" aria-label="Add page" @click="addPage">+</button>
+      </nav>
+    </Teleport>
   </section>
 </template>
 
@@ -171,6 +219,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   flashPress, flashRelease, cues, isCueCurrent, laserState, lasers, markLocalChange, recallCue, resetState,
+  momentaryCuePress, momentaryCueRelease,
   setBrightnessGate, updateLaser, updateState, magicTouch, fetchMagicTouch, saveMagicTouch,
 } from '../composables/useLaserSocket.js'
 import CuePreview from './CuePreview.vue'
@@ -180,10 +229,11 @@ import { buildDefaultPages, colorFnId, COLORS, MOVES, SHAPES } from './magicLayo
 // Pages live on the backend (GET/POST /api/magic-touch) so every client shares one layout.
 // This old per-browser key is only read once, to migrate a layout into an empty backend.
 const LEGACY_STORAGE_KEY = 'bc3.magicTouch.layout.v3'
-const MIN_SIZE = { fader: [70, 140], knob: [80, 100], button: [70, 50] }
-const DEFAULT_SIZE = { fader: [110, 280], knob: [120, 150], button: [120, 80] }
-const DEFAULT_FN = { fader: 'master_brightness', knob: 'release_time', button: 'flash' }
-const TYPE_NAMES = { fader: 'Fader', knob: 'Knob', button: 'Button' }
+const MIN_SIZE = { fader: [70, 140], knob: [80, 100], button: [70, 50], xy: [120, 120] }
+const DEFAULT_SIZE = { fader: [110, 280], knob: [120, 150], button: [120, 80], xy: [240, 264] }
+const DEFAULT_FN = { fader: 'master_brightness', knob: 'release_time', button: 'flash', xy: 'pos_x' }
+const DEFAULT_FN_Y = 'pos_y'
+const TYPE_NAMES = { fader: 'Fader', knob: 'Knob', button: 'Button', xy: 'X/Y pad' }
 const CUE_COUNT = 128
 const LASER_SLOTS = 8
 
@@ -236,7 +286,14 @@ const BUTTON_FNS = {
   blackout_toggle: { group: 'Master', label: 'Blackout toggle', mode: 'trigger', press: () => updateState({ blackout: !laserState.blackout }), active: () => laserState.blackout },
   gate_toggle: { group: 'Master', label: 'Output gate toggle', mode: 'trigger', press: () => setBrightnessGate(!laserState.brightness_gate_open), active: () => laserState.brightness_gate_open },
   reset: { group: 'Master', label: 'Reset settings', mode: 'trigger', press: () => resetState() },
-  cue_recall: { group: 'Cues', label: 'Recall cue', mode: 'trigger', cuePad: true, param: { label: 'Cue number', min: 1, max: CUE_COUNT, default: 1 }, press: (w) => recallCue(w.param), active: (w) => isCueCurrent(w.param) },
+  // `momentaryOption`: the element can be switched to momentary (w.momentary) - cue active only while held.
+  cue_recall: {
+    group: 'Cues', label: 'Recall cue', mode: 'trigger', momentaryOption: true, cuePad: true,
+    param: { label: 'Cue number', min: 1, max: CUE_COUNT, default: 1 },
+    press: (w) => (w.momentary ? momentaryCuePress(w.param) : recallCue(w.param)),
+    release: () => momentaryCueRelease(),
+    active: (w) => isCueCurrent(w.param),
+  },
 }
 for (const [name, color] of COLORS) {
   const r = parseInt(color.slice(1, 3), 16) / 255
@@ -262,8 +319,10 @@ for (let n = 1; n <= LASER_SLOTS; n++) {
   }
 }
 
-const FUNCTIONS = { fader: VALUE_FNS, knob: VALUE_FNS, button: BUTTON_FNS }
+// X/Y pads: `fn` is the horizontal function, `fnY` the vertical one (both value functions).
+const FUNCTIONS = { fader: VALUE_FNS, knob: VALUE_FNS, button: BUTTON_FNS, xy: VALUE_FNS }
 const defFor = (w) => FUNCTIONS[w.type]?.[w.fn]
+const defForY = (w) => VALUE_FNS[w.fnY]
 function groupedFunctions(type) {
   const groups = new Map()
   for (const [id, def] of Object.entries(FUNCTIONS[type])) {
@@ -274,6 +333,7 @@ function groupedFunctions(type) {
 }
 const defaultLabel = (w) => {
   const def = defFor(w)
+  if (w.type === 'xy') return `${def.label} / ${defForY(w)?.label ?? ''}`
   return def.param ? `${def.label} ${w.param}` : def.label
 }
 
@@ -285,7 +345,7 @@ function materialize(spec) {
   return widget
 }
 function cleanWidgets(list) {
-  return (Array.isArray(list) ? list : []).filter((w) => w && defFor(w))
+  return (Array.isArray(list) ? list : []).filter((w) => w && defFor(w) && (w.type !== 'xy' || defForY(w)))
 }
 function defaultPages() {
   return buildDefaultPages().map((p) => ({ id: newId(), name: p.name, widgets: p.widgets.map(materialize) }))
@@ -348,6 +408,11 @@ function onEditorUp() {
   editorDrag = null
   localStorage.setItem(EDITOR_POS_KEY, JSON.stringify(editorPos.value))
 }
+// Bottom-right corner of the content plus a grid margin; drives the scroll area size.
+const contentSize = computed(() => ({
+  w: Math.max(0, ...widgets.value.map((w) => w.x + w.w)) + GRID,
+  h: Math.max(0, ...widgets.value.map((w) => w.y + w.h)) + GRID,
+}))
 const selectedIds = ref([])
 const heldId = ref(null)
 const canvasEl = ref(null)
@@ -392,13 +457,20 @@ function addWidget(type) {
   const offset = (widgets.value.length % 6) * 24
   const fn = DEFAULT_FN[type]
   const [w, h] = DEFAULT_SIZE[type]
-  const widget = materialize({ type, fn, x: 24 + offset, y: 24 + offset, w, h })
+  const spec = { type, fn, x: 24 + offset, y: 24 + offset, w, h }
+  if (type === 'xy') spec.fnY = DEFAULT_FN_Y
+  const widget = materialize(spec)
   widgets.value.push(widget)
   selectedIds.value = [widget.id]
 }
 function removeSelected() {
   widgets.value = widgets.value.filter((w) => !selectedIds.value.includes(w.id))
   selectedIds.value = []
+}
+function onFunctionYChange(w, fn) {
+  const previousLabel = defaultLabel(w)
+  w.fnY = fn
+  if (w.label === previousLabel) w.label = defaultLabel(w)
 }
 function onFunctionChange(w, fn) {
   const previousLabel = defaultLabel(w)
@@ -419,6 +491,44 @@ function sizeControls(w) {
   return list
 }
 function setSize(w, key, value) { w[key] = Number(value) }
+
+// v-fit: makes a button label fit inside its button. The text first wraps at spaces onto
+// more lines; only if a word or the line stack still doesn't fit is the font shrunk (via
+// --fit, relative to its normal size). Icon buttons keep at least half the height for the icon.
+// Re-measured when the button resizes or the bound value (label, size) changes.
+function fitText(el) {
+  const box = el.closest('.mtb-pad')
+  if (!box) return
+  const cs = getComputedStyle(box)
+  let availW = box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 2
+  let availH = box.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom)
+  if (box.querySelector('.mtb-pad-icon')) availH *= 0.5
+  availW = Math.max(1, availW)
+  availH = Math.max(1, availH)
+  el.style.maxWidth = `${availW}px`
+  const fits = (f) => {
+    el.style.setProperty('--fit', f)
+    return el.scrollWidth <= availW + 0.5 && el.offsetHeight <= availH + 0.5
+  }
+  if (fits(1)) return
+  let lo = 0.02
+  let hi = 1
+  for (let i = 0; i < 10; i++) {
+    const mid = (lo + hi) / 2
+    if (fits(mid)) lo = mid
+    else hi = mid
+  }
+  el.style.setProperty('--fit', lo.toFixed(3))
+}
+const vFit = {
+  mounted(el) {
+    el._fitObserver = new ResizeObserver(() => fitText(el))
+    el._fitObserver.observe(el.closest('.mtb-pad') || el)
+    fitText(el)
+  },
+  updated(el, binding) { if (binding.value !== binding.oldValue) fitText(el) },
+  unmounted(el) { el._fitObserver?.disconnect() },
+}
 
 // Right-click menu (edit mode): acts on the selection.
 const bodyEl = ref(null)
@@ -456,12 +566,34 @@ function onParamChange(w, value) {
   if (w.label === previousLabel) w.label = defaultLabel(w)
 }
 
-function ratio(w) {
-  const def = defFor(w)
-  const v = Number(laserState[def.key]) || 0
-  if (def.toRatio) return Math.max(0, Math.min(1, def.toRatio(v)))
-  return Math.max(0, Math.min(1, (v - def.min) / (def.max - def.min)))
+// Optional per-element "logarithmic" curve (w.log): the value changes slowly over the first part
+// of the travel and faster towards the end - position p maps to value ratio p^LOG_CURVE.
+// Functions centred on 0 (rotation, position, ...: min = -max) get the curve mirrored around
+// the centre instead, so they're fine near 0 and speed up towards both ends.
+const LOG_CURVE = 3
+const isBipolar = (def) => !def.toRatio && def.min < 0 && def.min === -def.max
+function curve(def, x, exponent) {
+  if (!isBipolar(def)) return Math.pow(x, exponent)
+  const u = 2 * x - 1
+  return 0.5 + 0.5 * Math.sign(u) * Math.pow(Math.abs(u), exponent)
 }
+const toPosition = (w, def, r) => (w.log ? curve(def, r, 1 / LOG_CURVE) : r)
+const fromPosition = (w, def, p) => (w.log ? curve(def, p, LOG_CURVE) : p)
+
+// Control position (0..1) for the current value of value function `def`. `invert` flips the
+// direction (w.inv for the main/X function, w.invY for an X/Y pad's vertical function).
+function axisRatio(w, def, invert) {
+  const v = Number(laserState[def.key]) || 0
+  const r = def.toRatio ? def.toRatio(v) : (v - def.min) / (def.max - def.min)
+  const p = toPosition(w, def, Math.max(0, Math.min(1, r)))
+  return invert ? 1 - p : p
+}
+function sendAxis(w, def, invert, position) {
+  const p = Math.max(0, Math.min(1, position))
+  const r = fromPosition(w, def, invert ? 1 - p : p)
+  sendValue(def.key, def.fromRatio ? def.fromRatio(r) : def.min + r * (def.max - def.min))
+}
+const ratio = (w) => axisRatio(w, defFor(w), w.inv)
 const percent = (w) => ratio(w) * 100
 const display = (w) => defFor(w).format(Number(laserState[defFor(w).key]) || 0)
 
@@ -480,11 +612,8 @@ function sendValue(key, value) {
     updateState(update).catch(console.error)
   }, 70)
 }
-function sendRatio(w, r) {
-  const def = defFor(w)
-  const clamped = Math.max(0, Math.min(1, r))
-  sendValue(def.key, def.fromRatio ? def.fromRatio(clamped) : def.min + clamped * (def.max - def.min))
-}
+const sendRatio = (w, position) => sendAxis(w, defFor(w), w.inv, position)
+const displayY = (w) => defForY(w).format(Number(laserState[defForY(w).key]) || 0)
 
 let drag = null // { kind: 'move' | 'resize', id, startX, startY, orig }
 const guides = ref([])
@@ -579,6 +708,13 @@ function onDragMove(event) {
 
 // Fader: absolute position along the track.
 let faderActive = false
+// Value before the latest fader/knob touch, so a two-finger scroll that starts right after can undo it.
+let touchStartValue = null // { values: [[key, value], ...], at }
+const rememberValue = (w) => {
+  const keys = [defFor(w).key]
+  if (w.type === 'xy') keys.push(defForY(w).key)
+  touchStartValue = { values: keys.map((key) => [key, laserState[key]]), at: performance.now() }
+}
 function setFromPointer(event, w) {
   const rect = event.currentTarget.getBoundingClientRect()
   sendRatio(w, 1 - (event.clientY - rect.top) / rect.height)
@@ -587,17 +723,62 @@ function onFaderDown(event, w) {
   if (editing.value) return
   event.stopPropagation()
   faderActive = true
+  rememberValue(w)
   event.currentTarget.setPointerCapture(event.pointerId)
   setFromPointer(event, w)
 }
 function onFaderMove(event, w) { if (faderActive) setFromPointer(event, w) }
 function onFaderUp() { faderActive = false }
 
+// X/Y pad: absolute position on the field sets both functions at once (right = more X, up = more Y).
+let xyActive = false
+function setXYFromPointer(event, w) {
+  const rect = event.currentTarget.getBoundingClientRect()
+  sendAxis(w, defFor(w), w.inv, (event.clientX - rect.left) / rect.width)
+  sendAxis(w, defForY(w), w.invY, 1 - (event.clientY - rect.top) / rect.height)
+}
+function onXYDown(event, w) {
+  if (editing.value) return
+  event.stopPropagation()
+  if (isDoubleTap(event, w)) {
+    xyActive = false
+    resetDef(defFor(w))
+    resetDef(defForY(w))
+    return
+  }
+  xyActive = true
+  rememberValue(w)
+  event.currentTarget.setPointerCapture(event.pointerId)
+  setXYFromPointer(event, w)
+}
+function onXYMove(event, w) { if (xyActive) setXYFromPointer(event, w) }
+function onXYUp() { xyActive = false }
+
 // Knob: relative vertical drag, full range over 200px.
 let knobDrag = null
+// Double tap on a knob or X/Y pad: back to 0 - the centre for functions centred on 0,
+// otherwise 0 or the lowest value the function allows (X/Y pads reset both functions).
+const DOUBLE_TAP_MS = 300
+let lastTap = null // { id, at, x, y }
+function isDoubleTap(event, w) {
+  const now = performance.now()
+  const last = lastTap
+  lastTap = { id: w.id, at: now, x: event.clientX, y: event.clientY }
+  if (!last || last.id !== w.id || now - last.at >= DOUBLE_TAP_MS) return false
+  if (Math.hypot(event.clientX - last.x, event.clientY - last.y) >= 30) return false
+  lastTap = null
+  return true
+}
+const resetDef = (def) => sendValue(def.key, def.toRatio ? def.fromRatio(0) : Math.min(def.max, Math.max(def.min, 0)))
 function onKnobDown(event, w) {
   if (editing.value) return
   event.stopPropagation()
+  if (isDoubleTap(event, w)) {
+    knobDrag = null
+    resetDef(defFor(w))
+    return
+  }
+  rememberValue(w)
   knobDrag = { startY: event.clientY, startRatio: ratio(w) }
   event.currentTarget.setPointerCapture(event.pointerId)
 }
@@ -609,10 +790,11 @@ function onKnobUp() { knobDrag = null }
 // Button: momentary functions stay active while held; trigger functions fire once on touch down.
 let heldWidget = null
 const isLit = (w) => heldId.value === w.id || !!defFor(w).active?.(w)
+const buttonMode = (w, def) => (def.momentaryOption && w.momentary ? 'momentary' : def.mode)
 function onButtonDown(event, w) {
   if (editing.value || heldId.value) return
   const def = defFor(w)
-  if (def.mode === 'trigger') {
+  if (buttonMode(w, def) === 'trigger') {
     def.press(w)?.catch?.(console.error)
     return
   }
@@ -696,6 +878,64 @@ if (magicTouch.layout) applyServerLayout()
 pollLayout()
 const layoutPoll = setInterval(pollLayout, 1000)
 
+// ── Two-finger scrolling ────────────────────────────────────────────────────
+// One finger always operates controls (or drags in edit mode) and never scrolls. As soon as
+// a second finger touches the canvas, any running gesture is cancelled and both fingers pan
+// the canvas; their touches are kept away from the controls until every finger is lifted.
+// Mouse wheel / trackpad scrolling is native and unaffected.
+const touches = new Map() // pointerId -> { x, y }
+let panning = false
+const midpoint = () => {
+  const pts = [...touches.values()]
+  return { x: pts.reduce((a, p) => a + p.x, 0) / pts.length, y: pts.reduce((a, p) => a + p.y, 0) / pts.length }
+}
+const PAN_UNDO_MS = 300
+function cancelGestures() {
+  // The first finger landed on a fader/knob just before the second one: that was the start of
+  // the scroll gesture, not a value change - put the value back.
+  if ((faderActive || knobDrag || xyActive) && touchStartValue && performance.now() - touchStartValue.at < PAN_UNDO_MS) {
+    for (const [key, value] of touchStartValue.values) sendValue(key, value)
+  }
+  touchStartValue = null
+  endDrag()
+  faderActive = false
+  knobDrag = null
+  xyActive = false
+  releaseHeldButton()
+}
+function onPanDown(event) {
+  if (event.pointerType !== 'touch') return
+  touches.set(event.pointerId, { x: event.clientX, y: event.clientY })
+  if (touches.size === 2 && !panning) {
+    panning = true
+    cancelGestures()
+  }
+  if (panning) event.stopPropagation()
+}
+function onPanMove(event) {
+  if (event.pointerType !== 'touch' || !touches.has(event.pointerId)) return
+  if (!panning) {
+    touches.set(event.pointerId, { x: event.clientX, y: event.clientY })
+    return
+  }
+  event.stopPropagation()
+  if (touches.size < 2) {
+    touches.set(event.pointerId, { x: event.clientX, y: event.clientY })
+    return
+  }
+  const before = midpoint()
+  touches.set(event.pointerId, { x: event.clientX, y: event.clientY })
+  const after = midpoint()
+  canvasEl.value.scrollLeft -= after.x - before.x
+  canvasEl.value.scrollTop -= after.y - before.y
+}
+function onPanUp(event) {
+  if (event.pointerType !== 'touch' || !touches.has(event.pointerId)) return
+  touches.delete(event.pointerId)
+  if (panning) event.stopPropagation()
+  if (!touches.size) panning = false
+}
+
 onBeforeUnmount(() => {
   clearInterval(layoutPoll)
   window.removeEventListener('pagehide', publishOnUnload)
@@ -721,7 +961,8 @@ onBeforeUnmount(() => {
 .mtb-btn.active { color: #eafff3; background: rgba(101,230,165,.13); border-color: #65e6a5; }
 .mtb-btn.danger { color: #ffaaa1; border-color: rgba(255,124,111,.45); }
 .mtb-body { position: relative; flex: 1 1 auto; display: flex; min-height: 0; }
-.mtb-canvas { position: relative; flex: 1 1 auto; min-width: 0; overflow: auto; touch-action: none; }
+.mtb-canvas { position: relative; flex: 1 1 auto; min-width: 0; overflow: auto; touch-action: none; overscroll-behavior: contain; }
+.mtb-spacer { position: absolute; width: 1px; height: 1px; pointer-events: none; }
 .editing .mtb-canvas { background-image: radial-gradient(rgba(159,190,187,.22) 1px, transparent 1px); background-size: 24px 24px; }
 .mtb-empty { margin: 24px; color: #91a6a2; font-size: 13px; pointer-events: none; }
 .mtb-widget { position: absolute; display: flex; flex-direction: column; box-sizing: border-box; container-type: size; padding: clamp(3px, 7cqmin, 10px); background: #11191f; border: 1px solid rgba(159,190,187,.16); border-radius: 8px; user-select: none; }
@@ -729,7 +970,12 @@ onBeforeUnmount(() => {
 .mtb-widget.selected { border-color: #65e6a5; box-shadow: 0 0 0 2px rgba(101,230,165,.25); }
 .mtb-label { flex: 0 1 auto; min-height: 0; font-size: clamp(6px, 9cqh, 12px); line-height: 1.15; text-align: center; color: #c7d4d0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mtb-fader, .mtb-knob { flex: 1 1 auto; display: flex; justify-content: center; min-height: 0; padding: clamp(1px, 4cqmin, 10px) 0; touch-action: none; cursor: pointer; }
-.editing .mtb-fader, .editing .mtb-knob, .editing .mtb-pad { pointer-events: none; }
+.editing .mtb-fader, .editing .mtb-knob, .editing .mtb-pad, .editing .mtb-xy { pointer-events: none; }
+.mtb-xy { position: relative; flex: 1 1 auto; min-height: 0; margin: 2px 0; overflow: hidden; background: #0c1318; background-image: linear-gradient(rgba(159,190,187,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(159,190,187,.08) 1px, transparent 1px); background-size: 25% 25%; background-position: -1px -1px; border: 1px solid rgba(159,190,187,.22); border-radius: 6px; touch-action: none; cursor: crosshair; }
+.mtb-xy-line { position: absolute; background: rgba(101,230,165,.35); pointer-events: none; }
+.mtb-xy-line.v { top: 0; bottom: 0; width: 1px; }
+.mtb-xy-line.h { left: 0; right: 0; height: 1px; }
+.mtb-xy-dot { position: absolute; width: calc(22px * var(--cs, 1)); height: calc(22px * var(--cs, 1)); margin: calc(-11px * var(--cs, 1)) 0 0 calc(-11px * var(--cs, 1)); background: #65e6a5; border: 2px solid #eafff3; border-radius: 50%; box-shadow: 0 0 12px rgba(101,230,165,.7); box-sizing: border-box; pointer-events: none; }
 .mtb-track { position: relative; width: 12px; height: 100%; background: rgba(255,255,255,.08); border-radius: 999px; }
 .mtb-fill { position: absolute; left: 0; right: 0; bottom: 0; background: #65e6a5; border-radius: 999px; }
 .mtb-thumb { position: absolute; left: 50%; width: 36px; height: 20px; margin-left: -18px; background: #eafff3; border-radius: 5px; box-shadow: 0 0 0 3px rgba(101,230,165,.25); pointer-events: none; }
@@ -751,12 +997,23 @@ onBeforeUnmount(() => {
 .mtb-row { display: flex; gap: 8px; }
 .mtb-row .mtb-btn { flex: 1 1 0; padding-inline: 6px; }
 .mtb-btn:disabled { opacity: .4; cursor: default; }
-.mtb-pages { display: flex; gap: 6px; padding: 8px 16px; overflow-x: auto; border-top: 1px solid rgba(159,190,187,.16); background: rgba(12,17,22,.9); }
-.mtb-page-tab { flex: 0 0 auto; min-width: 96px; min-height: 44px; padding: 6px 18px; color: #a7b9b5; background: transparent; border: 1px solid rgba(159,190,187,.16); border-radius: 7px; font: inherit; font-size: 14px; cursor: pointer; touch-action: manipulation; }
+.mtb-pages {
+  display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; color: #e7f0ed;
+  /* Scroll shadows: edge shading appears only where more tabs are hidden (swipe the row). */
+  background:
+    linear-gradient(90deg, #0f161b 30%, transparent) left / 28px 100% no-repeat local,
+    linear-gradient(270deg, #0f161b 30%, transparent) right / 28px 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, rgba(101,230,165,.45), transparent) left / 12px 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, rgba(101,230,165,.45), transparent) right / 12px 100% no-repeat scroll;
+}
+.mtb-pages::-webkit-scrollbar { display: none; }
+.mtb-page-tab { flex: 0 0 auto; min-width: 56px; min-height: 36px; padding: 6px 12px; color: #a7b9b5; background: transparent; border: 1px solid rgba(159,190,187,.16); border-radius: 7px; font: inherit; font-size: 14px; cursor: pointer; touch-action: manipulation; }
 .mtb-page-tab.active { color: #eafff3; background: rgba(101,230,165,.13); border-color: #65e6a5; }
 .mtb-page-tab.add { min-width: 44px; padding-inline: 12px; }
 .mtb-pad-icon { display: grid; place-items: center; flex: 1 1 auto; width: 100%; min-height: 0; }
 .mtb-pad-icon :deep(svg) { width: 100%; height: 100%; max-width: 64px; max-height: 64px; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.mtb-pad-text { max-width: 100%; }
+.mtb-fit { display: inline-block; font-size: calc(1em * var(--fit, 1)); line-height: 1.1; text-align: center; white-space: normal; overflow-wrap: normal; word-break: normal; }
 .mtb-pad-text-small { font-size: clamp(5px, 11cqh, 9px); font-weight: 500; line-height: 1.1; }
 .mtb-size { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; align-items: center; color: #c7d4d0; font-size: 12px; }
 .mtb-size input[type="range"] { grid-column: 1 / -1; grid-row: 2; width: 100%; margin: 0; accent-color: #65e6a5; }

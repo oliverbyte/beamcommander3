@@ -1,5 +1,5 @@
 <template>
-  <section class="magic-touch" :class="{ standalone, 'preview-mode': activePage === 'preview' }" aria-label="Magic Touch live controls">
+  <section class="magic-touch" :class="{ standalone, 'preview-mode': activePage === 'preview' }" aria-label="Magic Touch live controls" @contextmenu="suppressContextMenu">
     <nav class="magic-sidebar" aria-label="Magic Touch pages">
       <div class="sidebar-brand">
         <span class="brand-mark">BC3</span>
@@ -23,9 +23,11 @@
         <div>
           <p class="eyebrow">LIVE CONTROL</p>
           <h1>{{ activePageMeta.title }}</h1>
-          <p class="page-description">{{ activePageMeta.description }}</p>
+          <p v-if="activePageMeta.description" class="page-description">{{ activePageMeta.description }}</p>
         </div>
         <div class="header-actions">
+          <!-- MagicTouchBuilder teleports its page tabs in here (saves a row at the bottom). -->
+          <div v-if="activePage === 'builder'" id="mtb-page-slot" class="page-slot"></div>
           <button
             v-if="activePage === 'builder'"
             class="edit-toggle"
@@ -245,7 +247,7 @@ const emit = defineEmits(['update:persistence', 'update:previewEnabled', 'page-c
 const PAGES = [
   { id: 'master', label: 'Master', title: 'Master', description: 'Control brightness, flash, and output safety.' },
   { id: 'preview', label: 'Preview', title: 'Preview', description: 'Inspect the live 3D stage and place laser markers.' },
-  { id: 'builder', label: 'Magic Touch', title: 'Magic Touch', description: 'Build your own control surface and use it live.' },
+  { id: 'builder', label: 'Magic Touch', title: 'Magic Touch' }, // no subtitle: header room goes to the page tabs
   { id: 'cues', label: 'Cues', title: 'Cues', description: 'Recall, save, and arrange live looks.' },
   { id: 'color', label: 'Color', title: 'Color', description: 'Set a solid color or add animated rainbow.' },
   { id: 'shapes', label: 'Shapes', title: 'Shapes', description: 'Choose a shape and tune its geometry.' },
@@ -306,6 +308,12 @@ const BEAM_CONTROLS = [
 
 const activePage = ref('cues')
 const builderEditing = ref(false)
+
+// Long-press on a pad must not open the browser's context menu (copy/paste, share, ...).
+// Text fields keep it; the builder's own edit-mode menu calls preventDefault itself.
+function suppressContextMenu(event) {
+  if (!event.target.closest('input, textarea, select, [contenteditable="true"]')) event.preventDefault()
+}
 const persistenceMs = ref(props.persistenceMs)
 const activePageMeta = computed(() => PAGES.find((item) => item.id === activePage.value))
 const connectedLaserCount = computed(() => lasers.filter((laser) => laser.connected).length)
@@ -423,7 +431,10 @@ onBeforeUnmount(() => {
 .eyebrow { margin: 0 0 4px; color: var(--mt-accent); font-size: 10px; font-weight: 700; letter-spacing: 1.4px; }
 h1 { margin: 0; font-size: 23px; line-height: 1.2; }
 .page-description { margin: 5px 0 0; color: var(--mt-muted); font-size: 13px; }
-.header-actions { display: flex; align-items: center; gap: 10px; }
+.magic-header > div:first-child { flex: 0 0 auto; min-width: 0; }
+.magic-header h1 { white-space: nowrap; }
+.header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex: 1 1 auto; min-width: 0; }
+.page-slot { flex: 0 1 auto; min-width: 0; }
 .edit-toggle { min-height: 36px; padding: 6px 14px; color: var(--mt-text); background: rgba(255,255,255,.04); border: 1px solid var(--mt-line); border-radius: 8px; font: inherit; font-size: 12px; cursor: pointer; touch-action: manipulation; white-space: nowrap; }
 .edit-toggle.active { color: #eafff3; background: rgba(101,230,165,.13); border-color: var(--mt-accent); }
 .laser-status { display: flex; align-items: center; gap: 8px; padding: 9px 12px; color: var(--mt-muted); border: 1px solid var(--mt-line); border-radius: 8px; font-size: 12px; white-space: nowrap; }

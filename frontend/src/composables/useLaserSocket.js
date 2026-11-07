@@ -307,6 +307,25 @@ export function isCueCurrent(n) {
   })
 }
 
+// Momentary cue: active only while held. Pressing remembers the current show state and
+// recalls cue n; releasing puts the remembered state back (global settings like master
+// brightness, blackout and release time aren't touched by a recall anyway).
+let momentaryCue = null // { restore: {...}, recall: Promise }
+export function momentaryCuePress(n) {
+  if (momentaryCue) return momentaryCue.recall
+  const restore = Object.fromEntries(CUE_STATE_FIELDS.map((field) => [field, laserState[field]]))
+  const recall = recallCue(n)
+  momentaryCue = { restore, recall: recall.catch(() => {}) }
+  return recall
+}
+export async function momentaryCueRelease() {
+  const held = momentaryCue
+  if (!held) return
+  momentaryCue = null
+  await held.recall // restore only after the recall went through, never before it
+  await updateState(held.restore)
+}
+
 export async function clearCue(n) {
   await api(`/cue/${n}/clear`, { method: 'POST' })
   await fetchCues()
@@ -321,11 +340,15 @@ export async function moveCue(from, to) {
 // Last layout seen from / sent to the backend, kept at module level so the
 // builder can show it instantly when it is mounted again.
 export const magicTouch = { rev: null, layout: null }
+// Bumped by every save, so a fetch that was already in flight during a save can't
+// bring back the layout from before it.
+let magicSaveSeq = 0
 
 // Returns true when the backend has a layout revision this client hasn't seen yet.
 export async function fetchMagicTouch() {
+  const seq = magicSaveSeq
   const data = await api(`/magic-touch${magicTouch.rev === null ? '' : `?rev=${magicTouch.rev}`}`)
-  if (!('layout' in data)) return false
+  if (seq !== magicSaveSeq || !('layout' in data)) return false
   magicTouch.rev = data.rev
   magicTouch.layout = data.layout
   return true
@@ -334,6 +357,7 @@ export async function fetchMagicTouch() {
 // `body` is the already serialized layout object.
 // The cache is updated before the request so a quick remount already shows the new layout.
 export async function saveMagicTouch(body) {
+  magicSaveSeq++
   magicTouch.layout = JSON.parse(body)
   const data = await api('/magic-touch', { method: 'POST', body })
   magicTouch.rev = data.rev

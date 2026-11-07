@@ -9,3 +9,19 @@ html, body {
   width: 100vw;
   height: 100vh;
 }
+
+/* Touch control surface, not a document: no text selection, no iOS copy/paste
+   or long-press callout, no grey tap flash and no double-tap zoom when pads
+   are hit repeatedly. Text fields stay editable/selectable. */
+html, body {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+input, textarea, select, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
