@@ -153,7 +153,9 @@ for how the packaged macOS/Windows builds are put together.
    name and its IP address (e.g. an Ether Dream is often `192.168.x.x` or a
    fixed address like `10.10.10.4` — check your laser's manual or network
    settings), then click **Arm** on it. You'll see its dot turn green
-   ("connected") once it's linked up. Any number of lasers can be armed at
+   ("connected") once the controller actually answers; an armed laser that's
+   switched off or unreachable stays grey, so you can tell a network/power
+   problem apart from a settings one. Any number of lasers can be armed at
    once — they all stream the exact same show in parallel. Each configured
    laser appears as its own labeled source and beam in the preview; its beam
    is shown while armed and hidden while disarmed. Per-laser X mirroring is
@@ -190,17 +192,31 @@ for how the packaged macOS/Windows builds are put together.
    active cue is outlined in bright green.
    Right-click a slot to clear it, or use "Move" to relocate a saved cue
    to a different slot.
-6. **Magic Touch**: build your own control surface. The page ships with a compact
-   "Live" layout (master fader, white flash and footswitch-style master brightness
-   flash, blackout and output gate, color/shape/move pads with icons, a few knobs,
-   and cue pads with live previews). Switch to **Edit mode** to add faders, knobs
-   and buttons, drag them around (they snap to a grid and align to other elements),
-   resize them, and pick any control function for each one in the side panel
-   (brightness, color, shape, movement, beam values, cues, laser arming, flash,
-   blackout, ...). Add more pages with the **+** tab for different setups. Back in
-   **Run mode** the elements just work by touch. The layout is stored in your
-   browser (not shared between devices) and "Restore default layout" resets it.
-   Everything goes through the normal REST API, like the other pages.
+6. **Magic Touch**: build your own control surface. A fresh install ships with a
+   ready-made "Live" layout (master fader, white flash and footswitch-style master
+   brightness flash, blackout and output gate, color/shape/move pads with icons,
+   knobs, and cue pads with live previews) plus a set of example cues. Switch to
+   **Edit mode** to add **faders, knobs, buttons and X/Y pads**, drag them around
+   (they snap to a grid and align to other elements), resize them, and pick any
+   control function for each one in the floating editor (brightness, color, shape,
+   movement, beam values, cues, laser arming, flash, blackout, ...). Per element you
+   can also:
+   - **Invert** a fader, knob or X/Y axis, and turn on a **logarithmic curve** (fine
+     control at the start, faster towards the end; functions centred on 0 such as
+     rotation or position get the curve mirrored around the centre).
+   - Give an **X/Y pad** two functions at once (e.g. Position X / Position Y).
+   - Make a **cue button momentary**: the cue overrides the output only while held,
+     and releasing brings back the previous look.
+
+   **Double-tap** a knob or X/Y pad to reset it to 0 (the centre for functions
+   centred on 0). Page tabs sit in the header next to the Run/Edit toggle; add more
+   with **+**. Button labels wrap and shrink to always fit their button. Back in
+   **Run mode** everything works by touch: one finger operates controls, **two
+   fingers scroll** a layout that's bigger than the screen.
+   The layout is **stored on the server and shared by every connected device**.
+   Edits go live for everyone when the editor switches back to Run mode, so other
+   devices never see half-finished changes. Edit/run mode, the open page and the
+   editor window position stay per device. "Restore default layout" resets it.
 7. **Optional: MIDI controller or foot pedal** — if you plug in a USB MIDI
    controller (an Akai APC40 mkII works out of the box, matching the
    original BeamCommander's exact layout), its knobs and buttons drive the
@@ -283,6 +299,15 @@ Real hardware output also needs **Blackout** off (`POST /blackout/0`) and
 the brightness gate open (`POST /brightness/gate/1` — open by default,
 see below).
 
+`connected` reports the real link to the controller, not just that the daemon
+is trying. **DAC protection:** Ether Dream firmware can lock up (and drop off
+the network until power-cycled) when it sees rapid connect/disconnect cycles.
+The daemon therefore never reconnects because of a scan-rate change (new
+rates are applied live on the same connection, at most every 500ms, clamped
+to 1–100 kpps). It also spaces new connections to each DAC at least 250ms
+apart and backs off up to 30s while one stays unreachable. Arming and
+disarming still act immediately.
+
 ## REST API
 
 All parameter changes take effect on the next frame — nothing restarts.
@@ -318,6 +343,8 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the global `flash_release_ms` setting - see below) |
 | `POST /api/cue/<n>/clear` | Delete slot `n` |
 | `POST /api/cue/<from>/move/<to>` | Move slot `from`'s cue into slot `to` (overwriting it), clearing `from`. 404 if `from` is empty or `from == to` |
+| `GET /api/magic-touch[?rev=<n>]` | Shared Magic Touch layout: `{"rev":<n>,"layout":{...}\|null}`; with `?rev=` matching the current revision only `{"rev":<n>}` is returned (cheap polling) |
+| `POST /api/magic-touch` | Replace the shared Magic Touch layout (JSON object, ≤ 4 MB); returns the new `{"rev":<n>}`. Persisted in `magic_touch.json` |
 | `WS /ws/points` | Live preview stream, `{"pts":[[x,y,r,g,b],...]}` at ~30fps; when phase spreading is active, also includes `"laser_pts":{"<id>":[[x,y,r,g,b],...]}` for each configured laser |
 
 `POST /api/state` accepts a JSON body with any of: `shape`, `radius`, `points`,
@@ -347,6 +374,12 @@ from another browser tab or via `curl`, all connected UIs pick up the change
 automatically. UI changes are applied optimistically, and responses from
 older in-flight state requests are ignored so a slow response cannot undo a
 newer move-pattern selection.
+
+The Magic Touch layout syncs the same way through `/api/magic-touch`. Each
+client asks once a second whether a newer revision exists, and only downloads
+the layout when it changed. A client that is in Edit mode keeps its own copy
+and publishes it when it switches back to Run mode, then everyone else picks
+it up.
 
 ## MIDI control (optional)
 
