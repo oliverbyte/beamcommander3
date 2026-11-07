@@ -801,6 +801,13 @@ static void laser_thread() {
         std::shared_ptr<core::LaserController> ctrl;
         std::string connected_ip;
         float       connected_rate = 0;
+        // Last reported link state (ctrl->hasConnection()), only used to log changes.
+        bool        link_up = false;
+        // DAC protection (see the connection loop below): output armed on this controller,
+        // last live rate update, and the current reconnect back-off.
+        bool        output_armed = false;
+        std::chrono::steady_clock::time_point last_rate_update = std::chrono::steady_clock::now() - 1s;
+        std::chrono::milliseconds connect_backoff{1000};
         // Paces this controller's own sendFrame() calls - without this,
         // the loop would call sendFrame() every time isReadyForNewFrame()
         // allows (which can be much more often than a frame's actual
@@ -904,44 +911,81 @@ static void laser_thread() {
             } else ++it;
         }
 
-        // Connect/disconnect/retry each configured laser independently -
-        // only armed lasers with a non-empty IP are ever connected to;
-        // everything else stays idle.
+        // Connect/disconnect/retry each configured laser independently.
+        //
+        // DAC protection: EtherDream firmware can lock up hard (off the network until
+        // power-cycled) when it sees rapid TCP connect/disconnect cycles. This loop used to
+        // tear down and reopen the connection on *every* scan-rate change - up to ~1000x/s
+        // while a rate fader/MIDI knob moved, or on each cue recall with another rate - and on
+        // every disarm/arm toggle. Now:
+        //  - rate changes are passed live (setPointRate, libera restarts the stream on the same
+        //    connection), throttled to DAC_RATE_UPDATE_MIN and clamped to what the DAC supports;
+        //  - arm/disarm act immediately (disarm releases the connection, the DAC stops at once);
+        //  - new connection attempts per DAC are spaced >= DAC_MIN_RECONNECT (short enough to
+        //    feel instant, long enough that even a stuck MIDI button or script can't cause a
+        //    reconnect storm), backing off to 30s while connecting fails.
+        constexpr auto  DAC_RATE_UPDATE_MIN      = 500ms;
+        constexpr auto  DAC_MIN_RECONNECT        = 250ms;
+        constexpr auto  DAC_MAX_BACKOFF          = std::chrono::seconds(30);
+        constexpr float DAC_MIN_KPPS = 1.0f, DAC_MAX_KPPS = 100.0f;
+        const float hwRate = std::clamp(rate, DAC_MIN_KPPS, DAC_MAX_KPPS);
+
         for (const auto& l : lasers_snapshot) {
             auto& rt = runtimes[l.id]; // default-constructed on first sight
             bool wantsOutput = l.armed && !l.ip.empty();
 
+            // IP changed (or cleared): the old connection points at the wrong device.
+            if (rt.ctrl && rt.connected_ip != l.ip) {
+                rt.ctrl->setArmed(false); rt.ctrl.reset(); rt.connected_ip.clear();
+                rt.output_armed = false;
+                std::cout << "[laser] " << l.name << " IP changed - connection released\n" << std::flush;
+            }
+
             if (!wantsOutput) {
                 if (rt.ctrl) {
                     rt.ctrl->setArmed(false); rt.ctrl.reset(); rt.connected_ip.clear();
-                    set_laser_connected(l.id, false);
-                    std::cout << "[laser] " << l.name << " disarmed\n" << std::flush;
+                    rt.output_armed = false;
+                    std::cout << "[laser] " << l.name << " disarmed - connection released\n" << std::flush;
                 }
-                continue;
+            } else if (!rt.ctrl) {
+                if (now_tp >= rt.next_connect_attempt) {
+                    etherdream::EtherDreamControllerInfo info(l.ip, "Ether Dream", l.ip, 7765, 4095);
+                    info.setDriverId("libera.builtin.etherdream");
+                    rt.ctrl = sys.connectController(info);
+                    if (!rt.ctrl) {
+                        std::cout << "[laser] connect failed " << l.name << " (" << l.ip << "), retry in "
+                                  << rt.connect_backoff.count() << "ms\n" << std::flush;
+                        rt.next_connect_attempt = now_tp + rt.connect_backoff;
+                        rt.connect_backoff = std::min<std::chrono::milliseconds>(rt.connect_backoff * 2, DAC_MAX_BACKOFF);
+                    } else {
+                        rt.ctrl->setPointRate(static_cast<std::uint32_t>(hwRate * 1000));
+                        rt.ctrl->setArmed(true);
+                        rt.output_armed = true;
+                        rt.connected_ip = l.ip; rt.connected_rate = hwRate;
+                        rt.last_rate_update = now_tp;
+                        rt.next_connect_attempt = now_tp + DAC_MIN_RECONNECT; // never reopen faster than this
+                        rt.connect_backoff = std::chrono::milliseconds(1000);
+                        std::cout << "[laser] " << l.name << " armed, connecting to " << l.ip << " @ " << hwRate << " kpps\n" << std::flush;
+                    }
+                }
+            } else {
+                if (std::abs(hwRate - rt.connected_rate) > 0.1f && now_tp - rt.last_rate_update >= DAC_RATE_UPDATE_MIN) {
+                    rt.ctrl->setPointRate(static_cast<std::uint32_t>(hwRate * 1000));
+                    rt.connected_rate = hwRate;
+                    rt.last_rate_update = now_tp;
+                }
             }
 
-            if ((!rt.ctrl || rt.connected_ip != l.ip || std::abs(rate - rt.connected_rate) > 0.1f)
-                && now_tp >= rt.next_connect_attempt) {
-                if (rt.ctrl) { rt.ctrl->setArmed(false); rt.ctrl.reset(); }
-                etherdream::EtherDreamControllerInfo info(l.ip, "Ether Dream", l.ip, 7765, 4095);
-                info.setDriverId("libera.builtin.etherdream");
-                rt.ctrl = sys.connectController(info);
-                if (!rt.ctrl) {
-                    std::cout << "[laser] connect failed " << l.name << " (" << l.ip << ")\n" << std::flush;
-                    set_laser_connected(l.id, false);
-                    rt.next_connect_attempt = now_tp + 1s; // back off before retrying
-                } else {
-                    rt.ctrl->setPointRate(static_cast<std::uint32_t>(rate * 1000));
-                    rt.ctrl->setArmed(true);
-                    rt.connected_ip = l.ip; rt.connected_rate = rate;
-                    set_laser_connected(l.id, true);
-                    std::cout << "[laser] " << l.name << " streaming " << l.ip << " @ " << rate << " kpps\n" << std::flush;
-                }
-            } else if (rt.ctrl && rt.connected_ip == l.ip && std::abs(rate - rt.connected_rate) > 0.1f) {
-                // Live rate update on an already-connected controller
-                rt.ctrl->setPointRate(static_cast<std::uint32_t>(rate * 1000));
-                rt.connected_rate = rate;
+            // "connected" reports the real link to the DAC, not just that a controller object
+            // exists - an armed DAC that's unplugged/off/unreachable must show as disconnected
+            // (connectController() succeeds even when the TCP connect then fails).
+            bool link = rt.ctrl && rt.ctrl->hasConnection();
+            if (link != rt.link_up) {
+                rt.link_up = link;
+                std::cout << "[laser] " << l.name << " (" << l.ip << ") "
+                          << (link ? "connected" : "NOT reachable - check power/network") << "\n" << std::flush;
             }
+            set_laser_connected(l.id, link);
         }
 
         bool anyHardwareReady = false;
@@ -997,7 +1041,10 @@ static void laser_thread() {
                     if (it != laserFrames.end()) phaseFrame = &it->second;
                 }
                 core::Frame toSend = *phaseFrame;
-                if (snap.blackout) {
+                // Only an armed laser may emit light - checked here too, independent of the
+                // connection handling above and of libera's own blanking.
+                const bool outputAllowed = cfg && cfg->armed && rt.output_armed;
+                if (snap.blackout || !outputAllowed) {
                     for (auto& p : toSend.points) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
                 } else if (g_gate_level < 1.0f) {
                     for (auto& p : toSend.points) {
