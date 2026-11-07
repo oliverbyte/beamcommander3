@@ -100,9 +100,9 @@ cd frontend && npm install && npm run dev -- --port 5173 < /dev/null
 > `< /dev/null` on the Vite command prevents it from suspending waiting for
 > keyboard input when run detached/backgrounded.
 
-## Persistent user data (midi_map.json, cues.json)
+## Persistent user data (midi_map.json, cues.json, magic_touch.json, lasers.json)
 
-`laser_daemon` never reads/writes these two files at whatever relative path
+`laser_daemon` never reads/writes these files at whatever relative path
 happens to be current - it always resolves them to a per-OS, per-user
 app-data directory, completely independent of cwd or where the binary/app
 itself lives:
@@ -117,8 +117,24 @@ coming from. On first run, if a file doesn't exist yet there, it's seeded
 by copying a same-named default shipped alongside the app (checks next to
 the executable, and - for the macOS `.app` bundle layout specifically,
 where `Contents/MacOS/laser_daemon` and `Contents/Resources/midi_map.json`
-aren't in the same directory - a sibling `Resources/` folder too). `cues.json`
-has no meaningful default, so a fresh install just starts with none.
+aren't in the same directory - a sibling `Resources/` folder too).
+
+### Shipped defaults (sync before every release)
+
+Releases ship the maintainer's own `cues.json` and `magic_touch.json`
+(committed in `backend/`, next to `midi_map.json`) as first-run defaults, so new
+users start with useful cues and a ready-made Magic Touch layout instead of
+an empty app. Since every push to `main` publishes a release, run this
+before pushing and commit whatever it changed:
+
+```sh
+packaging/sync_default_data.sh   # copies them from the app data dir into backend/
+```
+
+`lasers.json` is intentionally not shipped (it holds this rig's DAC IP
+addresses), and `midi_map.json` isn't synced because the app never writes
+it - edit `backend/midi_map.json` in the repo directly. Existing users are unaffected: seeding only happens for files
+that don't exist in their data directory yet.
 
 This replaced an earlier CWD-relative-path approach that had a real bug:
 `start.sh` used to launch `laser_daemon` from the repo root instead of
