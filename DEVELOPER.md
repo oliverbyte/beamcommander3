@@ -669,6 +669,24 @@ wait
 curl -s --max-time 3 http://localhost:8000/api/state && echo OK || echo HUNG
 ```
 
+## Magic Touch multitouch
+
+`MagicTouchBuilder.vue` tracks every finger as its own gesture, keyed by
+`pointerId` (`gestures` for faders/knobs/X/Y pads, `held` for held
+momentary buttons), and each control captures its own pointer - so several
+controls can be operated at once. Two-finger panning in run mode only
+counts fingers that start on free canvas space (`CONTROL_SELECTOR`); in edit
+mode any second finger pans and cancels an element drag. Several held
+momentary cues stack (`heldMomentaryCues` in `useLaserSocket.js`): the
+newest shows, releasing falls back to the previous one, the last release
+restores the original look; requests are chained so the daemon sees them in
+order.
+
+Testing: Chromium's CDP touch emulation never sends `pointerup` when a single
+finger of several is lifted, and synthetic `PointerEvent`s can't be
+captured - for automated checks dispatch synthetic touch `PointerEvent`s with
+`Element.prototype.setPointerCapture` stubbed out.
+
 ## Tests (run before every push)
 
 Every `backend/tests/test_*.cpp` is a self-contained test program (no

@@ -25,8 +25,8 @@
               class="mtb-fader"
               @pointerdown="onFaderDown($event, w)"
               @pointermove="onFaderMove($event, w)"
-              @pointerup="onFaderUp"
-              @pointercancel="onFaderUp"
+              @pointerup="endGesture"
+              @pointercancel="endGesture"
             >
               <div class="mtb-track">
                 <div class="mtb-fill" :style="{ height: percent(w) + '%' }"></div>
@@ -42,8 +42,8 @@
               class="mtb-knob"
               @pointerdown="onKnobDown($event, w)"
               @pointermove="onKnobMove($event, w)"
-              @pointerup="onKnobUp"
-              @pointercancel="onKnobUp"
+              @pointerup="endGesture"
+              @pointercancel="endGesture"
             >
               <svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet">
                 <circle cx="50" cy="50" r="38" class="knob-body" />
@@ -61,8 +61,8 @@
               class="mtb-xy"
               @pointerdown="onXYDown($event, w)"
               @pointermove="onXYMove($event, w)"
-              @pointerup="onXYUp"
-              @pointercancel="onXYUp"
+              @pointerup="endGesture"
+              @pointercancel="endGesture"
             >
               <div class="mtb-xy-line v" :style="{ left: ratio(w) * 100 + '%' }"></div>
               <div class="mtb-xy-line h" :style="{ top: (1 - axisRatio(w, defForY(w), w.invY)) * 100 + '%' }"></div>
@@ -78,9 +78,9 @@
               :style="defFor(w).swatch ? { '--swatch': defFor(w).swatch } : null"
               :disabled="editing"
               @pointerdown.prevent="onButtonDown($event, w)"
-              @pointerup="onButtonUp(w)"
-              @pointercancel="onButtonUp(w)"
-              @lostpointercapture="onButtonUp(w)"
+              @pointerup="onButtonUp($event, w)"
+              @pointercancel="onButtonUp($event, w)"
+              @lostpointercapture="onButtonUp($event, w)"
             >
               <CuePreview v-if="defFor(w).cuePad && cues[w.param]" :cue="cues[w.param]" />
               <span v-if="defFor(w).icon" class="mtb-pad-icon" aria-hidden="true" v-html="defFor(w).icon"></span>
@@ -223,7 +223,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   flashPress, flashRelease, cues, isCueCurrent, laserState, lasers, markLocalChange, recallCue, resetState, rotationReset,
   momentaryCuePress, momentaryCueRelease,
@@ -306,7 +306,7 @@ const BUTTON_FNS = {
     group: 'Cues', label: 'Recall cue', mode: 'trigger', momentaryOption: true, cuePad: true,
     param: { label: 'Cue number', min: 1, max: CUE_COUNT, default: 1 },
     press: (w) => (w.momentary ? momentaryCuePress(w.param) : recallCue(w.param)),
-    release: () => momentaryCueRelease(),
+    release: (w) => momentaryCueRelease(w.param),
     active: (w) => isCueCurrent(w.param),
   },
 }
@@ -429,7 +429,8 @@ const contentSize = computed(() => ({
   h: Math.max(0, ...widgets.value.map((w) => w.y + w.h)) + GRID,
 }))
 const selectedIds = ref([])
-const heldId = ref(null)
+// Momentary buttons currently held: pointerId -> widget (several at once, multitouch).
+const held = reactive(new Map())
 const canvasEl = ref(null)
 const selected = computed(() => (selectedIds.value.length === 1 ? widgets.value.find((w) => w.id === selectedIds.value[0]) || null : null))
 
@@ -721,15 +722,23 @@ function onDragMove(event) {
   }
 }
 
-// Fader: absolute position along the track.
-let faderActive = false
-// Value before the latest fader/knob touch, so a two-finger scroll that starts right after can undo it.
-let touchStartValue = null // { values: [[key, value], ...], at }
-const rememberValue = (w) => {
-  const keys = [defFor(w).key]
-  if (w.type === 'xy') keys.push(defForY(w).key)
-  touchStartValue = { values: keys.map((key) => [key, laserState[key]]), at: performance.now() }
+// ── Multitouch ──────────────────────────────────────────────────────────────
+// Every finger is its own gesture, keyed by pointerId: several faders, knobs
+// and X/Y pads can be moved at once while buttons are held or tapped. Each
+// control captures its own pointer, so a finger keeps controlling the element
+// it started on even if it slides off it.
+const gestures = new Map() // pointerId -> { w, startY?, startRatio? }
+function beginGesture(event, w, extra = {}) {
+  gestures.set(event.pointerId, { w, ...extra })
+  event.currentTarget.setPointerCapture(event.pointerId)
 }
+function endGesture(event) { gestures.delete(event.pointerId) }
+const gestureOf = (event, w) => {
+  const g = gestures.get(event.pointerId)
+  return g && g.w.id === w.id ? g : null
+}
+
+// Fader: absolute position along the track.
 function setFromPointer(event, w) {
   const rect = event.currentTarget.getBoundingClientRect()
   sendRatio(w, 1 - (event.clientY - rect.top) / rect.height)
@@ -737,16 +746,12 @@ function setFromPointer(event, w) {
 function onFaderDown(event, w) {
   if (editing.value) return
   event.stopPropagation()
-  faderActive = true
-  rememberValue(w)
-  event.currentTarget.setPointerCapture(event.pointerId)
+  beginGesture(event, w)
   setFromPointer(event, w)
 }
-function onFaderMove(event, w) { if (faderActive) setFromPointer(event, w) }
-function onFaderUp() { faderActive = false }
+function onFaderMove(event, w) { if (gestureOf(event, w)) setFromPointer(event, w) }
 
 // X/Y pad: absolute position on the field sets both functions at once (right = more X, up = more Y).
-let xyActive = false
 function setXYFromPointer(event, w) {
   const rect = event.currentTarget.getBoundingClientRect()
   sendAxis(w, defFor(w), w.inv, (event.clientX - rect.left) / rect.width)
@@ -756,33 +761,27 @@ function onXYDown(event, w) {
   if (editing.value) return
   event.stopPropagation()
   if (isDoubleTap(event, w)) {
-    xyActive = false
     resetDef(defFor(w), w)
     resetDef(defForY(w), w)
     return
   }
-  xyActive = true
-  rememberValue(w)
-  event.currentTarget.setPointerCapture(event.pointerId)
+  beginGesture(event, w)
   setXYFromPointer(event, w)
 }
-function onXYMove(event, w) { if (xyActive) setXYFromPointer(event, w) }
-function onXYUp() { xyActive = false }
+function onXYMove(event, w) { if (gestureOf(event, w)) setXYFromPointer(event, w) }
 
-// Knob: relative vertical drag, full range over 200px.
-let knobDrag = null
 // Double tap on a knob or X/Y pad: back to 0 - the centre for functions centred on 0,
 // otherwise 0 or the lowest value the function allows (X/Y pads reset both functions).
 // Rotation instead does a full rotation reset (angle to 0 + stop), see VALUE_FNS.rotation.
 const DOUBLE_TAP_MS = 300
-let lastTap = null // { id, at, x, y }
+const lastTaps = new Map() // widget id -> { at, x, y } (per widget, so taps on other controls don't interfere)
 function isDoubleTap(event, w) {
   const now = performance.now()
-  const last = lastTap
-  lastTap = { id: w.id, at: now, x: event.clientX, y: event.clientY }
-  if (!last || last.id !== w.id || now - last.at >= DOUBLE_TAP_MS) return false
+  const last = lastTaps.get(w.id)
+  lastTaps.set(w.id, { at: now, x: event.clientX, y: event.clientY })
+  if (!last || now - last.at >= DOUBLE_TAP_MS) return false
   if (Math.hypot(event.clientX - last.x, event.clientY - last.y) >= 30) return false
-  lastTap = null
+  lastTaps.delete(w.id)
   return true
 }
 // Functions with a `tapReset` (Rotation) run their own reset action instead,
@@ -793,50 +792,52 @@ function resetDef(def, w) {
   if (custom) { custom.catch?.(console.error); return }
   sendValue(def.key, def.toRatio ? def.fromRatio(0) : Math.min(def.max, Math.max(def.min, 0)))
 }
+
+// Knob: relative vertical drag, full range over 200px.
 function onKnobDown(event, w) {
   if (editing.value) return
   event.stopPropagation()
   if (isDoubleTap(event, w)) {
-    knobDrag = null
     resetDef(defFor(w), w)
     return
   }
-  rememberValue(w)
-  knobDrag = { startY: event.clientY, startRatio: ratio(w) }
-  event.currentTarget.setPointerCapture(event.pointerId)
+  beginGesture(event, w, { startY: event.clientY, startRatio: ratio(w) })
 }
 function onKnobMove(event, w) {
-  if (knobDrag) sendRatio(w, knobDrag.startRatio + (knobDrag.startY - event.clientY) / 200)
+  const g = gestureOf(event, w)
+  if (g) sendRatio(w, g.startRatio + (g.startY - event.clientY) / 200)
 }
-function onKnobUp() { knobDrag = null }
 
-// Button: momentary functions stay active while held; trigger functions fire once on touch down.
-let heldWidget = null
-const isLit = (w) => heldId.value === w.id || !!defFor(w).active?.(w)
+// Button: momentary functions stay active while held; trigger functions fire once on touch
+// down. Any number of buttons can be held at once (one per finger).
+const isHeld = (w) => [...held.values()].some((h) => h.id === w.id)
+const isLit = (w) => isHeld(w) || !!defFor(w).active?.(w)
 const buttonMode = (w, def) => (def.momentaryOption && w.momentary ? 'momentary' : def.mode)
 function onButtonDown(event, w) {
-  if (editing.value || heldId.value) return
+  if (editing.value) return
   const def = defFor(w)
   if (buttonMode(w, def) === 'trigger') {
     def.press(w)?.catch?.(console.error)
     return
   }
+  if (isHeld(w)) return // already held by another finger
   event.currentTarget.setPointerCapture(event.pointerId)
-  heldId.value = w.id
-  heldWidget = w
+  held.set(event.pointerId, w)
   def.press(w).catch(console.error)
 }
-function onButtonUp(w) {
-  if (heldId.value !== w.id) return
-  heldId.value = null
-  defFor(w).release(w).catch(console.error)
-  heldWidget = null
+function onButtonUp(event, w) {
+  const h = held.get(event.pointerId)
+  if (!h || h.id !== w.id) return
+  held.delete(event.pointerId)
+  defFor(w)?.release(w)?.catch?.(console.error)
 }
+// Releases every held button (page switch, edit mode, leaving Magic Touch).
 function releaseHeldButton() {
-  if (!heldId.value) return
-  heldId.value = null
-  if (heldWidget && defFor(heldWidget)) defFor(heldWidget).release(heldWidget).catch(console.error)
-  heldWidget = null
+  for (const [pointerId, w] of [...held]) {
+    held.delete(pointerId)
+    defFor(w)?.release(w)?.catch?.(console.error)
+  }
+  gestures.clear()
 }
 
 // ── Shared layout sync ──────────────────────────────────────────────────────
@@ -902,36 +903,25 @@ pollLayout()
 const layoutPoll = setInterval(pollLayout, 1000)
 
 // ── Two-finger scrolling ────────────────────────────────────────────────────
-// One finger always operates controls (or drags in edit mode) and never scrolls. As soon as
-// a second finger touches the canvas, any running gesture is cancelled and both fingers pan
-// the canvas; their touches are kept away from the controls until every finger is lifted.
-// Mouse wheel / trackpad scrolling is native and unaffected.
-const touches = new Map() // pointerId -> { x, y }
+// Run mode: fingers on a control always operate that control (multitouch, see
+// above) and never scroll; two fingers on *free* canvas space pan it.
+// Edit mode: as soon as a second finger touches the canvas anywhere, a running
+// element drag is cancelled and both fingers pan. Mouse wheel / trackpad
+// scrolling is native and unaffected.
+const CONTROL_SELECTOR = '.mtb-fader, .mtb-knob, .mtb-xy, .mtb-pad'
+const touches = new Map() // pointerId -> { x, y } (fingers that may pan)
 let panning = false
 const midpoint = () => {
   const pts = [...touches.values()]
   return { x: pts.reduce((a, p) => a + p.x, 0) / pts.length, y: pts.reduce((a, p) => a + p.y, 0) / pts.length }
 }
-const PAN_UNDO_MS = 300
-function cancelGestures() {
-  // The first finger landed on a fader/knob just before the second one: that was the start of
-  // the scroll gesture, not a value change - put the value back.
-  if ((faderActive || knobDrag || xyActive) && touchStartValue && performance.now() - touchStartValue.at < PAN_UNDO_MS) {
-    for (const [key, value] of touchStartValue.values) sendValue(key, value)
-  }
-  touchStartValue = null
-  endDrag()
-  faderActive = false
-  knobDrag = null
-  xyActive = false
-  releaseHeldButton()
-}
 function onPanDown(event) {
   if (event.pointerType !== 'touch') return
+  if (!editing.value && event.target.closest?.(CONTROL_SELECTOR)) return
   touches.set(event.pointerId, { x: event.clientX, y: event.clientY })
   if (touches.size === 2 && !panning) {
     panning = true
-    cancelGestures()
+    if (editing.value) endDrag()
   }
   if (panning) event.stopPropagation()
 }

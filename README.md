@@ -228,8 +228,12 @@ for how the packaged macOS/Windows builds are put together.
    rotation reset" in the element's settings to only stop it and keep the
    angle). **Rotation reset** is also available as a button function. Page tabs sit in the header next to the Run/Edit toggle; add more
    with **+**. Button labels wrap and shrink to always fit their button. Back in
-   **Run mode** everything works by touch: one finger operates controls, **two
-   fingers scroll** a layout that's bigger than the screen.
+   **Run mode** everything works by touch, with **multitouch**: every finger
+   operates its own control, so you can pull several faders at once while
+   holding or tapping buttons. Holding several momentary cues shows the one
+   pressed last; releasing falls back to the previous still-held cue, and
+   releasing the last one restores the original look. **Two fingers on free
+   space** (not on a control) scroll a layout that's bigger than the screen.
    The layout is **stored on the server and shared by every connected device**.
    Edits go live for everyone when the editor switches back to Run mode, so other
    devices never see half-finished changes. Edit/run mode, the open page and the

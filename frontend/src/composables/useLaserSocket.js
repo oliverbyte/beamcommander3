@@ -335,26 +335,35 @@ export function isCueCurrent(n) {
 
 // Momentary cue: active only while held. Handled by the daemon (POST
 // /api/cue/<n>/momentary/<1|0>, same as the MIDI "cue_momentary" action):
-// press remembers the current look *and rotation angle* and recalls cue n,
-// release puts both back (global settings like master brightness, blackout
-// and release time aren't touched).
-let momentaryCue = null // { n, recall: Promise }
-export function momentaryCuePress(n) {
-  if (momentaryCue) return momentaryCue.recall
-  markLocalChange()
-  const seq = nextStateSeq()
-  const recall = api(`/cue/${n}/momentary/1`, { method: 'POST' }).then((s) => applyStateIfCurrent(seq, s))
-  momentaryCue = { n, recall: recall.catch(() => {}) }
-  return recall
+// the first press remembers the current look *and rotation angle*, the
+// final release puts both back (global settings like master brightness,
+// blackout and release time aren't touched). Several momentary cues can be
+// held at once (multitouch): the most recently pressed one shows; releasing
+// it falls back to the previous still-held one, and only releasing the last
+// one restores the original look. Requests are chained so the daemon always
+// sees presses and releases in the order they happened.
+const heldMomentaryCues = [] // cue numbers in press order
+let momentaryChain = Promise.resolve()
+function momentaryRequest(n, on) {
+  const run = async () => {
+    markLocalChange()
+    const seq = nextStateSeq()
+    applyStateIfCurrent(seq, await api(`/cue/${n}/momentary/${on ? 1 : 0}`, { method: 'POST' }))
+  }
+  const next = momentaryChain.then(run)
+  momentaryChain = next.catch(() => {})
+  return next
 }
-export async function momentaryCueRelease() {
-  const held = momentaryCue
-  if (!held) return
-  momentaryCue = null
-  await held.recall // release only after the press went through, never before it
-  markLocalChange()
-  const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await api(`/cue/${held.n}/momentary/0`, { method: 'POST' }))
+export function momentaryCuePress(n) {
+  heldMomentaryCues.push(n)
+  return momentaryRequest(n, true)
+}
+export function momentaryCueRelease(n) {
+  const i = heldMomentaryCues.lastIndexOf(n)
+  if (i < 0) return Promise.resolve()
+  heldMomentaryCues.splice(i, 1)
+  if (heldMomentaryCues.length) return momentaryRequest(heldMomentaryCues[heldMomentaryCues.length - 1], true)
+  return momentaryRequest(n, false)
 }
 
 export async function clearCue(n) {
