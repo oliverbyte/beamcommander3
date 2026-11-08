@@ -188,7 +188,10 @@ for how the packaged macOS/Windows builds are put together.
    Flicker is timed per point, so the preview blinks in the same rhythm as
    the laser. Nothing needs to be "applied" or saved first: size, speed,
    movement and similar changes glide softly to their new value, while
-   recalling a cue switches instantly. **Output latency** (Beam) sets how
+   recalling a cue switches instantly. If dots look like short streaks on the
+   wall, raise **Dot blanking** (dark time before/after each dot) and/or
+   **Dot dwell** (lit time per dot) in Beam — projectors differ in how fast
+   their scanners settle. **Output latency** (Beam) sets how
    far ahead frames are sent to the lasers — lower reacts faster, too low
    can cause brief gaps on a slow network.
 4. **Flash / Blackout**: the ⚡ Flash button punches the beam to full white
@@ -219,8 +222,19 @@ for how the packaged macOS/Windows builds are put together.
      control at the start, faster towards the end; functions centred on 0 such as
      rotation or position get the curve mirrored around the centre).
    - Give an **X/Y pad** two functions at once (e.g. Position X / Position Y).
-   - Make a **cue button momentary**: the cue overrides the output only while held,
-     and releasing brings back the previous look.
+   - Choose a **cue button's playback**, named like on lighting consoles and in
+     Pangolin Beyond:
+     - **Solo** (default): the cue replaces the current look.
+     - **Layer**: the cue plays *on top of* the current look instead of muting
+       it; tap again to take it off. Up to 8 layers at once, each running its
+       own movement/rotation/colour animation; master brightness, flash,
+       blackout, zones, masks and flicker apply to everything. Switching the
+       main look with a Solo cue keeps the layers running.
+     - **Flash** (tick "Flash (only while held)"): only active while held. A
+       Solo flash brings back the previous look on release, a Layer flash just
+       removes the layer.
+     - **Release all layers** (button function) takes every layer off; so does
+       "Reset settings".
 
    **Double-tap** a knob or X/Y pad to reset it to 0 (the centre for functions
    centred on 0). On a **Rotation** knob/pad, double-tap is a full rotation
@@ -378,6 +392,8 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /api/cue/<n>/save` | Snapshot current show params into slot `n` |
 | `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the global `flash_release_ms` setting - see below). The look starts exactly at the rotation angle it was saved at, with its own rotation speed - a previously spinning look doesn't turn it further |
 | `POST /api/cue/<n>/momentary/<1\|0>` | Hold-to-preview cue: `1` = remember the current look and rotation angle, recall cue `n`; `0` = put both back (same as the MIDI `cue_momentary:<n>` action) |
+| `POST /api/cue/<n>/layer/<on\|off\|toggle>` | Layer playback: play cue `n` *on top of* the current look instead of replacing it (up to 8 layers, the oldest is dropped; runtime only). `GET /api/state` lists active layers as `layers` |
+| `POST /api/layers/clear` | Release all cue layers (`/api/reset` does too) |
 | `POST /api/cue/<n>/clear` | Delete slot `n` |
 | `POST /api/cue/<from>/move/<to>` | Move slot `from`'s cue into slot `to` (overwriting it), clearing `from`. 404 if `from` is empty or `from == to` |
 | `GET /api/magic-touch[?rev=<n>]` | Shared Magic Touch layout: `{"rev":<n>,"layout":{...}\|null}`; with `?rev=` matching the current revision only `{"rev":<n>}` is returned (cheap polling) |
@@ -391,14 +407,19 @@ All parameter changes take effect on the next frame — nothing restarts.
 `rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `blackout`, `dot_amount`, `flicker_hz`
 (flicker rate), `flicker_on_ms` (lit time per flicker flash, 0-1000 ms; `0` = auto, half of every period),
 `flicker_phase_degrees` (0-360°: laser 2 flashes that much of a period after laser 1, laser 3 twice as much, ...
-in configured order; `0` = all together, e.g. `90` = chase), `output_latency_ms` (10-200, default 40: how far
+in configured order; `0` = all together, e.g. `90` = chase), `dot_dwell_us` (30-3000, default 400: lit time per dot), `dot_blank_us` (0-3000, default 300: dark time before
+and after each dot, on top of the scanner travel time), `output_latency_ms` (10-200, default 40: how far
 ahead frames are queued for the lasers - lower shows changes and cues sooner, too low can cause brief blank gaps on a
 slow network).
 
-`flash_release_ms`, `intensity`, `blackout`, `max_rate_kpps` and `output_latency_ms` are *global*
-daemon settings, not part of a cue's show state: saving a cue never captures
-them and recalling one never changes them, no matter what they were set to
-when the cue was saved. Recalling a cue (also a momentary one, and its
+`flash_release_ms`, `intensity`, `blackout` and **every Beam setting**
+(`rate_kpps`, `max_rate_kpps`, `output_latency_ms`, `dot_amount`,
+`dot_dwell_us`, `dot_blank_us`, `flicker_hz`, `flicker_on_ms`,
+`flicker_phase_degrees`) are *global* daemon settings, not part of a cue's
+show state: saving a cue never captures them, and recalling a cue, a
+momentary cue, a cue layer or a show reset never changes them (values stored
+in cues by older versions are ignored). The Beam settings are saved centrally
+in `settings.json` in the app data directory and survive a restart. Recalling a cue (also a momentary one, and its
 release) switches instantly - no gliding between the old and the new look;
 fader/knob changes still glide softly. `max_rate_kpps` also caps and defaults `rate_kpps` on
 the fader/REST/MIDI - turning it down lowers the scan-rate fader's usable
@@ -529,7 +550,10 @@ do anything special on release),
 `cue_save_arm` (arm save mode — the *next* `cue:<n>` button saves instead of
 recalls) + `cue:<1-32>` (latching save/recall),
 `cue_momentary:<1-32>` (hold to preview that cue, release to snap back to
-whatever was showing before — matches the original APC40 grid buttons).
+whatever was showing before — matches the original APC40 grid buttons),
+`cue_layer:<n>` (each press toggles cue `n` as a layer on top of the current
+look), `cue_layer_flash:<n>` (layer only while held), `layers_clear`
+(release all layers).
 
 ## Supported hardware
 

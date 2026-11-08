@@ -256,7 +256,7 @@ const PAGES = [
   { id: 'color', label: 'Color', title: 'Color', description: 'Set a solid color or add animated rainbow.' },
   { id: 'shapes', label: 'Shapes', title: 'Shapes', description: 'Choose a shape and tune its geometry.' },
   { id: 'move', label: 'Move', title: 'Move', description: 'Animate the shape and adjust its position.' },
-  { id: 'beam', label: 'Beam', title: 'Beam', description: 'Adjust scan rate, dot density, and preview.' },
+  { id: 'beam', label: 'Beam', title: 'Beam', description: 'Scan rate, dots, flicker and preview - saved centrally, not in cues.' },
   { id: 'zoning', label: 'Zoning', title: 'Zoning', description: 'Calibrate the output area for each laser.' },
   { id: 'lasers', label: 'Lasers', title: 'Lasers', description: 'Configure and arm connected laser projectors.' },
 ]
@@ -308,6 +308,9 @@ const TRANSFORM_CONTROLS = [
 ]
 const BEAM_CONTROLS = [
   { label: 'Dot density', key: 'dot_amount', min: 0.01, max: 1, step: 0.01, decimals: 2 },
+  // Scanner tuning for crisp dots (global, not saved in cues): raise them if dots look like streaks.
+  { label: 'Dot dwell (lit time per dot)', key: 'dot_dwell_us', min: 30, max: 3000, step: 10, decimals: 0, suffix: ' µs' },
+  { label: 'Dot blanking (dark before/after)', key: 'dot_blank_us', min: 0, max: 3000, step: 10, decimals: 0, suffix: ' µs' },
   { label: 'Flicker rate', key: 'flicker_hz', min: 0, max: 30, step: 0.5, decimals: 1, suffix: ' Hz' },
   // How long each flicker flash is lit; 0 = auto (half of every period).
   { label: 'Flicker on time', key: 'flicker_on_ms', min: 0, max: 1000, step: 5, decimals: 0, suffix: ' ms', zeroLabel: 'Auto (50 %)' },

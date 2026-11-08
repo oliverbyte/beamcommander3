@@ -42,6 +42,9 @@ export const laserState = reactive({
   rate_kpps:       30,
   max_rate_kpps:   30,
   output_latency_ms: 40, // how far ahead frames are queued for the DACs (global, not in cues)
+  dot_dwell_us:    400, // scanner tuning: lit time per dot (global, not in cues)
+  dot_blank_us:    300, // scanner tuning: dark time before/after each dot (global, not in cues)
+  layers: [],      // cue numbers currently playing as layers on top of the look (runtime only)
   // Footswitch-style master output gate (see /brightness/gate/<0|1> in
   // laser_daemon.cpp): defaults OPEN (true) - only `blackout` above is the
   // active safety default. Hardware output stays forced dark only if this
@@ -312,11 +315,13 @@ export async function recallCue(n) {
   applyStateIfCurrent(seq, await api(`/cue/${n}/recall`, { method: 'POST' }))
 }
 
+// Fields a cue stores (the look). Beam settings - scan rate, dot density,
+// dot timing, flicker, output latency - are global, not part of cues.
 const CUE_STATE_FIELDS = [
-  'shape', 'radius', 'points', 'rate_kpps', 'r', 'g', 'b', 'shape_scale',
+  'shape', 'radius', 'points', 'r', 'g', 'b', 'shape_scale',
   'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed',
   'move_size', 'move_phase_degrees', 'wave_frequency', 'wave_amplitude', 'wave_speed',
-  'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees', 'dot_amount', 'flicker_hz', 'flicker_on_ms', 'flicker_phase_degrees',
+  'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees',
 ]
 
 // True when cue slot n is populated and every saved field equals the live state.
@@ -364,6 +369,20 @@ export function momentaryCueRelease(n) {
   heldMomentaryCues.splice(i, 1)
   if (heldMomentaryCues.length) return momentaryRequest(heldMomentaryCues[heldMomentaryCues.length - 1], true)
   return momentaryRequest(n, false)
+}
+
+// Cue layers: play cue n *on top of* the current look instead of replacing
+// it (Layer playback) - mode 'on' | 'off' | 'toggle'. See POST
+// /api/cue/<n>/layer/<mode> and ShowLayer in laser_daemon.cpp.
+export async function setCueLayer(n, mode) {
+  markLocalChange()
+  const seq = nextStateSeq()
+  applyStateIfCurrent(seq, await api(`/cue/${n}/layer/${mode}`, { method: 'POST' }))
+}
+export async function clearLayers() {
+  markLocalChange()
+  const seq = nextStateSeq()
+  applyStateIfCurrent(seq, await api('/layers/clear', { method: 'POST' }))
 }
 
 export async function clearCue(n) {

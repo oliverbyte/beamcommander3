@@ -108,7 +108,7 @@ cd frontend && npm install && npm run dev -- --port 5173 < /dev/null
 > `< /dev/null` on the Vite command prevents it from suspending waiting for
 > keyboard input when run detached/backgrounded.
 
-## Persistent user data (midi_map.json, cues.json, magic_touch.json, lasers.json)
+## Persistent user data (midi_map.json, cues.json, magic_touch.json, lasers.json, settings.json)
 
 `laser_daemon` never reads/writes these files at whatever relative path
 happens to be current - it always resolves them to a per-OS, per-user
@@ -138,6 +138,12 @@ before pushing and commit whatever it changed:
 ```sh
 packaging/sync_default_data.sh   # copies them from the app data dir into backend/
 ```
+
+`settings.json` holds the central Beam settings (scan rate, max rate, output
+latency, dot density/dwell/blanking, flicker): loaded at startup
+(`load_settings_from_disk()`), written by a small background thread within
+~1 s of any change (`save_settings_if_changed()`). Like `lasers.json` it is
+tuned to this rig's projectors and not shipped.
 
 `lasers.json` is intentionally not shipped (it holds this rig's DAC IP
 addresses), and `midi_map.json` isn't synced because the app never writes
@@ -398,9 +404,11 @@ still show the target immediately.
 - Exponential glide (`glide_toward`), frame-rate independent and the same
   duration for any jump size; snaps exactly onto the target at the end
   (the renderer checks `rainbow_amount > 0` / `dot_amount < 1`).
-- `radius`, `shape_scale`, `dot_amount`, `move_size`, `rainbow_amount`,
-  per-laser `move_phase_degrees`/`rainbow_phase_degrees`: tau 0.15 s
-  (~0.45 s to 95 %).
+- `radius`, `shape_scale`, `move_size`, `rainbow_amount`, per-laser
+  `move_phase_degrees`/`rainbow_phase_degrees`/`flicker_phase_degrees`:
+  tau 0.15 s (~0.45 s to 95 %).
+- `dot_amount`: tau 0.35 s (~1 s), so dots visibly fade in/out one by one
+  (see "Dot rendering").
 - `move_speed`, `rotation_speed`, `rainbow_speed`: tau 0.25 s, and the phase
   accumulators integrate the *smoothed* speeds, so the motion accelerates/
   decelerates instead of changing rate abruptly.
@@ -571,8 +579,11 @@ Cues are snapshots of `LaserState` in `std::map<int, LaserState> G_cues`,
 guarded by its own `G_cues_mtx` and persisted to `backend/cues.json`. A
 handful of fields are deliberately *not* part of that snapshot even though
 they live on `LaserState` - `flash_release_ms`, `intensity`
-(master brightness), `blackout` and `max_rate_kpps` are global daemon/safety
-settings, not per-look show state: they're excluded from
+(master brightness), `blackout` and all Beam settings (`rate_kpps`,
+`max_rate_kpps`, `output_latency_ms`, `dot_amount`, `dot_dwell_us`,
+`dot_blank_us`, `flicker_hz`, `flicker_on_ms`, `flicker_phase_degrees`) are
+global daemon/safety settings, not per-look show state (one place for this:
+`with_global_settings()`): they're excluded from
 `cue_state_to_json`/`cue_state_from_json` and explicitly re-applied on top
 of `G` after every `do_cue_recall()` (and preserved across `/api/reset` the
 same way), so switching cues or resetting the show can never change the
@@ -605,6 +616,27 @@ fails to paint on a shape with a degenerate (zero width/height) bounding
 box, like a horizontal `<line>`.
 
 ### Dot rendering (dot_amount < 1)
+
+Dot timing is in microseconds, not points (`dot_timing()`, `show_fx.h`):
+before each dot the beam stays dark for "Dot blanking" (`dot_blank_us`,
+default 300 µs) plus 2 ms per unit of jump distance (max 4 ms) so the
+galvos can travel and settle, the dot is lit for "Dot dwell"
+(`dot_dwell_us`, default 400 µs), then dark again for `dot_blank_us` (the
+laser's own switch-off delay) before the galvos move on. Converted to points
+at the actual scan rate. The old fixed point counts (~0.13 / 0.07 ms at
+30 kpps) made every dot a streak on real projectors. Both settings are
+global (not in cues, kept across recall/reset, also used by cue layers).
+With many dots the times are compressed to fit the point budget, never
+below 2 settle + 2 lit + 1 trail points.
+
+The dot count is continuous (`dot_amount * n`, `place_dots()` in
+`show_fx.h`): dots sit evenly spaced at fractional base-point positions
+(interpolated between base points; closed shapes wrap, lines/waves don't),
+and with a fractional count the newest dot is drawn at that fraction's
+brightness. Together with the slower `dot_amount` glide, turning the knob
+makes the dots slide apart/together continuously while new dots fade in (or
+out) - instead of every dot jumping to a new position each time the
+whole-number count changed.
 
 `make_frame()` doesn't just thin the point list by an integer stride - a
 DAC plays a frame's points back-to-back at a fixed rate, moving the galvo
@@ -669,6 +701,26 @@ wait
 curl -s --max-time 3 http://localhost:8000/api/state && echo OK || echo HUNG
 ```
 
+## Cue layers
+
+A cue can play *on top of* the main look (`G`) instead of replacing it:
+`G_show_layers` (max 8, guarded by `G_mtx`) holds a copy of each layered
+cue plus its own move/rotation/wave/rainbow phases, integrated in
+`laser_thread()` (frozen by motion hold via `G_motion_frozen`). Rendering:
+`make_frame()` takes a `RenderPose` (rotation, position, wave, point budget)
+instead of reading globals; `base_pose()` builds it for the main look,
+`layer_pose()` for a layer. Every look gets `kFramePointBudget / (1 + layers)`
+points, is rendered per laser by `render_look_for_laser()` (per-laser
+phase offsets), and the figures are joined by `compose_figures()`
+(`show_fx.h`): each figure closed, blanked interpolated travel + settle
+between figures and back to the start. Master brightness and a held flash
+apply to layers (`layer_render_state()`); blackout, gate, zone, masks and
+flicker act on the composed frame. Solo recalls keep layers; `/api/reset`
+and `POST /api/layers/clear` remove them. API: `POST
+/api/cue/<n>/layer/<on|off|toggle>`; MIDI `cue_layer:<n>`,
+`cue_layer_flash:<n>`, `layers_clear`. Magic Touch: cue buttons with
+`w.layer` (Playback: Layer) and `w.momentary` (Flash).
+
 ## Magic Touch multitouch
 
 `MagicTouchBuilder.vue` tracks every finger as its own gesture, keyed by
@@ -698,8 +750,8 @@ framework, header-only - needs only libera's include dir):
   20,000 random frames/mask sets that no lit segment lands inside a mask.
 - `test_param_smoothing.cpp` - soft parameter transitions
   (`param_smoothing.h`).
-- `test_show_fx.cpp` - flicker rate + on time and the per-point flicker
-  timeline (`show_fx.h`).
+- `test_show_fx.cpp` - flicker rate + on time, the per-point flicker
+  timeline and composing several looks into one frame (`show_fx.h`).
 
 Tests are **not** part of the build (`build.sh`, `npm run build`,
 CMake) - they run before every `git push` via the versioned hook

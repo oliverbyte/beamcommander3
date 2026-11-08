@@ -127,6 +127,13 @@ TEST(snap_speeds_leaves_shape_gliding) {
     t.shape_scale = 1.0f; s.snap_speeds(t);
     CHECK(s.shape_scale == 0.0f);
 }
+TEST(dot_amount_glides_slower_than_shape) {
+    ShowParamSmoother<State> s; State t; t.dot_amount = 0.1f; t.shape_scale = 0; s.update(t, 0.01f);
+    t.dot_amount = 0.9f; t.shape_scale = 0.8f; run(s, t, 0.3f);
+    const float dotProgress = (s.dot_amount - 0.1f) / 0.8f, scaleProgress = s.shape_scale / 0.8f;
+    CHECK(dotProgress < scaleProgress);
+    CHECK(dotProgress > 0.4f && dotProgress < 0.7f); // ~1 - e^(-0.3/0.35)
+}
 TEST(rainbow_amount_reaches_exact_zero) {
     ShowParamSmoother<State> s; State t; t.rainbow_amount = 0.6f; s.update(t, 0.01f);
     t.rainbow_amount = 0; run(s, t, 2.0f);
@@ -134,7 +141,7 @@ TEST(rainbow_amount_reaches_exact_zero) {
 }
 TEST(dot_amount_reaches_exact_one) {
     ShowParamSmoother<State> s; State t; t.dot_amount = 0.2f; s.update(t, 0.01f);
-    t.dot_amount = 1.0f; run(s, t, 2.0f);
+    t.dot_amount = 1.0f; run(s, t, 4.0f);
     CHECK(rendered(s).dot_amount == 1.0f);
 }
 TEST(move_mode_switch_crossfades) {

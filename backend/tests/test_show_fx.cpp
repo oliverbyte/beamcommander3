@@ -214,6 +214,149 @@ TEST(timeline_resyncs_when_drifting) {
     CHECK(tl.begin(21.0) == 21.0);
 }
 
+// ── Several looks in one frame ───────────────────────────────────────────────
+static std::vector<Pt> square(float cx, float cy, float h, int perEdge, float bri = 1) {
+    std::vector<Pt> v; const float c[4][2] = {{cx - h, cy - h}, {cx + h, cy - h}, {cx + h, cy + h}, {cx - h, cy + h}};
+    for (int e = 0; e < 4; ++e) for (int i = 0; i < perEdge; ++i) {
+        const float t = (float)i / perEdge; const auto& a = c[e]; const auto& b = c[(e + 1) % 4];
+        v.push_back({a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, bri, bri, bri});
+    }
+    return v;
+}
+static bool litP(const Pt& p) { return p.r > 0 || p.g > 0 || p.b > 0; }
+
+TEST(single_figure_is_unchanged) {
+    auto a = square(0, 0, 0.3f, 10);
+    auto out = compose_figures<Pt>({a});
+    CHECK(out.size() == a.size());
+    auto out2 = compose_figures<Pt>({a, {}}); // empty layers are ignored
+    CHECK(out2.size() == a.size());
+    CHECK(compose_figures<Pt>({}).empty());
+}
+TEST(two_figures_contain_both_shapes) {
+    auto a = square(-0.5f, 0, 0.2f, 10), b = square(0.5f, 0, 0.2f, 10);
+    auto out = compose_figures<Pt>({a, b});
+    int litA = 0, litB = 0;
+    for (auto& p : out) if (litP(p)) (p.x < 0 ? litA : litB)++;
+    CHECK(litA == 41 && litB == 41); // 40 points + the closing point each
+}
+TEST(no_lit_jump_between_figures) {
+    // Every lit segment (both ends lit) stays within one figure: no streak across the room.
+    auto a = square(-0.5f, 0, 0.2f, 10), b = square(0.5f, 0.3f, 0.2f, 10), c = square(0, -0.6f, 0.1f, 6);
+    auto out = compose_figures<Pt>({a, b, c});
+    bool ok = true;
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const auto& p = out[i]; const auto& q = out[(i + 1) % out.size()];
+        if (litP(p) && litP(q)) ok = ok && std::hypot(q.x - p.x, q.y - p.y) < 0.25f; // edge steps are 0.04
+    }
+    CHECK(ok);
+    // and the frame ends blanked, back at the first figure's start
+    CHECK(!litP(out.back()));
+    CHECK(out.back().x == a.front().x && out.back().y == a.front().y);
+}
+TEST(figures_are_closed) {
+    auto a = square(-0.5f, 0, 0.2f, 10), b = square(0.5f, 0, 0.2f, 10);
+    auto out = compose_figures<Pt>({a, b});
+    // The closing segment of figure a (last edge point -> first point) is drawn lit.
+    bool closedA = false;
+    for (std::size_t i = 0; i + 1 < out.size(); ++i)
+        if (litP(out[i]) && litP(out[i + 1]) && out[i].x == a.back().x && out[i].y == a.back().y &&
+            out[i + 1].x == a.front().x && out[i + 1].y == a.front().y) closedA = true;
+    CHECK(closedA);
+}
+TEST(blank_travel_is_gentle_and_settles) {
+    auto a = square(-0.9f, -0.9f, 0.05f, 4), b = square(0.9f, 0.9f, 0.05f, 4);
+    auto out = compose_figures<Pt>({a, b});
+    bool gentle = true;
+    for (std::size_t i = 1; i < out.size(); ++i)
+        if (!litP(out[i]) && !litP(out[i - 1])) gentle = gentle && std::hypot(out[i].x - out[i - 1].x, out[i].y - out[i - 1].y) < 0.1f;
+    CHECK(gentle);
+    // settle: the point before b lights up is a blank point exactly at b's start, repeated
+    std::size_t firstB = 0;
+    for (std::size_t i = 0; i < out.size(); ++i) if (litP(out[i]) && out[i].x > 0) { firstB = i; break; }
+    CHECK(firstB >= (std::size_t)kFigureSettle);
+    for (int k = 1; k <= kFigureSettle; ++k) {
+        CHECK(!litP(out[firstB - k]));
+        CHECK(out[firstB - k].x == b.front().x && out[firstB - k].y == b.front().y);
+    }
+}
+TEST(dotted_figures_are_not_closed_with_a_lit_segment) {
+    // A figure that starts/ends blank (dotted mode) gets no closing point.
+    auto a = square(-0.5f, 0, 0.2f, 10); a.front().r = a.front().g = a.front().b = 0;
+    auto b = square(0.5f, 0, 0.2f, 10);
+    auto out = compose_figures<Pt>({a, b});
+    int litA = 0; for (auto& p : out) if (litP(p) && p.x < 0) ++litA;
+    CHECK(litA == 39);
+}
+
+// ── Dot placement ────────────────────────────────────────────────────────────
+TEST(whole_dot_count_is_evenly_spaced_and_fully_lit) {
+    auto d = place_dots(5.0, 300);
+    CHECK(d.size() == 5);
+    for (int i = 0; i < 5; ++i) { CHECK_NEAR(d[i].pos, i * 60.0, 1e-9); CHECK(d[i].level == 1.0f); }
+}
+TEST(fractional_count_fades_in_the_newest_dot) {
+    auto d = place_dots(5.25, 300);
+    CHECK(d.size() == 6);
+    for (int i = 0; i < 5; ++i) CHECK(d[i].level == 1.0f);
+    CHECK_NEAR(d[5].level, 0.25, 1e-6);
+}
+TEST(dots_never_jump_while_the_count_glides) {
+    // Sweep the count finely: every dot that exists in two consecutive steps
+    // moves only a tiny bit, and the fading dot's level changes smoothly.
+    const int n = 300;
+    auto prev = place_dots(3.0, n);
+    double maxMove = 0, maxLevelStep = 0;
+    for (double c = 3.0; c <= 40.0; c += 0.001) {
+        auto cur = place_dots(c, n);
+        for (std::size_t i = 0; i < std::min(prev.size(), cur.size()); ++i) {
+            maxMove = std::max(maxMove, std::fabs(cur[i].pos - prev[i].pos));
+            maxLevelStep = std::max(maxLevelStep, (double)std::fabs(cur[i].level - prev[i].level));
+        }
+        prev = cur;
+    }
+    CHECK(maxMove < 0.5);       // well under one base point per 0.001 step
+    CHECK(maxLevelStep < 0.01); // fade, no pop
+}
+TEST(new_dot_appears_dark_and_reaches_full_brightness) {
+    auto justAfter = place_dots(7.0005, 300), justBefore = place_dots(7.9995, 300);
+    CHECK(justAfter.size() == 8 && justAfter[7].level < 0.01f);
+    CHECK(justBefore.size() == 8 && justBefore[7].level > 0.99f);
+}
+TEST(dot_count_limits) {
+    CHECK(place_dots(0.2, 300).size() == 1);     // at least one dot
+    CHECK(place_dots(300.0, 300).size() == 300); // every base point
+    CHECK(place_dots(299.5, 300).size() == 300);
+    for (auto& p : place_dots(299.5, 300)) CHECK(p.pos >= 0 && p.pos < 300);
+    CHECK(place_dots(5.0, 0).empty());
+    CHECK(place_dots(std::numeric_limits<double>::quiet_NaN(), 300).empty());
+}
+
+// ── Dot timing ───────────────────────────────────────────────────────────────
+TEST(dot_timing_converts_microseconds_at_the_scan_rate) {
+    const DotTiming t = dot_timing(30000.0, 400.0f, 300.0f); // 30 kpps: 1 point = 33.3 us
+    CHECK(t.dwell == 12); CHECK(t.trail == 9); CHECK(t.settleMin == 9);
+    CHECK_NEAR(t.settlePerUnit, 60.0, 1e-3); // 2 ms per unit
+    CHECK(t.settleMax == 9 + 120);           // + 4 ms
+}
+TEST(dot_timing_is_the_same_time_at_any_rate) {
+    const DotTiming slow = dot_timing(15000.0, 400.0f, 300.0f), fast = dot_timing(60000.0, 400.0f, 300.0f);
+    CHECK_NEAR(slow.dwell / 15000.0, fast.dwell / 60000.0, 1e-4);
+    CHECK_NEAR(slow.trail / 15000.0, fast.trail / 60000.0, 1e-4);
+    CHECK_NEAR(slow.settlePerUnit / 15000.0, fast.settlePerUnit / 60000.0, 1e-9);
+}
+TEST(dot_timing_much_longer_than_before) {
+    // The old fixed point counts (dwell 4, trail 2, settle >= 4) were 133/67/133 us at 30 kpps.
+    const DotTiming t = dot_timing(30000.0, kDotDwellUsDefault, kDotBlankUsDefault);
+    CHECK(t.dwell >= 3 * 4); CHECK(t.trail >= 4 * 2); CHECK(t.settleMin >= 2 * 4);
+}
+TEST(dot_timing_never_zero_and_handles_garbage) {
+    const DotTiming t = dot_timing(1000.0, 0.0f, 0.0f);
+    CHECK(t.dwell >= 1 && t.trail >= 1 && t.settleMin >= 2 && t.settleMax >= t.settleMin);
+    const DotTiming g = dot_timing(std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<float>::quiet_NaN(), -5.0f);
+    CHECK(g.dwell == 12 && g.settleMin >= 2 && g.trail >= 1);
+}
+
 int main() {
     std::printf("show_fx tests\n");
     for (const auto& t : registry()) {

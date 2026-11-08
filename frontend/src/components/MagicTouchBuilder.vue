@@ -158,8 +158,17 @@
               <label v-if="defFor(selected).param">{{ defFor(selected).param.label }}
                 <input class="mtb-field" type="number" :min="defFor(selected).param.min" :max="defFor(selected).param.max" :value="selected.param" @change="onParamChange(selected, $event.target.value)" />
               </label>
-              <label v-if="defFor(selected).momentaryOption" class="mtb-check" title="The cue is only active while the button is held; releasing restores the previous look">
-                <input type="checkbox" :checked="!!selected.momentary" @change="selected.momentary = $event.target.checked || undefined" /> Momentary (only while held)
+              <label v-if="defFor(selected).layerOption" title="Solo replaces the current look. Layer plays this cue on top of the current look - tap again to take it off.">Playback
+                <select class="mtb-field" :value="selected.layer ? 'layer' : 'solo'" @change="selected.layer = $event.target.value === 'layer' || undefined">
+                  <option value="solo">Solo – replaces the current look</option>
+                  <option value="layer">Layer – plays on top of the current look</option>
+                </select>
+              </label>
+              <label
+                v-if="defFor(selected).momentaryOption" class="mtb-check"
+                :title="selected.layer ? 'The layer only plays while the button is held' : 'The cue is only active while the button is held; releasing restores the previous look'"
+              >
+                <input type="checkbox" :checked="!!selected.momentary" @change="selected.momentary = $event.target.checked || undefined" /> Flash (only while held)
               </label>
               <label class="mtb-check">
                 <input type="checkbox" :checked="selected.showLabel !== false" @change="selected.showLabel = $event.target.checked" /> Show label
@@ -226,7 +235,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   flashPress, flashRelease, cues, isCueCurrent, laserState, lasers, markLocalChange, recallCue, resetState, rotationReset,
-  momentaryCuePress, momentaryCueRelease,
+  momentaryCuePress, momentaryCueRelease, setCueLayer, clearLayers,
   setBrightnessGate, updateLaser, updateState, magicTouch, fetchMagicTouch, saveMagicTouch,
 } from '../composables/useLaserSocket.js'
 import CuePreview from './CuePreview.vue'
@@ -273,6 +282,8 @@ const VALUE_FNS = {
   // element opts out via w.keepAngle (then it only stops spinning).
   rotation: { ...num('Move', 'Rotation', 'rotation_speed', -4, 4, 1, ' rot/s'), tapReset: (w) => (w.keepAngle ? null : rotationReset()) },
   dot_amount: num('Beam', 'Dot density', 'dot_amount', 0.01, 1),
+  dot_dwell: num('Beam', 'Dot dwell', 'dot_dwell_us', 30, 3000, 0, ' µs'),
+  dot_blank: num('Beam', 'Dot blanking', 'dot_blank_us', 0, 3000, 0, ' µs'),
   flicker: num('Beam', 'Flicker rate', 'flicker_hz', 0, 30, 1, ' Hz'),
   // Lit time per flicker flash; 0 = auto (half of every period, the old behaviour).
   flicker_on: { ...num('Beam', 'Flicker on time', 'flicker_on_ms', 0, 1000, 0, ' ms'), format: (v) => (Number(v) === 0 ? 'Auto' : `${Math.round(v)} ms`) },
@@ -301,13 +312,25 @@ const BUTTON_FNS = {
   gate_toggle: { group: 'Master', label: 'Output gate toggle', mode: 'trigger', press: () => setBrightnessGate(!laserState.brightness_gate_open), active: () => laserState.brightness_gate_open },
   reset: { group: 'Master', label: 'Reset settings', mode: 'trigger', press: () => resetState() },
   rotation_reset: { group: 'Move', label: 'Rotation reset', mode: 'trigger', press: () => rotationReset() },
-  // `momentaryOption`: the element can be switched to momentary (w.momentary) - cue active only while held.
+  // Cue playback, named like in lighting consoles / Pangolin Beyond:
+  // - Solo (default): the cue replaces the current look.
+  // - Layer (w.layer): the cue plays *on top of* the current look; tap toggles it.
+  // - Flash (w.momentary): only while held - Solo flash puts the previous look
+  //   back on release, Layer flash removes the layer on release.
   cue_recall: {
-    group: 'Cues', label: 'Recall cue', mode: 'trigger', momentaryOption: true, cuePad: true,
+    group: 'Cues', label: 'Recall cue', mode: 'trigger', momentaryOption: true, layerOption: true, cuePad: true,
     param: { label: 'Cue number', min: 1, max: CUE_COUNT, default: 1 },
-    press: (w) => (w.momentary ? momentaryCuePress(w.param) : recallCue(w.param)),
-    release: (w) => momentaryCueRelease(w.param),
-    active: (w) => isCueCurrent(w.param),
+    press: (w) => {
+      if (w.layer) return setCueLayer(w.param, w.momentary ? 'on' : 'toggle')
+      return w.momentary ? momentaryCuePress(w.param) : recallCue(w.param)
+    },
+    release: (w) => (w.layer ? setCueLayer(w.param, 'off') : momentaryCueRelease(w.param)),
+    active: (w) => (w.layer ? (laserState.layers || []).includes(Number(w.param)) : isCueCurrent(w.param)),
+  },
+  layers_clear: {
+    group: 'Cues', label: 'Release all layers', mode: 'trigger',
+    press: () => clearLayers(),
+    active: () => (laserState.layers || []).length > 0,
   },
 }
 for (const [name, color] of COLORS) {
