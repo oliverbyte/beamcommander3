@@ -78,7 +78,7 @@
 
     <hr />
     <h2>FX</h2>
-    <div v-for="[lbl,key,mn,mx,st] in [['Dot amount','dot_amount',0.01,1,0.01],['Flicker Hz','flicker_hz',0,30,0.5]]" :key="key">
+    <div v-for="[lbl,key,mn,mx,st] in [['Dot amount','dot_amount',0.01,1,0.01],['Flicker rate (Hz)','flicker_hz',0,30,0.5],['Flicker on time (ms, 0 = auto)','flicker_on_ms',0,1000,5],['Flicker phase per laser (°)','flicker_phase_degrees',0,360,1]]" :key="key">
       <label>{{ lbl }} <span class="val">{{ fmt(laserState[key]) }}</span></label>
       <input type="range" :min="mn" :max="mx" :step="st" :value="laserState[key]" @input="push({[key]:+$event.target.value})" />
     </div>
@@ -89,6 +89,8 @@
     <input type="range" min="0" max="1" step="0.001" :value="ratePos" @input="onRatePos(+$event.target.value)" />
     <label>Max rate (kpps) <span class="val">{{ fmt(laserState.max_rate_kpps) }}</span></label>
     <input type="range" min="1" max="100" step="1" :value="laserState.max_rate_kpps" @input="push({ max_rate_kpps: +$event.target.value })" />
+    <label>Output latency (ms) <span class="val">{{ fmt(laserState.output_latency_ms) }}</span></label>
+    <input type="range" min="10" max="200" step="5" :value="laserState.output_latency_ms" @input="push({ output_latency_ms: +$event.target.value })" />
     <label>Eye persistence (ms) <span class="val">{{ persistenceMs }}</span></label>
     <input type="range" min="0" max="100" step="1" :value="persistenceMs" @input="onPersist(+$event.target.value)" />
 

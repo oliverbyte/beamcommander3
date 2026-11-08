@@ -49,6 +49,12 @@
             :title="l.mirror_x ? 'Un-mirror X axis (hardware only)' : 'Mirror X axis (hardware only)'"
             @click="toggleMirror(l)"
           >⇆</button>
+          <button
+            class="mirror-btn"
+            :class="{ active: l.mirror_y }"
+            :title="l.mirror_y ? 'Un-mirror Y axis (hardware only)' : 'Mirror Y axis (hardware only)'"
+            @click="toggleMirrorY(l)"
+          >⇅</button>
           <button class="del-btn" title="Remove laser" @click="onDelete(l)">✕</button>
         </div>
         <p v-if="!lasers.length" class="empty">No lasers configured yet.</p>
@@ -114,6 +120,10 @@ async function toggleArmed(l) {
 }
 async function toggleMirror(l) {
   try { await updateLaser(l.id, { mirror_x: !l.mirror_x }); error.value = null }
+  catch (e) { error.value = String(e) }
+}
+async function toggleMirrorY(l) {
+  try { await updateLaser(l.id, { mirror_y: !l.mirror_y }); error.value = null }
   catch (e) { error.value = String(e) }
 }
 async function onDelete(l) {

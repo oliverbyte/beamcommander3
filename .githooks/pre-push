@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Runs all unit tests before every `git push`; the push is aborted if any
+# test fails. Activate once per clone:  git config core.hooksPath .githooks
+# (see DEVELOPER.md, "Tests (run before every push)").
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+
+echo "[pre-push] Backend unit tests (backend/tests/run_tests.sh)..."
+bash "$root/backend/tests/run_tests.sh" | grep -v '^  ok'
+
+echo "[pre-push] Frontend unit tests (npm test)..."
+(cd "$root/frontend" && npm test --silent 2>&1 | grep -E '^# (tests|pass|fail)|^not ok' )
+
+echo "[pre-push] All tests passed."

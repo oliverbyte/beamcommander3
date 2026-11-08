@@ -167,6 +167,13 @@
               <label v-if="selected.type !== 'button'" class="mtb-check">
                 <input type="checkbox" :checked="selected.showValue !== false" @change="selected.showValue = $event.target.checked" /> Show value
               </label>
+              <label
+                v-if="(selected.type === 'knob' || selected.type === 'xy') && (defFor(selected)?.tapReset || defForY(selected)?.tapReset)"
+                class="mtb-check"
+                title="Double tap resets the rotation: angle back to 0 and spinning stops. Untick to only stop spinning and keep the current angle."
+              >
+                <input type="checkbox" :checked="!selected.keepAngle" @change="selected.keepAngle = !$event.target.checked || undefined" /> Double tap: rotation reset (angle to 0)
+              </label>
               <label v-if="selected.type !== 'button'" class="mtb-check" title="Value changes slowly at first and faster towards the end (around the centre for functions centred on 0)">
                 <input type="checkbox" :checked="!!selected.log" @change="selected.log = $event.target.checked || undefined" /> Logarithmic curve
               </label>
@@ -218,7 +225,7 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
-  flashPress, flashRelease, cues, isCueCurrent, laserState, lasers, markLocalChange, recallCue, resetState,
+  flashPress, flashRelease, cues, isCueCurrent, laserState, lasers, markLocalChange, recallCue, resetState, rotationReset,
   momentaryCuePress, momentaryCueRelease,
   setBrightnessGate, updateLaser, updateState, magicTouch, fetchMagicTouch, saveMagicTouch,
 } from '../composables/useLaserSocket.js'
@@ -262,10 +269,16 @@ const VALUE_FNS = {
   move_phase: num('Move', 'Phase step per laser', 'move_phase_degrees', 0, 360, 0, '°'),
   pos_x: num('Move', 'Position X', 'pos_x', -1, 1),
   pos_y: num('Move', 'Position Y', 'pos_y', -1, 1),
-  rotation: num('Move', 'Rotation', 'rotation_speed', -4, 4, 1, ' rot/s'),
+  // Double tap = full rotation reset (angle back to 0 + stop), unless the
+  // element opts out via w.keepAngle (then it only stops spinning).
+  rotation: { ...num('Move', 'Rotation', 'rotation_speed', -4, 4, 1, ' rot/s'), tapReset: (w) => (w.keepAngle ? null : rotationReset()) },
   dot_amount: num('Beam', 'Dot density', 'dot_amount', 0.01, 1),
-  flicker: num('Beam', 'Flicker', 'flicker_hz', 0, 30, 1, ' Hz'),
+  flicker: num('Beam', 'Flicker rate', 'flicker_hz', 0, 30, 1, ' Hz'),
+  // Lit time per flicker flash; 0 = auto (half of every period, the old behaviour).
+  flicker_on: { ...num('Beam', 'Flicker on time', 'flicker_on_ms', 0, 1000, 0, ' ms'), format: (v) => (Number(v) === 0 ? 'Auto' : `${Math.round(v)} ms`) },
+  flicker_phase: num('Beam', 'Flicker phase per laser', 'flicker_phase_degrees', 0, 360, 0, '°'),
   max_rate: num('Beam', 'Maximum rate', 'max_rate_kpps', 1, 100, 0, ' kpps'),
+  output_latency: num('Beam', 'Output latency', 'output_latency_ms', 10, 200, 0, ' ms'),
   rate: {
     group: 'Beam', label: 'Scan rate', key: 'rate_kpps', min: 0, max: 1,
     format: (v) => `${v.toFixed(1)} kpps`,
@@ -287,6 +300,7 @@ const BUTTON_FNS = {
   blackout_toggle: { group: 'Master', label: 'Blackout toggle', mode: 'trigger', press: () => updateState({ blackout: !laserState.blackout }), active: () => laserState.blackout },
   gate_toggle: { group: 'Master', label: 'Output gate toggle', mode: 'trigger', press: () => setBrightnessGate(!laserState.brightness_gate_open), active: () => laserState.brightness_gate_open },
   reset: { group: 'Master', label: 'Reset settings', mode: 'trigger', press: () => resetState() },
+  rotation_reset: { group: 'Move', label: 'Rotation reset', mode: 'trigger', press: () => rotationReset() },
   // `momentaryOption`: the element can be switched to momentary (w.momentary) - cue active only while held.
   cue_recall: {
     group: 'Cues', label: 'Recall cue', mode: 'trigger', momentaryOption: true, cuePad: true,
@@ -743,8 +757,8 @@ function onXYDown(event, w) {
   event.stopPropagation()
   if (isDoubleTap(event, w)) {
     xyActive = false
-    resetDef(defFor(w))
-    resetDef(defForY(w))
+    resetDef(defFor(w), w)
+    resetDef(defForY(w), w)
     return
   }
   xyActive = true
@@ -759,6 +773,7 @@ function onXYUp() { xyActive = false }
 let knobDrag = null
 // Double tap on a knob or X/Y pad: back to 0 - the centre for functions centred on 0,
 // otherwise 0 or the lowest value the function allows (X/Y pads reset both functions).
+// Rotation instead does a full rotation reset (angle to 0 + stop), see VALUE_FNS.rotation.
 const DOUBLE_TAP_MS = 300
 let lastTap = null // { id, at, x, y }
 function isDoubleTap(event, w) {
@@ -770,13 +785,20 @@ function isDoubleTap(event, w) {
   lastTap = null
   return true
 }
-const resetDef = (def) => sendValue(def.key, def.toRatio ? def.fromRatio(0) : Math.min(def.max, Math.max(def.min, 0)))
+// Functions with a `tapReset` (Rotation) run their own reset action instead,
+// unless it returns null (element opted out) - then the plain reset applies.
+function resetDef(def, w) {
+  if (!def) return
+  const custom = def.tapReset?.(w)
+  if (custom) { custom.catch?.(console.error); return }
+  sendValue(def.key, def.toRatio ? def.fromRatio(0) : Math.min(def.max, Math.max(def.min, 0)))
+}
 function onKnobDown(event, w) {
   if (editing.value) return
   event.stopPropagation()
   if (isDoubleTap(event, w)) {
     knobDrag = null
-    resetDef(defFor(w))
+    resetDef(defFor(w), w)
     return
   }
   rememberValue(w)

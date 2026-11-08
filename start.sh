@@ -39,8 +39,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# --- Build daemon if missing or source is newer ---
-if [[ ! -x "$DAEMON_BIN" ]] || [[ "$ROOT/backend/laser_daemon.cpp" -nt "$DAEMON_BIN" ]]; then
+# --- Build daemon if missing or any backend source is newer ---
+needs_build=false
+[[ -x "$DAEMON_BIN" ]] || needs_build=true
+for src in "$ROOT"/backend/*.cpp "$ROOT"/backend/*.h; do
+    if [[ "$src" -nt "$DAEMON_BIN" ]]; then needs_build=true; fi
+done
+if $needs_build; then
     echo "[start.sh] Building backend..."
     (cd "$ROOT/backend" && bash build.sh)
 fi

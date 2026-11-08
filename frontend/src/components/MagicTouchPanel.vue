@@ -144,9 +144,13 @@
               <label for="magic-max-rate">Maximum rate <output>{{ formatValue(laserState.max_rate_kpps, { decimals: 0 }) }} kpps</output></label>
               <input id="magic-max-rate" type="range" min="1" max="100" step="1" :value="laserState.max_rate_kpps" @input="setNumeric('max_rate_kpps', $event.target.value)" />
             </div>
+            <div class="range-control" title="How far ahead frames are queued for the lasers. Lower = changes and cues show up sooner; too low can cause short blank gaps on a slow or busy network.">
+              <label for="magic-latency">Output latency <output>{{ formatValue(laserState.output_latency_ms, { decimals: 0 }) }} ms</output></label>
+              <input id="magic-latency" type="range" min="10" max="200" step="5" :value="laserState.output_latency_ms" @input="setNumeric('output_latency_ms', $event.target.value)" />
+            </div>
           </section>
           <section class="control-section">
-            <div class="section-heading"><div><h2>Beam detail</h2><p>Control dot density and flicker.</p></div></div>
+            <div class="section-heading"><div><h2>Beam detail</h2><p>Control dot density and flicker rate, on time and phase.</p></div></div>
             <div class="range-grid">
               <div v-for="control in BEAM_CONTROLS" :key="control.key" class="range-control">
                 <label :for="`magic-${control.key}`">{{ control.label }} <output>{{ formatValue(laserState[control.key], control) }}</output></label>
@@ -304,7 +308,11 @@ const TRANSFORM_CONTROLS = [
 ]
 const BEAM_CONTROLS = [
   { label: 'Dot density', key: 'dot_amount', min: 0.01, max: 1, step: 0.01, decimals: 2 },
-  { label: 'Flicker', key: 'flicker_hz', min: 0, max: 30, step: 0.5, decimals: 1, suffix: ' Hz' },
+  { label: 'Flicker rate', key: 'flicker_hz', min: 0, max: 30, step: 0.5, decimals: 1, suffix: ' Hz' },
+  // How long each flicker flash is lit; 0 = auto (half of every period).
+  { label: 'Flicker on time', key: 'flicker_on_ms', min: 0, max: 1000, step: 5, decimals: 0, suffix: ' ms', zeroLabel: 'Auto (50 %)' },
+  // Delay per laser in list order: 0° = all flash together, e.g. 90° = chase.
+  { label: 'Flicker phase per laser', key: 'flicker_phase_degrees', min: 0, max: 360, step: 1, decimals: 0, suffix: '°' },
 ]
 
 const activePage = ref('cues')
@@ -362,6 +370,7 @@ function setPersistence(value) {
 function formatValue(value, control = {}) {
   const decimals = control.decimals ?? 2
   const numeric = Number(value)
+  if (control.zeroLabel && numeric === 0) return control.zeroLabel
   return `${numeric.toFixed(decimals)}${control.suffix || ''}`
 }
 function selectColor(color) {

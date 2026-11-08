@@ -60,8 +60,8 @@ Class 3B/4 laser projectors (the kind used for shows) are not toys:
 - **Test and calibrate (including the Zoning panel) with the beam aimed at
   a wall, floor, or dedicated beam dump** — never at a person, mirror, or
   reflective/glossy surface that could redirect it unexpectedly.
-- **This software's safety defaults (`Blackout` on, brightness gate) are
-  conveniences, not certified safety interlocks.** They're ordinary
+- **This software's safety defaults and features (`Blackout` on, brightness
+  gate, safety masks) are conveniences, not certified safety interlocks.** They're ordinary
   software flags — a bug, a crash, a network hiccup, or an unexpected
   hardware/firmware quirk could leave the beam on or reset a setting.
   Never treat "Blackout is on" as a substitute for physically pointing the
@@ -158,8 +158,10 @@ for how the packaged macOS/Windows builds are put together.
    problem apart from a settings one. Any number of lasers can be armed at
    once — they all stream the exact same show in parallel. Each configured
    laser appears as its own labeled source and beam in the preview; its beam
-   is shown while armed and hidden while disarmed. Per-laser X mirroring is
-   reflected there too. If no lasers are configured, a virtual beam remains
+   is shown while armed and hidden while disarmed. The preview shows each
+   laser exactly as it outputs — X/Y mirroring (⇆/⇅ buttons per laser),
+   zone, safety masks and the master brightness flash included; only
+   Blackout leaves the preview running. If no lasers are configured, a virtual beam remains
    so you can still preview show settings. Also make sure
    **Blackout** is off and **Output Gated** is switched to **Output Enabled**
    in the Master view — both must be open for any real laser light, as a
@@ -180,7 +182,15 @@ for how the packaged macOS/Windows builds are put together.
    **Rainbow phase per laser** makes the rainbow run from laser to laser:
    laser 1 changes color first, each following laser follows one phase step
    later, and inside each line/wave the new colors run in from the left.
-   Every change is instant, nothing needs to be "applied" or saved first.
+   In Beam, **Flicker rate** strobes the output, **Flicker on time** sets how
+   long each flash is lit (0 = auto, half of every period) and **Flicker
+   phase per laser** staggers the flashes across the lasers (a chase).
+   Flicker is timed per point, so the preview blinks in the same rhythm as
+   the laser. Nothing needs to be "applied" or saved first: size, speed,
+   movement and similar changes glide softly to their new value, while
+   recalling a cue switches instantly. **Output latency** (Beam) sets how
+   far ahead frames are sent to the lasers — lower reacts faster, too low
+   can cause brief gaps on a slow network.
 4. **Flash / Blackout**: the ⚡ Flash button punches the beam to full white
    brightness while held, then returns to whatever it was showing before.
    Blackout forces the real laser dark (the on-screen preview keeps
@@ -213,7 +223,10 @@ for how the packaged macOS/Windows builds are put together.
      and releasing brings back the previous look.
 
    **Double-tap** a knob or X/Y pad to reset it to 0 (the centre for functions
-   centred on 0). Page tabs sit in the header next to the Run/Edit toggle; add more
+   centred on 0). On a **Rotation** knob/pad, double-tap is a full rotation
+   reset: the angle snaps back to 0 and spinning stops (untick "Double tap:
+   rotation reset" in the element's settings to only stop it and keep the
+   angle). **Rotation reset** is also available as a button function. Page tabs sit in the header next to the Run/Edit toggle; add more
    with **+**. Button labels wrap and shrink to always fit their button. Back in
    **Run mode** everything works by touch: one finger operates controls, **two
    fingers scroll** a layout that's bigger than the screen.
@@ -235,10 +248,23 @@ for how the packaged macOS/Windows builds are put together.
    of its edges to stretch/squeeze just that axis. Each armed laser has its
    own independent calibration, so multiple projectors in the same rig can
    each be aimed at a different physical sub-region while all showing the
-   exact same content. This only reshapes the real laser output — the
-   on-screen preview always keeps showing the full, un-zoned show — and
-   it's a venue calibration, not a per-cue look, so it's unaffected by
+   exact same content. The on-screen preview shows each laser exactly as it
+   outputs (zone, mirror, masks and master brightness included - only
+   blackout is ignored there),
+   and it's a venue calibration, not a per-cue look, so it's unaffected by
    saving/recalling cues or resetting the show.
+9. **Recommended: Safety masks** — switch the Zoning panel to **Masks** to
+   add any number of red rectangles per laser over areas that must get less
+   or no light (audience, balconies, cameras, ...). Drag a mask to move it,
+   drag an edge or corner to resize/crop it, and choose per mask how much
+   the output is reduced inside it (100% = fully blanked). Masks sit on the
+   laser's real output, so they stay put in the room however the show or
+   zone moves. While lining a mask up, **Show on laser** makes that laser
+   draw the mask's border in red so you can see in the room exactly what's
+   masked — the outline is only drawn while the laser is armed and not
+   blacked out, and switches off automatically when the panel closes or the
+   app restarts. Each laser has its own masks; like the zone they're not
+   part of cues and survive a show reset.
 
 ---
 
@@ -332,20 +358,22 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /laser/rainbow/amount/<v>` / `/speed/<v>` | Rainbow amount (0 = off, rising = ever smaller color bands, 1 = 24 rainbow cycles across the shape; always starts from the current beam color and fades in over the first 10% so turning it up is seamless) / hue cycle speed |
 | `POST /laser/rainbow/phase/<deg>` (or `/api/state` `rainbow_phase_degrees`) | Rainbow delay per laser in configured order, 0-360° (360° = one full hue cycle). Every laser runs the same rainbow animation; laser 2 runs 1× the value behind laser 1, laser 3 2×, etc., so new colors pass from laser to laser (left to right inside lines/waves). After switching the rainbow on, all lasers start at the beam color and join one after another. Needs `rainbow_speed` ≠ 0. Saved and recalled with cues |
 | `POST /blackout/<0\|1>` | Force *hardware* output dark (never affects the browser preview) |
-| `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate, *hardware-only* (never affects the browser preview - same treatment as blackout above): 1 = open instantly (renders the current brightness fader value), 0 = closed (fades to dark over `flash_release_ms`, or instantly if it's 0) — defaults **open**; `blackout` is the one safety gate that defaults on. Closing this only matters to rigs with a physical footswitch/pedal wired up. Never touches the `intensity` field itself |
+| `POST /brightness/gate/<0\|1>` | Footswitch-style master brightness gate (affects laser *and* browser preview): 1 = open instantly (renders the current brightness fader value), 0 = closed (fades to dark over `flash_release_ms`, or instantly if it's 0) — defaults **open**; `blackout` is the one safety gate that defaults on. Closing this only matters to rigs with a physical footswitch/pedal wired up. Never touches the `intensity` field itself |
 | `POST /flash/<0\|1>` | Momentary flash: 1 = press (forces color to white + full brightness, remembering the prior values), 0 = release (always restores them instantly - `flash_release_ms` does not apply here, only to the footswitch gate above) |
 | `POST /flash/release_ms/<v>` | Footswitch gate release fade time (0-2000ms), despite the name this only affects `/brightness/gate` closing, not flash's own release: `0` = instant cut, `>0` = fade brightness to 0 over this many ms instead of snapping to dark (default `200`) |
 | `POST /mirror/x/<0\|1>` | Flip the output horizontally (mirror around center); 1 = mirrored, 0 = normal |
 | `POST /motion/hold/<0\|1>` | Momentary freeze: 1 = press (stops movement, rotation, and the rainbow hue cycle in place, remembering the prior speeds), 0 = release (restores them) |
 | `POST /rotation/reset` | Snap the rotation angle back to 0 and stop it spinning (sets `rotation_speed` to 0) |
-| `GET /api/lasers` | List every configured laser (DAC): `[ {"id","name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","preview_x","preview_y","connected"}, ...]` |
+| `GET /api/lasers` | List every configured laser (DAC): `[ {"id","name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","mirror_y","preview_x","preview_y","masks","connected"}, ...]` |
 | `POST /api/lasers/order` | Persist installation order: `{"ids":[3,1,2]}`; must contain every configured laser ID exactly once |
 | `POST /api/lasers` | Add a new laser: `{"name":"...","ip":"..."}` (`armed` defaults to `false`, i.e. configured but idle) |
-| `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","preview_x","preview_y"}` - setting `armed` to `true` connects + streams this laser's own zone-calibrated output, `false` disconnects/idles it. `mirror_x` flips this laser's output horizontally in hardware and preview. `zone_x`/`zone_y` (-1..1, offset) and `zone_scale_x`/`zone_scale_y` (0.1..2, independent per-axis scale) are this laser's own pan/zoom calibration - set by dragging in the Zoning panel. `preview_x`/`preview_y` (0..1) are its position in the browser preview and do not affect hardware output |
+| `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","mirror_y","preview_x","preview_y"}` - setting `armed` to `true` connects + streams this laser's own zone-calibrated output, `false` disconnects/idles it. `mirror_x`/`mirror_y` flip this laser's output horizontally/vertically in hardware and preview (both = rotated 180°, e.g. an upside-down mounted projector). `zone_x`/`zone_y` (-1..1, offset) and `zone_scale_x`/`zone_scale_y` (0.1..2, independent per-axis scale) are this laser's own pan/zoom calibration - set by dragging in the Zoning panel. `preview_x`/`preview_y` (0..1) are its position in the browser preview and do not affect hardware output |
+| `POST /api/lasers/<id>/masks` | Replace this laser's safety masks: `{"masks":[{"x0","y0","x1","y1","reduce","outline"}, ...]}` (complete list, up to 64). Coordinates are the laser's real output range (-1..1, y up, after the zone); `reduce` is 0..100 % of light removed inside; `outline` draws the border in red on the laser (setup aid, never saved). Invalid/non-numeric values → 400 |
 | `DELETE /api/lasers/<id>` | Remove a laser |
 | `GET /api/cues` | List all populated cue slots (1-128) |
 | `POST /api/cue/<n>/save` | Snapshot current show params into slot `n` |
-| `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the global `flash_release_ms` setting - see below) |
+| `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the global `flash_release_ms` setting - see below). The look starts exactly at the rotation angle it was saved at, with its own rotation speed - a previously spinning look doesn't turn it further |
+| `POST /api/cue/<n>/momentary/<1\|0>` | Hold-to-preview cue: `1` = remember the current look and rotation angle, recall cue `n`; `0` = put both back (same as the MIDI `cue_momentary:<n>` action) |
 | `POST /api/cue/<n>/clear` | Delete slot `n` |
 | `POST /api/cue/<from>/move/<to>` | Move slot `from`'s cue into slot `to` (overwriting it), clearing `from`. 404 if `from` is empty or `from == to` |
 | `GET /api/magic-touch[?rev=<n>]` | Shared Magic Touch layout: `{"rev":<n>,"layout":{...}\|null}`; with `?rev=` matching the current revision only `{"rev":<n>}` is returned (cheap polling) |
@@ -356,12 +384,19 @@ All parameter changes take effect on the next frame — nothing restarts.
 `rate_kpps`, `max_rate_kpps`, `intensity`, `flash_release_ms`, `r`, `g`, `b`,
 `shape_scale`, `pos_x`, `pos_y`, `rotation_speed`, `mirror_x`, `move_mode`,
 `move_speed`, `move_size`, `move_phase_degrees`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
-`rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `blackout`, `dot_amount`, `flicker_hz`.
+`rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `blackout`, `dot_amount`, `flicker_hz`
+(flicker rate), `flicker_on_ms` (lit time per flicker flash, 0-1000 ms; `0` = auto, half of every period),
+`flicker_phase_degrees` (0-360°: laser 2 flashes that much of a period after laser 1, laser 3 twice as much, ...
+in configured order; `0` = all together, e.g. `90` = chase), `output_latency_ms` (10-200, default 40: how far
+ahead frames are queued for the lasers - lower shows changes and cues sooner, too low can cause brief blank gaps on a
+slow network).
 
-`flash_release_ms`, `intensity`, `blackout` and `max_rate_kpps` are *global*
+`flash_release_ms`, `intensity`, `blackout`, `max_rate_kpps` and `output_latency_ms` are *global*
 daemon settings, not part of a cue's show state: saving a cue never captures
 them and recalling one never changes them, no matter what they were set to
-when the cue was saved. `max_rate_kpps` also caps and defaults `rate_kpps` on
+when the cue was saved. Recalling a cue (also a momentary one, and its
+release) switches instantly - no gliding between the old and the new look;
+fader/knob changes still glide softly. `max_rate_kpps` also caps and defaults `rate_kpps` on
 the fader/REST/MIDI - turning it down lowers the scan-rate fader's usable
 range too.
 
@@ -447,7 +482,7 @@ applied, matching the original BeamCommander's MIDI mapper:
 **Continuous (`cc`, mapped into each action's own natural range via the
 curve fields above):**
 `r`, `g`, `b`, `intensity`, `shape_scale`, `rotation_speed`, `pos_x`, `pos_y`,
-`dot_amount`, `flicker_hz`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
+`dot_amount`, `flicker_hz`, `flicker_on_ms`, `flicker_phase_degrees`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
 `rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `move_size`, `move_speed`, `rate_kpps`,
 `flash_release_ms` (0-2000ms; ported from the original BeamCommander's
 `flashReleaseMs` knob - the shipped binding uses `relative: true` since the

@@ -5,14 +5,22 @@ html, body {
   background: #000;
 }
 
+/* dvh = the *visible* height. On iPad Safari 100vh is the height with the
+   browser bars hidden, so with the page itself locked (overflow: hidden
+   above) the bottom of every panel ended up behind the toolbar and could
+   never be scrolled into view. */
 #app {
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
 }
 
-/* Touch control surface, not a document: no text selection, no iOS copy/paste
-   or long-press callout, no grey tap flash and no double-tap zoom when pads
-   are hit repeatedly. Text fields stay editable/selectable. */
+/* Touch control surface, not a document: no text selection, no iOS
+   copy/paste or long-press callout, no grey tap flash and no double-tap zoom
+   when buttons are hit repeatedly - on every page. None of this blocks
+   scrolling (`manipulation` still allows panning); the only scroll rule that
+   is specific to the Magic Touch menu is its two-finger scrolling
+   (MagicTouchBuilder.vue). Text fields stay editable/selectable. */
 html, body {
   -webkit-user-select: none;
   user-select: none;
@@ -20,7 +28,8 @@ html, body {
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
 }
-input, textarea, select, [contenteditable="true"] {
+input:not([type="range"], [type="checkbox"], [type="radio"], [type="color"], [type="button"], [type="submit"]),
+textarea, select, [contenteditable="true"] {
   -webkit-user-select: text;
   user-select: text;
   -webkit-touch-callout: default;

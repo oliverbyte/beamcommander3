@@ -24,6 +24,9 @@ if [[ ! -f "$LIBERA_LIB" ]]; then
     (cd "$LIBERA_DIR" && cmake --build --preset release)
 fi
 
+# Unit tests are not part of the build - they run before every push
+# (.githooks/pre-push) or manually via tests/run_tests.sh.
+
 clang++ -std=c++17 -O2 \
   -I"$(dirname "$0")" \
   -I"${LIBERA_DIR}/include" \

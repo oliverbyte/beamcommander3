@@ -34,3 +34,20 @@ target_link_libraries(laser_daemon PRIVATE libera-core)
 if (WIN32)
   target_link_libraries(laser_daemon PRIVATE ws2_32)
 endif()
+
+# Backend unit tests (tests/test_*.cpp): the safety-critical hardware
+# output pipeline (safety masks, mask outlines, blackout/arm gate, zone -
+# see output_pipeline.h), show parameter smoothing (param_smoothing.h) and
+# show effects like flicker (show_fx.h). Not part of the normal build - they
+# run before every push (.githooks/pre-push). To build and run them with
+# CMake/CTest:  -DBEAMCOMMANDER_TESTS=ON, then  ctest --test-dir build
+option(BEAMCOMMANDER_TESTS "Build the backend unit tests" OFF)
+if (BEAMCOMMANDER_TESTS)
+  enable_testing()
+  foreach(test_name output_pipeline param_smoothing show_fx)
+    add_executable(${test_name}_tests tests/test_${test_name}.cpp)
+    target_include_directories(${test_name}_tests PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}" "${LIBERA_DIR}/include")
+    add_test(NAME ${test_name}_tests COMMAND ${test_name}_tests)
+  endforeach()
+endif()

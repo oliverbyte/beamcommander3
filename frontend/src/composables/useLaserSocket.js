@@ -36,9 +36,12 @@ export const laserState = reactive({
   blackout:        true,
   dot_amount:      1.0,
   flicker_hz:      0.0,
+  flicker_on_ms:   0,   // lit time per flicker period, 0 = auto (half the period)
+  flicker_phase_degrees: 0, // flicker delay per laser in list order (360 = one period)
   // Scan
   rate_kpps:       30,
   max_rate_kpps:   30,
+  output_latency_ms: 40, // how far ahead frames are queued for the DACs (global, not in cues)
   // Footswitch-style master output gate (see /brightness/gate/<0|1> in
   // laser_daemon.cpp): defaults OPEN (true) - only `blackout` above is the
   // active safety default. Hardware output stays forced dark only if this
@@ -55,7 +58,7 @@ export const cues = reactive({})
 
 // Configured lasers (physical DACs) — see GET/POST/DELETE /api/lasers in
 // laser_daemon.cpp. Each entry: {id, name, ip, armed, zone_x, zone_y,
-// zone_scale_x, zone_scale_y, connected}. `armed` is the master enable -
+// zone_scale_x, zone_scale_y, masks, connected}. `armed` is the master enable -
 // false means configured but idle (never connected to), true means
 // laser_thread() connects and streams Zone 1's output to it. Any number of
 // lasers can be armed at once, all receiving the same show output in
@@ -220,6 +223,19 @@ export async function updateLaser(id, partial) {
   await fetchLasers()
 }
 
+// Replaces a laser's complete safety mask list - see POST
+// /api/lasers/<id>/masks and LaserMask in backend/output_pipeline.h. Each
+// mask: {x0, y0, x1, y1} in that laser's output space (-1..1, y up),
+// reduce (0..100 % of light removed inside), outline (draw the border in red
+// on the real laser; runtime-only, never persisted by the backend).
+// `keepalive` lets the request finish even while the page/popup is being
+// closed (used to switch red setup outlines off on close).
+export async function updateLaserMasks(id, masks, { keepalive = false } = {}) {
+  markLaserLocalChange()
+  await api(`/lasers/${id}/masks`, { method: 'POST', body: JSON.stringify({ masks }), keepalive })
+  if (!keepalive) await fetchLasers()
+}
+
 export async function deleteLaser(id) {
   await api(`/lasers/${id}`, { method: 'DELETE' })
   await fetchLasers()
@@ -265,6 +281,15 @@ export async function setBrightnessGate(open) {
   applyStateIfCurrent(seq, await (await fetch(`/brightness/gate/${open ? 1 : 0}`, { method: 'POST' })).json())
 }
 
+// Snaps the rotation angle back to 0 and stops spinning (rotation_speed 0) -
+// same as the MIDI "rotation_reset" action, see POST /rotation/reset.
+export async function rotationReset() {
+  markLocalChange()
+  laserState.rotation_speed = 0
+  const seq = nextStateSeq()
+  applyStateIfCurrent(seq, await (await fetch('/rotation/reset', { method: 'POST' })).json())
+}
+
 // ── Cue save/recall ─────────────────────────────────────────────────────────────
 
 function applyCues(data) {
@@ -291,7 +316,7 @@ const CUE_STATE_FIELDS = [
   'shape', 'radius', 'points', 'rate_kpps', 'r', 'g', 'b', 'shape_scale',
   'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed',
   'move_size', 'move_phase_degrees', 'wave_frequency', 'wave_amplitude', 'wave_speed',
-  'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees', 'dot_amount', 'flicker_hz',
+  'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees', 'dot_amount', 'flicker_hz', 'flicker_on_ms', 'flicker_phase_degrees',
 ]
 
 // True when cue slot n is populated and every saved field equals the live state.
@@ -308,23 +333,28 @@ export function isCueCurrent(n) {
   })
 }
 
-// Momentary cue: active only while held. Pressing remembers the current show state and
-// recalls cue n; releasing puts the remembered state back (global settings like master
-// brightness, blackout and release time aren't touched by a recall anyway).
-let momentaryCue = null // { restore: {...}, recall: Promise }
+// Momentary cue: active only while held. Handled by the daemon (POST
+// /api/cue/<n>/momentary/<1|0>, same as the MIDI "cue_momentary" action):
+// press remembers the current look *and rotation angle* and recalls cue n,
+// release puts both back (global settings like master brightness, blackout
+// and release time aren't touched).
+let momentaryCue = null // { n, recall: Promise }
 export function momentaryCuePress(n) {
   if (momentaryCue) return momentaryCue.recall
-  const restore = Object.fromEntries(CUE_STATE_FIELDS.map((field) => [field, laserState[field]]))
-  const recall = recallCue(n)
-  momentaryCue = { restore, recall: recall.catch(() => {}) }
+  markLocalChange()
+  const seq = nextStateSeq()
+  const recall = api(`/cue/${n}/momentary/1`, { method: 'POST' }).then((s) => applyStateIfCurrent(seq, s))
+  momentaryCue = { n, recall: recall.catch(() => {}) }
   return recall
 }
 export async function momentaryCueRelease() {
   const held = momentaryCue
   if (!held) return
   momentaryCue = null
-  await held.recall // restore only after the recall went through, never before it
-  await updateState(held.restore)
+  await held.recall // release only after the press went through, never before it
+  markLocalChange()
+  const seq = nextStateSeq()
+  applyStateIfCurrent(seq, await api(`/cue/${held.n}/momentary/0`, { method: 'POST' }))
 }
 
 export async function clearCue(n) {

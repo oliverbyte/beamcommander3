@@ -5,6 +5,11 @@
 ```
 backend/
   laser_daemon.cpp   Single C++ backend: libera-laser output + HTTP + WebSocket
+  output_pipeline.h  Hardware output safety pipeline: blackout/arm gate, zone, safety masks
+  param_smoothing.h  Soft transitions of show parameters (scale, speeds, move size, ...)
+  show_fx.h          Flicker rate + on time
+  json_lite.h        Tiny JSON field readers shared by the daemon and the tests
+  tests/             Backend unit tests, run before every push (.githooks/pre-push)
   httplib.h          Vendored header-only HTTP/WebSocket server (yhirose/cpp-httplib)
   build.sh           Compiles laser_daemon (and legacy circle_daemon)
 frontend/
@@ -15,8 +20,11 @@ frontend/
   src/components/LaserScene.vue     Three.js 3D preview, renders WS point stream
   src/components/TouchDock.vue      Bottom dock: opens panels, per-tab preview toggle
   src/components/FloatingPanel.vue  Shared draggable/resizable/maximizable panel wrapper
+  src/components/maskGeometry.js    Safety mask editing geometry (+ maskGeometry.test.js)
+  src/components/showFx.js          Preview flicker, same formula as backend/show_fx.h (+ showFx.test.js)
   src/composables/useLaserSocket.js REST + WebSocket client, shared reactive state
 start.sh             Builds backend if needed, runs both processes, cleans up on Ctrl-C
+.githooks/pre-push   Runs all unit tests before every push (git config core.hooksPath .githooks)
 ```
 
 There is no Python anywhere in this project. `backend/laser_daemon` is the
@@ -366,6 +374,68 @@ resolution as visible stepping), while big jumps (>0.25 normalized) get a
 boosted alpha so large moves still feel responsive. `make_frame()` reads
 the smoothed globals directly, not the raw target fields.
 
+### Soft parameter transitions
+
+Everything that changes a show parameter (REST, MIDI, Magic Touch, reset)
+only sets the *target* in `G` and glides. **Cue recall and momentary cues
+are the exception**: they bump `G_show_snap_seq`, and `laser_thread()` then
+jumps every glide (`snap_all`, plus `G_pos_*_smooth` and the wave knobs)
+straight to the new look in the same tick - switching cues must be instant.
+Global settings survive look changes via `with_global_settings()`.
+
+The other part of a cue switch's delay is libera's frame queue: frames are
+stamped `now + targetLatency` and that much is kept queued. libera's
+default is 100 ms; `output_latency_ms` (global setting, default 40 ms,
+10-200) is applied via `LaserController::setTargetLatency()` whenever it
+changes.
+
+`laser_thread()` owns a
+`ShowParamSmoother` (`param_smoothing.h`) that glides the rendered values
+towards those targets every tick and writes them into the snapshot passed
+to `make_frame()` (`smooth.apply(snap)`), so `GET /api/state` and the UI
+still show the target immediately.
+
+- Exponential glide (`glide_toward`), frame-rate independent and the same
+  duration for any jump size; snaps exactly onto the target at the end
+  (the renderer checks `rainbow_amount > 0` / `dot_amount < 1`).
+- `radius`, `shape_scale`, `dot_amount`, `move_size`, `rainbow_amount`,
+  per-laser `move_phase_degrees`/`rainbow_phase_degrees`: tau 0.15 s
+  (~0.45 s to 95 %).
+- `move_speed`, `rotation_speed`, `rainbow_speed`: tau 0.25 s, and the phase
+  accumulators integrate the *smoothed* speeds, so the motion accelerates/
+  decelerates instead of changing rate abruptly.
+- Changing `move_mode` crossfades the old and new movement offset over
+  0.45 s (smoothstep) via the render-only `move_mode_from`/`move_blend`
+  fields in `LaserState`.
+- Motion hold and rotation reset bump `G_speed_snap_seq`, which makes the
+  smoother take the new speeds instantly - a freeze stays a freeze.
+- Not smoothed on purpose: color, intensity, flash, blackout, shape/point
+  count, flicker, scan rate. `pos_x`/`pos_y` and the wave knobs keep their
+  own adaptive glide (`smooth_toward`, below).
+
+### Flicker (rate + on time, exact per point)
+
+`flicker_hz` (rate) and `flicker_on_ms` (lit time per flash, 0 = auto =
+half the period) are *not* applied in `make_frame()`. Deciding on/off once
+per frame made the laser (frames looped by the DAC, replaced every >= 20 ms)
+and the preview (one frame per 33 ms) quantise the rhythm differently, so
+they visibly drifted apart. Instead (`show_fx.h`):
+
+- Laser: in the hardware-send step each frame is padded by repeating the
+  closed shape to >= 30 ms (`pad_frame_to_duration`, max 3000 points) so the
+  DAC plays it once instead of looping it, and every point is blanked by its
+  playback time on a continuous per-DAC clock (`FlickerTimeline`, anchored
+  to `G_time`, re-anchored after > 250 ms drift) via `flicker_is_lit()`.
+- Preview: WS messages carry the unflickered frames plus `t` (`G_time`) and
+  `fl` (`[flicker_hz, flicker_on_ms]`); `LaserScene.vue` applies the same
+  formula (`showFx.js`) per simulated point, on the daemon's clock
+  (`createClockSync`), so both blink in the same rhythm.
+- Flicker phase (`flicker_phase_degrees`): laser *i* (Lasers-list order)
+  runs its flicker `i * deg/360` of a period later
+  (`flicker_phase_offset`) - added to its hardware timeline and sent to the
+  preview per laser as `flo` (`{id: seconds}`).
+- Mask outlines are appended after flicker, so they stay steady.
+
 ### Zoning (per-laser pan/zoom calibration)
 
 `zone_x`/`zone_y`/`zone_scale_x`/`zone_scale_y` on each `LaserConfig` (see
@@ -379,12 +449,11 @@ exact same content. Set only by dragging the box in `ZoningPanel.vue` (no
 numeric fader by design), which lets the operator pick which laser to
 calibrate from a dropdown, backed by `POST /api/lasers/<id>`.
 
-- **Hardware-only, exactly like `blackout`/the footswitch gate.** It's
-  applied in `laser_thread()`'s hardware-send step, per laser, to a
-  separate copy of the frame built *after* `make_frame()` already produced
-  the frame broadcast to the WS preview — so the preview always shows the
-  true, un-zoned show regardless of how any physical output is currently
-  mapped.
+- **Applied after `make_frame()`, per laser,** in
+  `finalize_hardware_frame()` (`output_pipeline.h`), together with
+  blackout, the footswitch gate, mirror and masks. The WS preview goes
+  through the exact same call for every laser (without blackout), so it
+  shows what the laser really outputs - see "Preview = real output" below.
 - **Independent per-axis scale**, not a single uniform zoom, so the zone
   can be stretched/squeezed on just one axis to match a non-square venue
   region.
@@ -396,6 +465,57 @@ calibrate from a dropdown, backed by `POST /api/lasers/<id>`.
   `cues.json`) — see "Lasers (multi-DAC output)" below.
 - Excluded from cue state and `/api/reset` for the same reason as
   `blackout`/`flash_release_ms` — see "Cue system" below.
+
+### Preview = real output
+
+Every WS preview message carries one frame per configured laser
+(`laser_pts`), each run through the same `finalize_hardware_frame()` as
+that laser's DAC copy: master brightness gate/flash fade, mirror X/Y, zone,
+safety masks and mask outlines all show in the preview exactly as on the
+laser. The one deliberate exception is **blackout**: the preview is built
+with `blackout = false`, so the look stays visible (and can be prepared)
+while the real output is blacked out. "Armed" is the configured state there, so an armed but not
+yet connected laser previews what it will show; disarmed beams are hidden
+by `LaserScene.vue`. Without any configured laser, the main `pts` frame
+(virtual preview laser) still gets the gate. `LaserScene.vue`
+therefore must not mirror or dim frames itself.
+
+### Safety masks (per laser)
+
+Like the beam masks in Pangolin Beyond/Liberation: each `LaserConfig` has
+a `masks` list of `LaserMask` rectangles (`output_pipeline.h`), edited in the
+Zoning panel's **Masks** mode and set via `POST /api/lasers/<id>/masks`
+(always the complete list).
+
+- **Output space, after the zone.** Mask coordinates are the laser's
+  physical -1..1 range, applied after mirror + zone pan/zoom, so a mask stays
+  on the same spot in the room however the content or zone moves. The
+  ZoningPanel stage is that same range (the green zone box and red masks
+  share it).
+- **Reduction.** Light inside is multiplied by `1 - reduce/100`; overlapping
+  masks use the strongest reduction. Borders count as inside.
+- **Exact cuts.** `apply_masks()` splits every lit segment where it crosses
+  a mask border (emitting the crossing point twice, before/after
+  brightness), so sparse shapes (a 4-corner square, a low-point line) can't
+  draw straight through a mask between two points outside it. Splits are
+  capped at `kMaskFrameMaxPoints` (3800); past that, per-point dimming
+  still applies.
+- **Red setup outline.** `outline` makes `append_mask_outlines()` add the
+  border in red (fixed `kOutlineRed`, independent of intensity/footswitch)
+  after the masked show, with blanked, interpolated travel and corner
+  dwell. Only drawn when the laser is armed and not blacked out. Runtime-
+  only: never written to `lasers.json`, and the panel switches it off on
+  unmount/`pagehide` (with `keepalive` fetches). Edge density shrinks to stay
+  under 4000 points per frame (Ether Dream buffer: 4095); if even that
+  doesn't fit, no outline is drawn.
+- **Order** (`finalize_hardware_frame()`): blackout/not armed → dark; else
+  footswitch fade → mirror + zone (off-range blanked) → masks → outlines.
+  `laser_thread()` builds `HardwareOutputParams` via `hardware_params()`
+  and calls it for each DAC copy *and* each laser's preview frame.
+- **Validation.** `parse_masks()` refuses the whole list on malformed JSON or
+  non-finite numbers (`std::stof` accepts `nan`, which would silently
+  disable a mask), clamps to -1..1 / 0..100, orders corners and caps at 64.
+  A `lasers.json` entry with unreadable masks logs a loud warning.
 
 ### Lasers (multi-DAC output)
 
@@ -436,6 +556,16 @@ one therefore adds no meaningful per-controller latency, and one slow/
 unreachable DAC can never delay or lag another's output.
 
 ### Cue system
+
+A cue also stores the rotation *angle* at save time (`rotation_phase`, read
+from `G_rotation_phase`). Recall doesn't write the angle directly: it calls
+`request_rotation_angle()` under `G_mtx`, and `laser_thread()` applies the
+angle and snaps the smoothed rotation speed (`ShowParamSmoother::snap_rotation`)
+in the same tick - so a recalled look starts exactly at its saved angle
+instead of being turned further by the previous look's still-gliding
+rotation. Rotation reset uses the same path with angle 0. Momentary cues
+(`do_cue_momentary_press/release`, MIDI and `POST /api/cue/<n>/momentary/<1|0>`)
+remember and restore the angle too.
 
 Cues are snapshots of `LaserState` in `std::map<int, LaserState> G_cues`,
 guarded by its own `G_cues_mtx` and persisted to `backend/cues.json`. A
@@ -538,6 +668,45 @@ done
 wait
 curl -s --max-time 3 http://localhost:8000/api/state && echo OK || echo HUNG
 ```
+
+## Tests (run before every push)
+
+Every `backend/tests/test_*.cpp` is a self-contained test program (no
+framework, header-only - needs only libera's include dir):
+
+- `test_output_pipeline.cpp` - the hardware output safety pipeline
+  (`output_pipeline.h`: safety masks, outlines, blackout/arm gate, mirror,
+  zone transform, mask JSON), including a randomized test that checks over
+  20,000 random frames/mask sets that no lit segment lands inside a mask.
+- `test_param_smoothing.cpp` - soft parameter transitions
+  (`param_smoothing.h`).
+- `test_show_fx.cpp` - flicker rate + on time and the per-point flicker
+  timeline (`show_fx.h`).
+
+Tests are **not** part of the build (`build.sh`, `npm run build`,
+CMake) - they run before every `git push` via the versioned hook
+`.githooks/pre-push`, which aborts the push if any test fails. Activate it
+once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+- Backend: `backend/tests/run_tests.sh` compiles and runs every
+  `tests/test_*.cpp` with `-Wall -Wextra -Werror` and
+  UndefinedBehaviorSanitizer (`TEST_SANITIZERS=address,undefined` adds
+  ASan - not the default, ASan hangs even on an empty program with some
+  macOS/toolchain combinations; `CXX` picks the compiler).
+- Frontend: `npm test` (`node --test`, no extra dependencies) runs
+  `maskGeometry.test.js` and `showFx.test.js` (the preview's flicker must
+  match `show_fx.h`).
+- CMake (Windows): `-DBEAMCOMMANDER_TESTS=ON` builds the test programs,
+  `ctest --test-dir build` runs them. Add new test files to the `foreach`
+  list in `CMakeLists.txt`.
+- Run everything manually: `.githooks/pre-push`.
+
+The release workflow (`.github/workflows/release.yml`) does not run the
+tests; `git push --no-verify` skips the hook.
 
 ## After every major change
 

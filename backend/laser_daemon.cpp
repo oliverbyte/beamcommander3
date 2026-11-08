@@ -9,6 +9,10 @@
 #include "libera/etherdream/EtherDreamControllerInfo.hpp"
 #define CPPHTTPLIB_WEBSOCKET_SUPPORT
 #include "httplib.h"
+#include "json_lite.h"
+#include "output_pipeline.h" // LaserMask + hardware output safety pipeline (unit-tested, see backend/tests/)
+#include "param_smoothing.h" // soft transitions of show parameters (unit-tested, see backend/tests/)
+#include "show_fx.h"         // flicker rate + on time (unit-tested, see backend/tests/)
 
 #include <atomic>
 #include <algorithm>
@@ -138,6 +142,13 @@ struct LaserState {
     // scan-rate fader/REST/MIDI input is clamped to this value everywhere
     // it's applied, so turning it down here also lowers the fader's max.
     float max_rate_kpps   = 30.0f;
+    // How far ahead frames are queued for the DACs (libera's target latency,
+    // ms): every change - cue switch, fader, flash - reaches the laser this
+    // much later. libera's own default is 100 ms; lower = snappier, but too
+    // low can underrun a DAC on a slow/jittery network (brief blank gaps).
+    // Global daemon setting like max_rate_kpps: not part of cues, kept
+    // across cue recall and /api/reset.
+    float output_latency_ms = 40.0f;
 
     // Shape
     std::string shape     = "circle";
@@ -189,6 +200,11 @@ struct LaserState {
     float move_speed      = 0.30f;    // cycles/sec
     float move_size       = 0.50f;    // 0..6
     float move_phase_degrees = 0.0f;  // additional phase per configured laser, degrees
+    // Render-only (never set by clients, not part of cues/API): crossfade
+    // from the previous movement pattern, filled in by ShowParamSmoother
+    // (param_smoothing.h) on the snapshot passed to make_frame().
+    std::string move_mode_from = "none";
+    float move_blend      = 1.0f;     // 0 = previous pattern, 1 = move_mode
 
     // Wave shape params
     float wave_frequency  = 1.0f;     // cycles across width
@@ -213,13 +229,29 @@ struct LaserState {
     // than the beam silently firing at startup).
     bool  blackout        = true;
     float dot_amount      = 1.0f;     // 0..1 fraction of points shown
-    float flicker_hz      = 0.0f;     // strobe frequency
+    float flicker_hz      = 0.0f;     // strobe frequency (flicker rate)
+    float flicker_on_ms   = 0.0f;     // lit time per flicker period in ms, 0 = auto (half the period)
+    float flicker_phase_degrees = 0.0f; // flicker delay per configured laser, degrees (360 = one period)
 
     // Preview-only
     int   persistence_ms  = 25;
 };
 
 static LaserState        G;
+
+// `next` (a cue, a momentary snapshot, the defaults) with the *global* daemon
+// settings taken over from `current`: footswitch fade time, scan-rate
+// ceiling, output latency, blackout and - for cue recall - master brightness.
+// None of these are part of a look, so switching looks never changes them.
+static LaserState with_global_settings(LaserState next, const LaserState& current, bool keepIntensity) {
+    next.flash_release_ms  = current.flash_release_ms;
+    next.max_rate_kpps     = current.max_rate_kpps;
+    next.output_latency_ms = current.output_latency_ms;
+    next.blackout          = current.blackout;
+    if (keepIntensity) next.intensity = current.intensity;
+    next.rate_kpps = std::clamp(next.rate_kpps, 0.0f, next.max_rate_kpps);
+    return next;
+}
 static std::mutex        G_mtx;
 static std::atomic<bool> G_running{true};
 
@@ -240,7 +272,8 @@ static std::atomic<bool> G_running{true};
 // which case laser_thread() streams to all of them in parallel (see its
 // hardware-send step) - never blocking on the network write, so one slow/
 // unreachable DAC never lags another's output. Persisted to its own file
-// (lasers.json) and REST surface (GET/POST/DELETE /api/lasers).
+// (lasers.json) and REST surface (GET/POST/DELETE /api/lasers). Each laser
+// also has its own list of safety masks (LaserMask, output_pipeline.h).
 struct LaserConfig {
     int         id;
     std::string name;
@@ -249,7 +282,9 @@ struct LaserConfig {
     float       zone_x = 0.0f, zone_y = 0.0f;             // -1..1, offset of the whole output
     float       zone_scale_x = 1.0f, zone_scale_y = 1.0f; // 0.1..2, independent per-axis multiplier
     bool        mirror_x = false; // this laser's own horizontal flip (hardware-only, applied before its zone offset/scale) - independent of the global LaserState::mirror_x
+    bool        mirror_y = false; // same, vertical flip (e.g. a projector mounted upside down)
     float       preview_x = 0.5f, preview_y = 0.5f; // normalized position in the browser preview
+    std::vector<LaserMask> masks; // safety masks in this laser's output space (see LaserMask)
 };
 static std::vector<LaserConfig> G_lasers;
 static std::mutex               G_lasers_mtx;
@@ -284,13 +319,41 @@ static double G_time = 0.0;
 // speed only changes the rate of change from that moment on - the current
 // position/rotation/wave/hue is preserved and the animation stays smooth.
 // Never locked - only laser_thread writes and reads these (single-threaded),
-// *except* G_rotation_phase: cue recall also needs to set it (so recalling a
-// cue restores the exact rotation angle it was saved at, not just the speed/
-// direction), so it's atomic to make that cross-thread write safe.
+// *except* G_rotation_phase, which cue save reads from other threads (atomic).
+// Cue recall / rotation reset never write it directly: they call
+// request_rotation_angle(), and laser_thread applies the angle (together with
+// the new rotation speed, no glide) at its next tick - so a recalled cue
+// always starts exactly at its saved angle.
 static double             G_move_phase     = 0.0; // radians
 static std::atomic<double> G_rotation_phase{0.0}; // radians
 static double             G_wave_phase     = 0.0; // radians
 static double             G_rainbow_phase  = 0.0; // cycles, *unwrapped* (0 = rainbow just switched on) - see laser_thread()
+// Bumped by motion hold / rotation reset: laser_thread() then applies the
+// new speeds immediately instead of gliding (see ShowParamSmoother) - a
+// freeze must be a freeze, not a slow-down.
+static std::atomic<unsigned> G_speed_snap_seq{0};
+// Rotation start angle requests (cue recall, rotation reset, momentary cue
+// release) - see request_rotation_angle().
+static std::atomic<double>   G_pending_rotation_angle{0.0};
+static std::atomic<unsigned> G_rotation_set_seq{0};
+static std::atomic<unsigned> G_rotation_applied_seq{0}; // last request laser_thread applied
+// The current rotation angle - including a requested one laser_thread
+// hasn't applied yet (e.g. a cue saved right after a rotation reset).
+static double current_rotation_angle() {
+    if (G_rotation_set_seq.load() != G_rotation_applied_seq.load()) return G_pending_rotation_angle.load();
+    return G_rotation_phase.load();
+}
+// Cue recall / momentary cue: the whole new look applies at once - no glide
+// of any parameter (scale, speeds, position, wave, movement crossfade, ...),
+// see laser_thread(). Live fader/knob changes keep gliding.
+static std::atomic<unsigned> G_show_snap_seq{0};
+
+// Call while holding G_mtx right after setting G.rotation_speed, so
+// laser_thread sees the new speed and the angle in the same tick.
+static void request_rotation_angle(double radians) {
+    G_pending_rotation_angle.store(radians);
+    G_rotation_set_seq.fetch_add(1);
+}
 
 // Exponential position smoothing (ported from the original BeamCommander's
 // ofApp.cpp `smoothOne`): pos_x/pos_y are treated as a *target*, and the
@@ -325,12 +388,10 @@ static std::atomic<bool> g_flash_active{false};
 // pedal (CC64, the standard MIDI sustain-pedal number): while held/open,
 // hardware output renders normally; while released/closed (including at
 // startup, before the pedal has ever been touched), *hardware* output is
-// forced dark. This is hardware-only, exactly like `blackout` below - the
-// browser preview always renders at full s.intensity regardless of the
-// gate (see laser_thread()'s hardware-send step, which applies g_gate_level
-// only to the copy sent to the DAC), so recalling a cue or just opening the
-// UI after a restart shows the correct preview immediately, without first
-// having to touch the pedal or the brightness fader. Deliberately does NOT
+// forced dark. Applied after make_frame() in finalize_hardware_frame()
+// (output_pipeline.h) - to every laser's DAC copy *and* to the browser
+// preview, which shows the real output (blackout being the only exception).
+// Deliberately does NOT
 // touch LaserState.intensity itself - the fader/knob/UI/REST setting it is
 // LTP (last value counts) and keeps updating independently of the gate, so
 // whatever the fader was last set to (even while the gate was closed)
@@ -439,16 +500,16 @@ static void rotate_pts(std::vector<Pt>& pts, float angle) {
     for (auto& p : pts) { float nx=p.x*c-p.y*sv; p.y=p.x*sv+p.y*c; p.x=nx; }
 }
 
-static Pt calc_movement(const LaserState& s, double phase_value) {
-    if (s.move_mode == "none") return {0.0f,0.0f};
+static Pt calc_movement(const std::string& mode, float move_size, double phase_value) {
+    if (mode == "none") return {0.0f,0.0f};
     const float tau = 2.0f * std::acos(-1.0f);
     float phase = std::fmod((float)phase_value, tau);
     if (phase < 0.0f) phase += tau;
-    float amp   = s.move_size * 0.6f; // fraction of canvas
-    if (s.move_mode=="circle")  return {amp*std::cos(phase), amp*std::sin(phase)};
-    if (s.move_mode=="pan")     return {amp*std::sin(phase), 0.0f};
-    if (s.move_mode=="tilt")    return {0.0f, amp*std::sin(phase)};
-    if (s.move_mode=="tiltup") {
+    float amp   = move_size * 0.6f; // fraction of canvas
+    if (mode=="circle")  return {amp*std::cos(phase), amp*std::sin(phase)};
+    if (mode=="pan")     return {amp*std::sin(phase), 0.0f};
+    if (mode=="tilt")    return {0.0f, amp*std::sin(phase)};
+    if (mode=="tiltup") {
         // Unidirectional/continuous vertical sweep: rises linearly from the
         // bottom (-amp) to the top (+amp) as phase runs 0..tau, then wraps
         // instantly back to the bottom - i.e. it never comes back down, it
@@ -457,14 +518,14 @@ static Pt calc_movement(const LaserState& s, double phase_value) {
         // update loop below), so a plain linear map of that range is enough.
         return {0.0f, amp*(2.0f*(phase/tau) - 1.0f)};
     }
-    if (s.move_mode=="tiltdown") {
+    if (mode=="tiltdown") {
         // Mirror of tiltup: falls linearly from the top (+amp) to the
         // bottom (-amp) as phase runs 0..tau, then wraps instantly back to
         // the top - re-enters from the top once it exits the bottom.
         return {0.0f, amp*(1.0f - 2.0f*(phase/tau))};
     }
-    if (s.move_mode=="eight")   return {amp*std::sin(phase), amp*std::sin(2*phase)};
-    if (s.move_mode=="random")  return {amp*(std::sin(phase*1.3f)+std::sin(phase*2.7f))/2,
+    if (mode=="eight")   return {amp*std::sin(phase), amp*std::sin(2*phase)};
+    if (mode=="random")  return {amp*(std::sin(phase*1.3f)+std::sin(phase*2.7f))/2,
                                         amp*(std::sin(phase*1.7f)+std::sin(phase*3.1f))/2};
     return {0.0f,0.0f};
 }
@@ -512,7 +573,15 @@ static core::Frame make_frame(const LaserState& s, double movement_phase, double
     // above), not the raw target s.pos_x/s.pos_y directly, so manual moves
     // - especially MIDI, whose 7-bit knobs would otherwise visibly step -
     // glide instead of jumping.
-    Pt mv = calc_movement(s, movement_phase);
+    Pt mv = calc_movement(s.move_mode, s.move_size, movement_phase);
+    // Switching the movement pattern crossfades from the old one (blend
+    // driven by ShowParamSmoother) instead of jumping to a new position.
+    if (s.move_blend < 1.0f && s.move_mode_from != s.move_mode) {
+        const Pt from = calc_movement(s.move_mode_from, s.move_size, movement_phase);
+        const float w = std::clamp(s.move_blend, 0.0f, 1.0f);
+        mv.x = from.x + (mv.x - from.x) * w;
+        mv.y = from.y + (mv.y - from.y) * w;
+    }
     float ox = G_pos_x_smooth + mv.x;
     float oy = G_pos_y_smooth + mv.y;
 
@@ -603,17 +672,10 @@ static core::Frame make_frame(const LaserState& s, double movement_phase, double
         perDotBlankMax = std::clamp(budgetPerDot, kBlankMin, kBlankMax);
     }
 
-    // Flicker/strobe (still affects the generated frame directly, so both
-    // preview and hardware strobe together - only `blackout` is treated
-    // differently, see laser_thread()'s hardware-send step below, which
-    // blanks a *copy* of the frame for hardware only, leaving this one -
-    // used for the WS preview broadcast - showing the true colors).
-    bool frame_blank = false;
-    if (s.flicker_hz > 0.0f) {
-        double period = 1.0 / s.flicker_hz;
-        double phase  = std::fmod(G_time, period);
-        frame_blank = (phase > period * 0.5);
-    }
+    // Flicker/strobe is NOT applied here: it's a time-domain effect applied
+    // per point by its playback time - in laser_thread()'s hardware-send
+    // step (apply_flicker_timeline, show_fx.h) and per simulated point in the
+    // browser preview - so both show the exact same rate and on time.
 
     // Rainbow: anchored to the current beam color so turning rainbow_amount
     // up from 0 starts *at* that color instead of jumping to red. The hue
@@ -679,15 +741,10 @@ static core::Frame make_frame(const LaserState& s, double movement_phase, double
             hsv_to_rgb(hue, rb_sat, rb_val, fr, fg, fb);
         }
 
-        // Master brightness. The footswitch gate (g_gate_level) is
-        // deliberately *not* applied here - it's hardware-only, applied to
-        // a separate copy of the frame in laser_thread()'s hardware-send
-        // step (same treatment as `blackout`), so the WS preview always
-        // shows the true, ungated brightness. Each laser's own zone
-        // calibration (LaserConfig::zone_x/zone_y/zone_scale_x/
-        // zone_scale_y) gets the exact same hardware-only treatment, for
-        // the exact same reason - applied per-laser in laser_thread(),
-        // never here.
+        // Master brightness. The footswitch gate (g_gate_level), blackout
+        // and each laser's mirror/zone/masks are applied per laser
+        // afterwards in finalize_hardware_frame() - to the DAC output and
+        // the preview alike (the preview skips blackout) - never here.
         float px = mirror_sign * (base[i].x + ox);
         float py = base[i].y + oy;
         // Screen-edge safety: whatever we send downstream, the DAC encoder
@@ -704,7 +761,7 @@ static core::Frame make_frame(const LaserState& s, double movement_phase, double
         // axis, so the figure simply fades out before reaching the edge
         // rather than being disturbed/squashed against it.
         bool offScreen = std::fabs(px) > 1.0f || std::fabs(py) > 1.0f;
-        float bri = (frame_blank || offScreen) ? 0.0f : s.intensity;
+        float bri = offScreen ? 0.0f : s.intensity;
 
         if (dotted) {
             // Arrive blanked and hold for a distance-scaled number of
@@ -736,7 +793,9 @@ static core::Frame make_frame(const LaserState& s, double movement_phase, double
 
 // ── JSON helpers ───────────────────────────────────────────────────────────────
 static std::string frame_to_ws_json(const core::Frame& fr,
-                                    const std::vector<std::pair<int, core::Frame>>& laserFrames) {
+                                    const std::vector<std::pair<int, core::Frame>>& laserFrames,
+                                    double showTime, float flickerHz, float flickerOnMs,
+                                    const std::vector<std::pair<int, double>>& flickerOffsets) {
     std::ostringstream ss;
     ss << std::fixed << std::setprecision(4);
     auto writePoints = [&](const core::Frame& frame) {
@@ -748,7 +807,17 @@ static std::string frame_to_ws_json(const core::Frame& fr,
         }
         ss << "]";
     };
-    ss << "{\"pts\":";
+    // t = show clock (G_time) and fl = [flicker_hz, flicker_on_ms]: the
+    // preview applies flicker per simulated point itself, in step with the
+    // laser (frames here are sent unflickered - see make_frame()).
+    ss << "{\"t\":" << std::setprecision(6) << showTime << std::setprecision(4)
+       << ",\"fl\":[" << flickerHz << ',' << flickerOnMs << "]";
+    // flo = per-laser flicker time offset in seconds (flicker phase).
+    ss << ",\"flo\":{";
+    for (std::size_t i = 0; i < flickerOffsets.size(); ++i)
+        ss << (i ? "," : "") << '\"' << flickerOffsets[i].first << "\":" << std::setprecision(6) << flickerOffsets[i].second << std::setprecision(4);
+    ss << "}";
+    ss << ",\"pts\":";
     writePoints(fr);
     if (!laserFrames.empty()) {
         ss << ",\"laser_pts\":{";
@@ -772,6 +841,7 @@ static std::string state_to_json() {
        << "\"points\":"        << G.points         << ","
        << "\"rate_kpps\":"     << G.rate_kpps      << ","
        << "\"max_rate_kpps\":" << G.max_rate_kpps  << ","
+       << "\"output_latency_ms\":" << G.output_latency_ms << ","
        << "\"intensity\":"     << G.intensity      << ","
        << "\"flash_release_ms\":" << G.flash_release_ms << ","
        << "\"r\":"             << G.r              << ","
@@ -795,6 +865,8 @@ static std::string state_to_json() {
        << "\"blackout\":"      << (G.blackout?"true":"false") << ","
        << "\"dot_amount\":"    << G.dot_amount     << ","
        << "\"flicker_hz\":"    << G.flicker_hz     << ","
+       << "\"flicker_on_ms\":" << G.flicker_on_ms  << ","
+       << "\"flicker_phase_degrees\":" << G.flicker_phase_degrees << ","
        << "\"brightness_gate_open\":" << (g_brightness_gate_open.load()?"true":"false")
        << "}";
     return ss.str();
@@ -810,6 +882,24 @@ static void ws_broadcast(const std::string& msg) {
 
 // ── Signal ─────────────────────────────────────────────────────────────────────
 static void on_signal(int) { G_running = false; }
+
+// Per-laser settings for finalize_hardware_frame() - shared by the real DAC
+// output and the browser preview, so both always go through the exact same
+// processing. `outputArmed` is whether this laser may emit light at all.
+static HardwareOutputParams hardware_params(const LaserConfig* cfg, const LaserState& snap, bool outputArmed) {
+    HardwareOutputParams out;
+    out.blackout      = snap.blackout;
+    out.outputAllowed = cfg && outputArmed;
+    out.gateLevel     = g_gate_level;
+    if (cfg) {
+        out.mirrorX = cfg->mirror_x;
+        out.mirrorY = cfg->mirror_y;
+        out.zoneX = cfg->zone_x; out.zoneY = cfg->zone_y;
+        out.zoneScaleX = cfg->zone_scale_x; out.zoneScaleY = cfg->zone_scale_y;
+        out.masks = &cfg->masks;
+    }
+    return out;
+}
 
 // ── Laser output thread ────────────────────────────────────────────────────────
 // Preview (WebSocket) generation is fully decoupled from the hardware
@@ -855,8 +945,18 @@ static void laser_thread() {
         // be starved by another's.
         std::chrono::steady_clock::time_point last_hw_send        = std::chrono::steady_clock::now() - 1s;
         std::chrono::steady_clock::time_point next_connect_attempt = std::chrono::steady_clock::now();
+        // Continuous point clock for exact per-point flicker (show_fx.h).
+        FlickerTimeline flicker;
     };
     std::map<int, LaserRuntime> runtimes; // keyed by LaserConfig::id - this thread's own state, never shared
+
+    // Rendered (smoothed) show parameters - see param_smoothing.h. Owned by
+    // this thread only; G keeps the targets set by REST/MIDI/cues.
+    ShowParamSmoother<LaserState> smooth;
+    unsigned lastSpeedSnap = G_speed_snap_seq.load();
+    unsigned lastRotationSet = G_rotation_set_seq.load();
+    unsigned lastShowSnap = G_show_snap_seq.load();
+    float appliedLatencyMs = -1.0f;
 
     while (G_running) {
         // Advance animation clock
@@ -870,16 +970,50 @@ static void laser_thread() {
             std::lock_guard<std::mutex> lk(G_mtx);
             rate = G.rate_kpps;
 
+            // Glide the rendered show parameters towards their targets
+            // (snapping the speeds when motion hold/rotation reset asked
+            // for it), *before* integrating the phases below, so speed
+            // changes accelerate/decelerate smoothly too.
+            smooth.update(G, (float)dt);
+            // Cue switch: the new look appears at once - every glide (incl.
+            // position and wave knobs below) jumps straight to the target.
+            if (const unsigned showSeq = G_show_snap_seq.load(); showSeq != lastShowSnap) {
+                lastShowSnap = showSeq;
+                smooth.snap_all(G);
+                G_pos_x_smooth = G.pos_x; G_pos_y_smooth = G.pos_y;
+                G_wave_frequency_smooth = G.wave_frequency;
+                G_wave_amplitude_smooth = G.wave_amplitude;
+                G_wave_speed_smooth     = G.wave_speed;
+            }
+            // Output latency (how far ahead libera queues frames).
+            if (G.output_latency_ms != appliedLatencyMs) {
+                appliedLatencyMs = G.output_latency_ms;
+                core::LaserController::setTargetLatency(std::chrono::milliseconds(
+                    (long long)std::lround(std::clamp(appliedLatencyMs, 10.0f, 200.0f))));
+            }
+            if (const unsigned snapSeq = G_speed_snap_seq.load(); snapSeq != lastSpeedSnap) {
+                lastSpeedSnap = snapSeq;
+                smooth.snap_speeds(G);
+            }
+            // Cue recall / rotation reset: jump to the requested start angle
+            // and take the new rotation speed as is (no leftover spin).
+            if (const unsigned rotSeq = G_rotation_set_seq.load(); rotSeq != lastRotationSet) {
+                lastRotationSet = rotSeq;
+                G_rotation_phase.store(G_pending_rotation_angle.load());
+                smooth.snap_rotation(G);
+                G_rotation_applied_seq.store(rotSeq);
+            }
+
             // Integrate each animated parameter's phase by its *current*
             // speed - see the G_move_phase/etc. comment above for why this
             // (rather than speed*G_time) is what keeps things smooth across
             // a speed change instead of jumping/resetting.
             const double tau = 2.0 * std::acos(-1.0);
-            G_move_phase     = std::fmod(G_move_phase     + G.move_speed     * dt * tau, tau);
+            G_move_phase     = std::fmod(G_move_phase     + smooth.move_speed * dt * tau, tau);
             // Negated here (not at every rotation_speed setter) so the
             // reversed direction applies no matter which API set the speed
             // (REST bulk update, /laser/rotation/speed/<v>, or MIDI).
-            G_rotation_phase = std::fmod(G_rotation_phase - G.rotation_speed * dt * tau, tau);
+            G_rotation_phase = std::fmod(G_rotation_phase - smooth.rotation_speed * dt * tau, tau);
             // Uses the *smoothed* wave speed (updated below) rather than
             // G.wave_speed directly, so a MIDI knob jump changes the wave's
             // animation rate gradually instead of snapping to a new speed
@@ -889,8 +1023,8 @@ static void laser_thread() {
             // always starts at the current beam color (see make_frame()).
             // Deliberately not wrapped: the per-laser rainbow delay below
             // needs to know how far the hue has travelled since switch-on.
-            G_rainbow_phase  = G.rainbow_amount > 0.0f
-                ? G_rainbow_phase + G.rainbow_speed * dt : 0.0;
+            G_rainbow_phase  = smooth.rainbow_amount > 0.0f
+                ? G_rainbow_phase + smooth.rainbow_speed * dt : 0.0;
 
             // Slew the rendered position toward the latest pos_x/pos_y
             // target (see smooth_toward's comment above).
@@ -1045,6 +1179,7 @@ static void laser_thread() {
         }
 
         LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap = G; }
+        smooth.apply(snap); // render the glided values, not the raw targets
         auto frame = make_frame(snap, G_move_phase, G_rainbow_phase);
         std::vector<std::pair<int, core::Frame>> laserFrames;
         // Per-laser offsets: laser i (Lasers-list order, laser 1 = 0) gets
@@ -1081,7 +1216,38 @@ static void laser_thread() {
 
         if (previewDue) {
             last_preview = now_tp;
-            ws_broadcast(frame_to_ws_json(frame, laserFrames));
+            // The preview shows exactly what each laser outputs: every
+            // configured laser's frame goes through the same
+            // finalize_hardware_frame() as its DAC copy below (master
+            // brightness gate/flash, mirror, zone, safety masks, mask
+            // outlines) - with one deliberate exception: blackout. The
+            // preview keeps showing the look while the laser is blacked out,
+            // so the operator can prepare/check it in the dark. "Armed" is
+            // the configured state, so an armed laser that isn't connected
+            // yet still previews what it will show (unarmed lasers are
+            // hidden in the 3D preview anyway). Without any configured laser
+            // the single virtual preview laser still honours the gate.
+            std::vector<std::pair<int, core::Frame>> previewFrames;
+            std::vector<std::pair<int, double>> flickerOffsets;
+            previewFrames.reserve(lasers_snapshot.size());
+            for (std::size_t li = 0; li < lasers_snapshot.size(); ++li) {
+                const auto& l = lasers_snapshot[li];
+                flickerOffsets.emplace_back(l.id, flicker_phase_offset(li, snap.flicker_hz, snap.flicker_phase_degrees));
+                const core::Frame* base = &frame;
+                for (const auto& [lid, lf] : laserFrames) if (lid == l.id) { base = &lf; break; }
+                core::Frame pf = *base;
+                HardwareOutputParams pp = hardware_params(&l, snap, l.armed);
+                pp.blackout = false; // preview ignores blackout (see above)
+                finalize_hardware_frame(pf.points, pp);
+                previewFrames.emplace_back(l.id, std::move(pf));
+            }
+            core::Frame mainPreview;
+            if (lasers_snapshot.empty()) {
+                mainPreview = frame;
+                HardwareOutputParams virt; virt.blackout = false; virt.outputAllowed = true; virt.gateLevel = g_gate_level;
+                finalize_hardware_frame(mainPreview.points, virt);
+            }
+            ws_broadcast(frame_to_ws_json(mainPreview, previewFrames, G_time, snap.flicker_hz, snap.flicker_on_ms, flickerOffsets));
         }
 
         if (anyHardwareReady) {
@@ -1094,8 +1260,9 @@ static void laser_thread() {
                 rt.last_hw_send = now_tp;
 
                 const LaserConfig* cfg = nullptr;
+                std::size_t laserIndex = 0; // Lasers-list order, laser 1 = 0 (flicker phase)
                 for (std::size_t i = 0; i < lasers_snapshot.size(); ++i) {
-                    if (lasers_snapshot[i].id == id) { cfg = &lasers_snapshot[i]; break; }
+                    if (lasers_snapshot[i].id == id) { cfg = &lasers_snapshot[i]; laserIndex = i; break; }
                 }
 
                 const core::Frame* phaseFrame = &frame;
@@ -1106,26 +1273,30 @@ static void laser_thread() {
                     if (it != laserFrames.end()) phaseFrame = &it->second;
                 }
                 core::Frame toSend = *phaseFrame;
-                // Only an armed laser may emit light - checked here too, independent of the
-                // connection handling above and of libera's own blanking.
-                const bool outputAllowed = cfg && cfg->armed && rt.output_armed;
-                if (snap.blackout || !outputAllowed) {
-                    for (auto& p : toSend.points) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
-                } else if (g_gate_level < 1.0f) {
-                    for (auto& p : toSend.points) {
-                        p.r *= g_gate_level; p.g *= g_gate_level; p.b *= g_gate_level;
-                    }
+                // Flicker, per point by playback time: pad the frame so the
+                // DAC plays it once instead of looping it until the next one
+                // arrives, then blank the points that fall into an "off"
+                // phase of the continuous timeline (see show_fx.h).
+                const double pointRateHz = std::max(1.0f, rt.connected_rate) * 1000.0;
+                const bool flickering = snap.flicker_hz > 0.0f;
+                if (flickering) {
+                    pad_frame_to_duration(toSend.points, pointRateHz, kFlickerMinFrameSeconds, kFlickerMaxFramePoints);
+                    // Flicker phase: this laser runs its flicker that much later.
+                    const double phaseOffset = flicker_phase_offset(laserIndex, snap.flicker_hz, snap.flicker_phase_degrees);
+                    apply_flicker_timeline(toSend.points, rt.flicker.begin(G_time) + phaseOffset, pointRateHz,
+                                           snap.flicker_hz, snap.flicker_on_ms);
+                } else {
+                    rt.flicker.reset();
                 }
-                if (cfg && (cfg->mirror_x || cfg->zone_scale_x != 1.0f || cfg->zone_scale_y != 1.0f ||
-                            cfg->zone_x != 0.0f || cfg->zone_y != 0.0f)) {
-                    for (auto& p : toSend.points) {
-                        float x  = cfg->mirror_x ? -p.x : p.x;
-                        float zx = x * cfg->zone_scale_x + cfg->zone_x;
-                        float zy = p.y * cfg->zone_scale_y + cfg->zone_y;
-                        p.x = zx; p.y = zy;
-                        if (std::fabs(zx) > 1.0f || std::fabs(zy) > 1.0f) { p.r = 0.0f; p.g = 0.0f; p.b = 0.0f; }
-                    }
-                }
+                // Blackout/arm gate, footswitch, mirror + zone, safety masks
+                // and mask outlines - all in output_pipeline.h, where the
+                // order is documented and covered by backend/tests/.
+                // Only an armed laser may emit light - checked here too,
+                // independent of the connection handling above and of
+                // libera's own blanking.
+                finalize_hardware_frame(toSend.points,
+                                        hardware_params(cfg, snap, cfg && cfg->armed && rt.output_armed));
+                if (flickering) rt.flicker.advance(toSend.points.size(), pointRateHz);
                 rt.ctrl->sendFrame(std::move(toSend));
             }
         }
@@ -1134,50 +1305,6 @@ static void laser_thread() {
     sys.shutdown();
 }
 
-
-// ── JSON parsers ───────────────────────────────────────────────────────────────
-static std::string json_str(const std::string& b, const std::string& k) {
-    auto p=b.find("\""+k+"\""); if(p==std::string::npos) return "";
-    p=b.find(':',p); if(p==std::string::npos) return "";
-    p=b.find('"',p+1); if(p==std::string::npos) return "";
-    auto e=b.find('"',p+1); if(e==std::string::npos) return "";
-    return b.substr(p+1,e-p-1);
-}
-static float json_float(const std::string& b,const std::string& k,float d) {
-    auto p=b.find("\""+k+"\""); if(p==std::string::npos) return d;
-    p=b.find(':',p); if(p==std::string::npos) return d;
-    ++p; while(p<b.size()&&b[p]==' ')++p;
-    try{return std::stof(b.substr(p));}catch(...){return d;}
-}
-static bool json_bool(const std::string& b,const std::string& k,bool d) {
-    auto p=b.find("\""+k+"\""); if(p==std::string::npos) return d;
-    p=b.find(':',p); if(p==std::string::npos) return d;
-    ++p; while(p<b.size()&&b[p]==' ')++p;
-    if(p<b.size()&&b.substr(p,4)=="true") return true;
-    if(p<b.size()&&b.substr(p,5)=="false") return false;
-    return d;
-}
-static int json_int(const std::string& b,const std::string& k,int d){ return (int)json_float(b,k,(float)d); }
-static bool json_int_array(const std::string& body,const std::string& key,std::vector<int>& values) {
-    auto keyPos = body.find("\"" + key + "\"");
-    if (keyPos == std::string::npos) return false;
-    auto begin = body.find('[', keyPos);
-    auto end = begin == std::string::npos ? std::string::npos : body.find(']', begin);
-    if (begin == std::string::npos || end == std::string::npos) return false;
-    std::stringstream items(body.substr(begin + 1, end - begin - 1));
-    values.clear();
-    while (true) {
-        items >> std::ws;
-        if (items.eof()) return true;
-        int value;
-        if (!(items >> value)) return false;
-        values.push_back(value);
-        items >> std::ws;
-        if (items.eof()) return true;
-        char comma;
-        if (!(items >> comma) || comma != ',') return false;
-    }
-}
 
 // ── Laser (DAC) list persistence ────────────────────────────────────────────
 // See struct LaserConfig's comment (near G_lasers) for the data model. Same
@@ -1197,8 +1324,10 @@ static std::string laser_config_to_json(const LaserConfig& l) {
        << ",\"zone_scale_x\":" << l.zone_scale_x
        << ",\"zone_scale_y\":" << l.zone_scale_y
        << ",\"mirror_x\":" << (l.mirror_x ? "true" : "false")
+       << ",\"mirror_y\":" << (l.mirror_y ? "true" : "false")
          << ",\"preview_x\":" << l.preview_x
          << ",\"preview_y\":" << l.preview_y
+       << ",\"masks\":" << masks_to_json(l.masks, true)
        << ",\"connected\":" << (get_laser_connected(l.id) ? "true" : "false")
        << "}";
     return ss.str();
@@ -1215,7 +1344,9 @@ static void save_lasers_to_disk() {
            << ",\"zone_x\":" << l.zone_x << ",\"zone_y\":" << l.zone_y
            << ",\"zone_scale_x\":" << l.zone_scale_x << ",\"zone_scale_y\":" << l.zone_scale_y
            << ",\"mirror_x\":" << (l.mirror_x ? "true" : "false")
+           << ",\"mirror_y\":" << (l.mirror_y ? "true" : "false")
            << ",\"preview_x\":" << l.preview_x << ",\"preview_y\":" << l.preview_y
+           << ",\"masks\":" << masks_to_json(l.masks, false)
            << "}";
     }
     ss << "]";
@@ -1243,6 +1374,13 @@ static void load_lasers_from_disk() {
             if (depth != 0) break;
             std::string obj = body.substr(i, j - i);
             LaserConfig l;
+            // Masks first, then cut their array out so the laser's own keys
+            // below can never be matched inside a nested mask object.
+            std::size_t mb = 0, me = 0;
+            if (parse_masks(obj, l.masks, &mb, &me)) obj.erase(mb, me - mb);
+            else if (obj.find("\"masks\"") != std::string::npos)
+                std::cerr << "[laser_daemon] WARNING: unreadable safety masks for laser entry in "
+                          << LASERS_FILE << " - masks NOT loaded, check the Zoning panel!\n";
             l.id            = json_int(obj, "id", 0);
             l.name          = json_str(obj, "name");
             l.ip            = json_str(obj, "ip");
@@ -1252,6 +1390,7 @@ static void load_lasers_from_disk() {
             l.zone_scale_x  = json_float(obj, "zone_scale_x", 1.0f);
             l.zone_scale_y  = json_float(obj, "zone_scale_y", 1.0f);
             l.mirror_x      = json_bool(obj, "mirror_x", false);
+            l.mirror_y      = json_bool(obj, "mirror_y", false);
             const bool hasPreviewPosition = obj.find("\"preview_x\"") != std::string::npos
                 && obj.find("\"preview_y\"") != std::string::npos;
             l.preview_x     = json_float(obj, "preview_x", -1.0f);
@@ -1320,7 +1459,9 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"rainbow_speed\":" << s.rainbow_speed << ","
        << "\"rainbow_phase_degrees\":" << s.rainbow_phase_degrees << ","
        << "\"dot_amount\":"    << s.dot_amount    << ","
-       << "\"flicker_hz\":"    << s.flicker_hz
+       << "\"flicker_hz\":"    << s.flicker_hz    << ","
+       << "\"flicker_on_ms\":" << s.flicker_on_ms << ","
+       << "\"flicker_phase_degrees\":" << s.flicker_phase_degrees
        << "}";
     return ss.str();
 }
@@ -1352,6 +1493,10 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.rainbow_phase_degrees = json_float(obj,"rainbow_phase_degrees",s.rainbow_phase_degrees);
     s.dot_amount      = json_float(obj,"dot_amount",s.dot_amount);
     s.flicker_hz      = json_float(obj,"flicker_hz",s.flicker_hz);
+    // Cues saved before the on time existed have no such key: keep the
+    // default 0 (= auto, half the period), i.e. exactly how they looked.
+    s.flicker_on_ms   = std::clamp(json_float(obj,"flicker_on_ms",0.0f),0.0f,kFlickerOnMsMax);
+    s.flicker_phase_degrees = std::clamp(json_float(obj,"flicker_phase_degrees",0.0f),0.0f,360.0f);
     return s;
 }
 
@@ -1413,7 +1558,7 @@ static void do_cue_save(int n) {
     // Rotation angle lives outside LaserState (see G_rotation_phase's
     // comment) - stash the live value into the snapshot's transport field
     // so recalling this cue restores the exact angle, not just the speed.
-    snap.rotation_phase = G_rotation_phase.load();
+    snap.rotation_phase = current_rotation_angle();
     { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[n] = snap; }
     save_cues_to_disk();
 }
@@ -1426,23 +1571,15 @@ static bool do_cue_recall(int n) {
     if (!found) return false;
     {
         std::lock_guard<std::mutex> lk(G_mtx);
-        // flash_release_ms, intensity (master brightness), max_rate_kpps
-        // and blackout are global daemon settings, not part of the
-        // per-cue show state - preserve whatever they're currently set to
-        // across the recall.
-        float flash_release_ms = G.flash_release_ms;
-        float intensity = G.intensity;
-        float max_rate_kpps = G.max_rate_kpps;
-        bool blackout = G.blackout;
-        G = snap;
-        G.flash_release_ms = flash_release_ms;
-        G.intensity = intensity;
-        G.max_rate_kpps = max_rate_kpps;
-        G.rate_kpps = std::clamp(G.rate_kpps, 0.0f, G.max_rate_kpps);
-        G.blackout = blackout;
+        // Global daemon settings aren't part of the per-cue show state -
+        // keep whatever they're currently set to across the recall.
+        G = with_global_settings(snap, G, /*keepIntensity=*/true);
+        G_show_snap_seq.fetch_add(1); // switch instantly, no morphing
+        // Start at the rotation angle the cue was saved at (see do_cue_save),
+        // with the cue's own rotation speed - not turned further by the
+        // previous look's rotation.
+        request_rotation_angle(snap.rotation_phase);
     }
-    // Restore the rotation angle the cue was saved at (see do_cue_save).
-    G_rotation_phase.store(snap.rotation_phase);
     return true;
 }
 static void do_cue_clear(int n) {
@@ -1628,6 +1765,8 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     if (action=="pos_y")          { std::lock_guard<std::mutex> lk(G_mtx); G.pos_y=std::clamp(out,-1.0f,1.0f); return; }
     if (action=="dot_amount")     { std::lock_guard<std::mutex> lk(G_mtx); G.dot_amount=std::clamp(out,0.0f,1.0f); return; }
     if (action=="flicker_hz")     { std::lock_guard<std::mutex> lk(G_mtx); G.flicker_hz=std::max(0.0f,out); return; }
+    if (action=="flicker_on_ms")  { std::lock_guard<std::mutex> lk(G_mtx); G.flicker_on_ms=std::clamp(out,0.0f,kFlickerOnMsMax); return; }
+    if (action=="flicker_phase_degrees") { std::lock_guard<std::mutex> lk(G_mtx); G.flicker_phase_degrees=std::clamp(out,0.0f,360.0f); return; }
     if (action=="wave_frequency") { std::lock_guard<std::mutex> lk(G_mtx); G.wave_frequency=std::max(0.1f,out); return; }
     if (action=="wave_amplitude") { std::lock_guard<std::mutex> lk(G_mtx); G.wave_amplitude=std::clamp(out,0.0f,1.0f); return; }
     if (action=="wave_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.wave_speed=out; return; }
@@ -1644,7 +1783,36 @@ static void midi_apply_cc_action(const std::string& action, float out) {
 // flash button - both need to remember what to restore on release.
 static bool      g_midi_cue_save_armed = false;
 static LaserState g_cue_momentary_snapshot;
+static double     g_cue_momentary_angle = 0.0;
 static bool       g_cue_momentary_active = false;
+// Guards the three momentary fields above (MIDI thread + HTTP threads).
+// Lock order: always taken *before* G_mtx / G_cues_mtx, never inside them.
+static std::mutex g_cue_momentary_mtx;
+
+// Momentary cue (active only while held) - shared by the MIDI
+// "cue_momentary:<n>" action and POST /api/cue/<n>/momentary/<0|1>: press
+// remembers the current look *and rotation angle* and recalls cue n,
+// release puts both back. Global settings (master brightness, blackout,
+// release time, max rate) aren't part of a recall and stay untouched.
+static bool do_cue_momentary_press(int n) {
+    std::lock_guard<std::mutex> mlk(g_cue_momentary_mtx);
+    if (!g_cue_momentary_active) {
+        { std::lock_guard<std::mutex> lk(G_mtx); g_cue_momentary_snapshot = G; }
+        g_cue_momentary_angle = current_rotation_angle();
+    }
+    if (!do_cue_recall(n)) return false;
+    g_cue_momentary_active = true;
+    return true;
+}
+static void do_cue_momentary_release() {
+    std::lock_guard<std::mutex> mlk(g_cue_momentary_mtx);
+    if (!g_cue_momentary_active) return;
+    std::lock_guard<std::mutex> lk(G_mtx);
+    G = with_global_settings(g_cue_momentary_snapshot, G, /*keepIntensity=*/true);
+    G_show_snap_seq.fetch_add(1); // back instantly, no morphing
+    request_rotation_angle(g_cue_momentary_angle);
+    g_cue_momentary_active = false;
+}
 static bool       g_motion_held = false;        // for "motion_hold" (freeze movement while held)
 static float      g_pre_motion_speed = 0.0f;
 static float      g_pre_motion_rotation_speed = 0.0f;
@@ -1695,6 +1863,7 @@ static void do_motion_hold_press() {
     g_pre_motion_rotation_speed = G.rotation_speed; G.rotation_speed = 0.0f;
     g_pre_motion_rainbow_speed = G.rainbow_speed; G.rainbow_speed = 0.0f;
     g_motion_held = true;
+    G_speed_snap_seq.fetch_add(1); // freeze instantly, don't glide to a stop
 }
 static void do_motion_hold_release() {
     std::lock_guard<std::mutex> lk(G_mtx);
@@ -1710,9 +1879,9 @@ static void do_motion_hold_release() {
 // to 0 and stops it from spinning further (rotation_speed to 0), rather
 // than the momentary hold/restore pattern the other do_* helpers use.
 static void do_rotation_reset() {
-    G_rotation_phase.store(0.0);
     std::lock_guard<std::mutex> lk(G_mtx);
     G.rotation_speed = 0.0f;
+    request_rotation_angle(0.0); // angle 0, stop instantly (no glide)
 }
 
 // Applies one note-triggered (button) action. `isPress`/`isRelease`
@@ -1779,8 +1948,8 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
     // buttons, one per channel strip - note 52, channel = 0-based track
     // index). "laser_toggle:<n>" toggles G_lasers[n-1].armed (1-based, in
     // on-screen laser order) - this only gates real hardware output
-    // (laser_thread()'s connect/stream loop), it does NOT affect the
-    // browser preview, which always renders regardless of armed state.
+    // (laser_thread()'s connect/stream loop); the preview hides a
+    // disarmed laser's beam, matching its dark real output.
     if (action.rfind("laser_toggle:",0)==0) {
         if (!isPress) return; // toggle once per press, ignore release
         int n = 0; try { n = std::stoi(action.substr(13)); } catch (...) { return; }
@@ -1806,15 +1975,19 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
     // across successive physical taps rather than sending an on+off pair
     // per tap, so gating on isPress only made it toggle on just every
     // other press.
-    if (action.rfind("laser_mirror_toggle:",0)==0) {
-        int n = 0; try { n = std::stoi(action.substr(20)); } catch (...) { return; }
+    // "laser_mirror_y_toggle:<n>" does the same for the vertical axis (mirror_y).
+    const bool mirrorXToggle = action.rfind("laser_mirror_toggle:",0)==0;
+    const bool mirrorYToggle = action.rfind("laser_mirror_y_toggle:",0)==0;
+    if (mirrorXToggle || mirrorYToggle) {
+        int n = 0; try { n = std::stoi(action.substr(action.find(':') + 1)); } catch (...) { return; }
         {
             std::lock_guard<std::mutex> lk(G_lasers_mtx);
             int idx = n - 1;
             if (idx < 0 || idx >= (int)G_lasers.size()) return;
-            G_lasers[idx].mirror_x = !G_lasers[idx].mirror_x;
-            std::cout << "[midi] laser " << n << " (" << G_lasers[idx].name << ") mirror_x "
-                      << (G_lasers[idx].mirror_x ? "on" : "off") << "\n" << std::flush;
+            bool& flag = mirrorXToggle ? G_lasers[idx].mirror_x : G_lasers[idx].mirror_y;
+            flag = !flag;
+            std::cout << "[midi] laser " << n << " (" << G_lasers[idx].name << ") "
+                      << (mirrorXToggle ? "mirror_x " : "mirror_y ") << (flag ? "on" : "off") << "\n" << std::flush;
         }
         save_lasers_to_disk();
         return;
@@ -1898,12 +2071,9 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         int n = 0;
         try { n = std::stoi(action.substr(14)); } catch (...) { return; }
         if (isPress) {
-            { std::lock_guard<std::mutex> lk(G_mtx); g_cue_momentary_snapshot = G; }
-            g_cue_momentary_active = true;
-            if (do_cue_recall(n)) std::cout << "[midi] previewing cue " << n << "\n";
-        } else if (isRelease && g_cue_momentary_active) {
-            { std::lock_guard<std::mutex> lk(G_mtx); G = g_cue_momentary_snapshot; }
-            g_cue_momentary_active = false;
+            if (do_cue_momentary_press(n)) std::cout << "[midi] previewing cue " << n << "\n";
+        } else if (isRelease) {
+            do_cue_momentary_release();
             std::cout << "[midi] cue " << n << " preview released\n";
         }
         return;
@@ -2421,6 +2591,7 @@ int main(int argc, char* argv[]) {
         APPLY_S("shape",shape)  APPLY_S("move_mode",move_mode)
         APPLY_F("radius",radius)  APPLY_CLAMP("radius",radius,0,1)
         APPLY_F("max_rate_kpps",max_rate_kpps)  APPLY_CLAMP("max_rate_kpps",max_rate_kpps,1,100)
+        APPLY_F("output_latency_ms",output_latency_ms) APPLY_CLAMP("output_latency_ms",output_latency_ms,10,200)
         APPLY_F("rate_kpps",rate_kpps)  APPLY_CLAMP("rate_kpps",rate_kpps,0,G.max_rate_kpps)
         APPLY_F("intensity",intensity)  APPLY_CLAMP("intensity",intensity,0,1)
         // Directly setting the brightness fader (any source: UI, REST, MIDI)
@@ -2448,6 +2619,8 @@ int main(int argc, char* argv[]) {
         APPLY_F("rainbow_phase_degrees",rainbow_phase_degrees) APPLY_CLAMP("rainbow_phase_degrees",rainbow_phase_degrees,0,360)
         APPLY_F("dot_amount",dot_amount) APPLY_CLAMP("dot_amount",dot_amount,0,1)
         APPLY_F("flicker_hz",flicker_hz)
+        APPLY_F("flicker_on_ms",flicker_on_ms) APPLY_CLAMP("flicker_on_ms",flicker_on_ms,0,kFlickerOnMsMax)
+        APPLY_F("flicker_phase_degrees",flicker_phase_degrees) APPLY_CLAMP("flicker_phase_degrees",flicker_phase_degrees,0,360)
         APPLY_B("blackout",blackout)
         APPLY_F("points",points)
         } // lock released here
@@ -2594,7 +2767,7 @@ int main(int argc, char* argv[]) {
     });
 
     // ── POST /api/reset — restore all show params to defaults ─────────────────
-    // Preserves the global flash_release_ms / max_rate_kpps settings and
+    // Preserves the global flash_release_ms / max_rate_kpps / output_latency_ms settings and
     // blackout (see their comments) so resetting the show doesn't change
     // the footswitch's fade time, change the venue's configured scan-rate
     // ceiling, or silently un-blank/blank the laser. The configured laser
@@ -2604,14 +2777,7 @@ int main(int argc, char* argv[]) {
     svr.Post("/api/reset",[](const httplib::Request&,httplib::Response& res){
         {
             std::lock_guard<std::mutex> lk(G_mtx);
-            float flash_release_ms = G.flash_release_ms;
-            float max_rate_kpps = G.max_rate_kpps;
-            bool blackout = G.blackout;
-            G = LaserState{};
-            G.flash_release_ms = flash_release_ms;
-            G.max_rate_kpps = max_rate_kpps;
-            G.rate_kpps = std::clamp(G.rate_kpps, 0.0f, G.max_rate_kpps);
-            G.blackout = blackout;
+            G = with_global_settings(LaserState{}, G, /*keepIntensity=*/false);
         }
         res.set_content(state_to_json(),"application/json");
     });
@@ -2673,7 +2839,7 @@ int main(int argc, char* argv[]) {
     });
 
     // ── POST /api/lasers/<id> — update name/ip/armed/zone calibration ──────────
-    // Body: any of {"name", "ip", "armed":true|false, "zone_x", "zone_y",
+    // Body: any of {"name", "ip", "armed":true|false, "mirror_x", "mirror_y", "zone_x", "zone_y",
     // "zone_scale_x", "zone_scale_y", "preview_x", "preview_y"} - only fields present in the body are
     // changed. Setting "armed":true is what actually makes laser_thread()
     // connect to and stream this laser (see laser_thread()'s connect loop);
@@ -2690,6 +2856,7 @@ int main(int argc, char* argv[]) {
               if (req.body.find("\"ip\"") != std::string::npos) l.ip = json_str(req.body,"ip");
               if (req.body.find("\"armed\"") != std::string::npos) l.armed = json_bool(req.body,"armed",l.armed);
               if (req.body.find("\"mirror_x\"") != std::string::npos) l.mirror_x = json_bool(req.body,"mirror_x",l.mirror_x);
+              if (req.body.find("\"mirror_y\"") != std::string::npos) l.mirror_y = json_bool(req.body,"mirror_y",l.mirror_y);
               l.zone_x       = json_float(req.body,"zone_x",l.zone_x);
               l.zone_y       = json_float(req.body,"zone_y",l.zone_y);
               l.zone_scale_x = std::clamp(json_float(req.body,"zone_scale_x",l.zone_scale_x),0.1f,2.0f);
@@ -2697,6 +2864,28 @@ int main(int argc, char* argv[]) {
               l.preview_x    = std::clamp(json_float(req.body,"preview_x",l.preview_x),0.0f,1.0f);
               l.preview_y    = std::clamp(json_float(req.body,"preview_y",l.preview_y),0.0f,1.0f);
               updated = l; found = true; break;
+          } }
+        if (!found) { res.status=404; res.set_content("{\"error\":\"unknown laser id\"}","application/json"); return; }
+        save_lasers_to_disk();
+        res.set_content(laser_config_to_json(updated),"application/json");
+    });
+
+    // ── POST /api/lasers/<id>/masks — replace this laser's safety masks ───────
+    // Body: {"masks":[{"x0","y0","x1","y1","reduce","outline"}, ...]} - the
+    // complete list (add/edit/delete are all just a new list). Coordinates
+    // are this laser's output space (-1..1, y up), reduce is 0..100 percent.
+    // `outline` is runtime-only - see LaserMask.
+    svr.Post(R"(/api/lasers/(\d+)/masks)",[](const httplib::Request& req,httplib::Response& res){
+        int id = std::stoi(std::string(req.matches[1]));
+        std::vector<LaserMask> masks;
+        if (!parse_masks(req.body, masks)) {
+            res.status=400; res.set_content("{\"error\":\"expected {\\\"masks\\\":[...]}\"}","application/json"); return;
+        }
+        bool found = false; LaserConfig updated;
+        { std::lock_guard<std::mutex> lk(G_lasers_mtx);
+          for (auto& l : G_lasers) {
+              if (l.id != id) continue;
+              l.masks = masks; updated = l; found = true; break;
           } }
         if (!found) { res.status=404; res.set_content("{\"error\":\"unknown laser id\"}","application/json"); return; }
         save_lasers_to_disk();
@@ -2741,6 +2930,19 @@ int main(int argc, char* argv[]) {
         int n=std::stoi(std::string(req.matches[1]));
         if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
         if(!do_cue_recall(n)){res.status=404;res.set_content("{\"error\":\"empty cue\"}","application/json");return;}
+        res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── POST /api/cue/<n>/momentary/<1|0> — hold-to-preview a cue ──────────────
+    // 1 = press (remember current look + rotation angle, recall cue n),
+    // 0 = release (restore both). Shares do_cue_momentary_press/release with
+    // the MIDI "cue_momentary:<n>" action.
+    svr.Post(R"(/api/cue/(\d+)/momentary/([01]))",[](const httplib::Request& req,httplib::Response& res){
+        int n=std::stoi(std::string(req.matches[1]));
+        if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
+        if(req.matches[2]=="1"){
+            if(!do_cue_momentary_press(n)){res.status=404;res.set_content("{\"error\":\"empty cue\"}","application/json");return;}
+        } else do_cue_momentary_release();
         res.set_content(state_to_json(),"application/json");
     });
 
@@ -2808,7 +3010,7 @@ int main(int argc, char* argv[]) {
               << "  POST /laser/rainbow/amount/<v>  /laser/rainbow/speed/<v>\n"
               << "  POST /blackout/<0|1>  /flash/<0|1>  /mirror/x/<0|1>  /motion/hold/<0|1>\n"
               << "  POST /brightness/gate/<0|1>  /rotation/reset\n"
-              << "  GET /api/lasers   POST /api/lasers   POST /api/lasers/<id>   DELETE /api/lasers/<id>\n"
+              << "  GET /api/lasers   POST /api/lasers   POST /api/lasers/<id>   POST /api/lasers/<id>/masks   DELETE /api/lasers/<id>\n"
               << "  GET/POST /api/magic-touch   (shared Magic Touch layout)\n"
               << "  WS   /ws/points\n"
               << "  MIDI: optional, see backend/midi_map.json (Akai APC40 mkII or any USB controller)\n";

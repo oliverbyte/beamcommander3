@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test src/components/maskGeometry.test.js src/components/showFx.test.js",
     "build": "vite build",
     "preview": "vite preview",
     "screenshots": "node scripts/screenshots.mjs"

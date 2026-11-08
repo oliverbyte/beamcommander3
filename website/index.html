@@ -96,7 +96,7 @@
         <div class="feature-card">
           <span class="icon">🔷</span>
           <h3>Shapes &amp; Live Preview</h3>
-          <p>See a separate movable beam source for every configured laser. Shape and movement choices show icons with labels, and the touch-friendly faders are easy to adjust by finger. Preview beams follow per-laser mirroring and armed state, and keep running when hardware is disconnected.</p>
+          <p>See a separate movable beam source for every configured laser. Shape and movement choices show icons with labels, and the touch-friendly faders are easy to adjust by finger. The preview shows each laser exactly as it outputs &mdash; zone, mirroring, safety masks and the master brightness flash included (only Blackout leaves the preview running) &mdash; and keeps running when hardware is disconnected.</p>
         </div>
         <div class="feature-card">
           <span class="icon">🌈</span>
@@ -105,8 +105,8 @@
         </div>
         <div class="feature-card">
           <span class="icon">〰️</span>
-          <h3>Movement &amp; Rainbow Phasing</h3>
-          <p>Set a phase step per laser to stagger a shared movement pattern across the installation order. Laser 1 starts at 0°; each following laser adds one step. The rainbow phase does the same for color: new colors run from laser to laser, left to right.</p>
+          <h3>Movement, Rainbow &amp; Flicker Phasing</h3>
+          <p>Set a phase step per laser to stagger a shared movement pattern across the installation order. Laser 1 starts at 0°; each following laser adds one step. The rainbow phase does the same for color: new colors run from laser to laser, left to right. The flicker phase turns a strobe into a chase across the rig.</p>
         </div>
         <div class="feature-card">
           <span class="icon">💾</span>
@@ -116,7 +116,7 @@
         <div class="feature-card">
           <span class="icon">🎛️</span>
           <h3>Magic Touch</h3>
-          <p>Build your own control surface from faders, knobs, pads and X/Y pads: drag, resize and snap elements into place, assign any function, invert values or use a logarithmic curve, make cues momentary, and double-tap to reset. The layout is shared by every connected device, and it comes with a ready-made live layout and example cues.</p>
+          <p>Build your own control surface from faders, knobs, pads and X/Y pads: drag, resize and snap elements into place, assign any function, invert values or use a logarithmic curve, make cues momentary, and double-tap to reset (on a rotation knob: back to the start angle). The layout is shared by every connected device, and it comes with a ready-made live layout and example cues.</p>
         </div>
         <div class="feature-card">
           <span class="icon">🔌</span>
@@ -125,8 +125,23 @@
         </div>
         <div class="feature-card">
           <span class="icon">🗺️</span>
-          <h3>Per-Laser Zoning</h3>
-          <p>Pan/scale each armed laser's output independently to fit its physical sub-region (a wall, a truss segment) — without touching the on-screen preview or other lasers.</p>
+          <h3>Per-Laser Zoning &amp; Mirroring</h3>
+          <p>Pan/scale each laser's output independently to fit its physical sub-region (a wall, a truss segment), and flip it horizontally and/or vertically &mdash; e.g. for a projector mounted upside down &mdash; without affecting the other lasers.</p>
+        </div>
+        <div class="feature-card">
+          <span class="icon">🛡️</span>
+          <h3>Safety Masks</h3>
+          <p>Draw any number of red masks per laser over areas that must get less or no light, such as the audience, balconies or cameras. Move, resize and crop them by touch and set per mask how much the output is reduced, up to fully dark. While lining them up, the laser can draw each mask's border in red so you see exactly what is masked in the room.</p>
+        </div>
+        <div class="feature-card">
+          <span class="icon">✨</span>
+          <h3>Flicker</h3>
+          <p>Strobe with a separate flicker rate and on time per flash, timed exactly per point, so the laser and the preview blink in the same rhythm.</p>
+        </div>
+        <div class="feature-card">
+          <span class="icon">🎚️</span>
+          <h3>Smooth Changes, Instant Cues</h3>
+          <p>Size, speed, movement and similar changes glide softly to their new value instead of jumping, while switching cues, including momentary ones, changes the look instantly, starting at the rotation it was saved with. The output latency is adjustable for the fastest response your network allows.</p>
         </div>
         <div class="feature-card">
           <span class="icon">🎛️</span>
@@ -141,7 +156,7 @@
         <div class="feature-card">
           <span class="icon">⚡</span>
           <h3>Flash &amp; Blackout</h3>
-          <p>Punch to full white brightness while held, or force the real laser dark instantly — the on-screen preview keeps playing either way.</p>
+          <p>Punch to full white brightness while held, fade the master brightness in and out like a foot pedal (visible in the preview too), or force the real laser dark instantly with Blackout, while the on-screen preview keeps playing.</p>
         </div>
         <div class="feature-card">
           <span class="icon">🖥️</span>
@@ -200,7 +215,7 @@
           <li>Never look directly into the beam or aperture, at any distance.</li>
           <li>Never point the beam at audience eye level unless the rig is professionally certified for full-audience scanning.</li>
           <li>Calibrate (including the Zoning panel) with the beam aimed at a wall, floor, or beam dump — never at a person or reflective surface.</li>
-          <li><code>Blackout</code> and the brightness gate are software conveniences, not certified safety interlocks.</li>
+          <li><code>Blackout</code>, the brightness gate and safety masks are software conveniences, not certified safety interlocks.</li>
           <li>Know and follow your local laws and regulations for laser show operation.</li>
         </ul>
         <p style="margin-top:0.75rem;">

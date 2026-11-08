@@ -23,6 +23,7 @@ import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { fetchLasers, lasers, laserState, onPoints, patchLaserLocal, updateLaser } from '../composables/useLaserSocket.js'
+import { createClockSync, flickerIsLit } from './showFx.js'
 
 const props = defineProps({
   persistenceMs: { type: Number, default: 20 },
@@ -122,7 +123,7 @@ function createLaserStream(id) {
     lastPoint: [0, 0], lastColor: [0, 0, 0], spokeWriteIndex: 0, spokeCount: 0,
     spokeGeo, spokePositions, spokeColors, spokeBaseColors, spokeTimestamps, spokeMaterial,
     hazeGeo, hazePositions, hazeBaseColors, hazeColors, hazeMaterial,
-    edgeX: 0.5, edgeY: 0.5, mirrorX: false,
+    edgeX: 0.5, edgeY: 0.5,
   }
 }
 
@@ -168,7 +169,8 @@ function positionLaserSources() {
     const output = source.getObjectByName('laser-output')
     if (output) {
       output.visible = entry.armed !== false
-      output.scale.x = entry.mirror_x === true ? -1 : 1
+      // No scale flip for mirror_x/mirror_y here: the daemon already sends
+      // each laser's frame exactly as it goes to the DAC (mirror included).
     }
     const position = previewPosition(entry)
     sourceScreenPoint.set(position.x * 2 - 1, 1 - position.y * 2)
@@ -330,7 +332,17 @@ function setupScene() {
 // `rate_kpps*1000` points/sec, looping forever, exactly like the DAC does.
 const MAX_EMIT_PER_TICK = 4000  // safety cap (e.g. tab was backgrounded)
 
+// Flicker is applied here per simulated point by its playback time (the
+// daemon sends unflickered frames plus its clock `t` and settings `fl`), with
+// the same formula the daemon uses per point for the laser - see showFx.js.
+const clockSync = createClockSync()
+let flicker = [0, 0] // [rate Hz, on time ms]
+let flickerOffsets = {} // laser id -> seconds (flicker phase per laser)
+
 function handleIncomingPoints(msg) {
+  if (Number.isFinite(msg.t)) clockSync.update(msg.t, performance.now() / 1000)
+  if (Array.isArray(msg.fl)) flicker = msg.fl
+  flickerOffsets = msg.flo || {}
   for (const [id, stream] of laserStreams) {
     stream.currentFrame = msg.laser_pts?.[id] || msg.pts || []
   }
@@ -344,13 +356,11 @@ function prepareContinuation() {
   edgeViewWidth = (camera.right - camera.left) / camera.zoom
   edgeViewHeight = (camera.top - camera.bottom) / camera.zoom
   for (const [id, stream] of laserStreams) {
-    const entry = id === '__virtual__' ? null : lasers.find((laser) => laser.id === id)
     const source = laserSources.get(id)
     if (!source) continue
     sourceRelative.subVectors(source.position, camera.position)
     stream.edgeX = 0.5 + sourceRelative.dot(screenRight) / edgeViewWidth
     stream.edgeY = 0.5 - sourceRelative.dot(screenUp) / edgeViewHeight
-    stream.mirrorX = entry?.mirror_x === true
   }
 }
 
@@ -358,7 +368,7 @@ function continuationEnd(wx, wy, stream) {
   rayDirection.set(wx, wy, BEAM_LEN)
   const screenDx = rayDirection.dot(screenRight)
   const screenDy = rayDirection.dot(screenUp)
-  const normalizedDx = (stream.mirrorX ? -screenDx : screenDx) / edgeViewWidth
+  const normalizedDx = screenDx / edgeViewWidth
   const normalizedDy = -screenDy / edgeViewHeight
   let factor = Infinity
   if (normalizedDx > 1e-8) factor = Math.min(factor, (1 - stream.edgeX) / normalizedDx)
@@ -404,8 +414,11 @@ function emitLaserScan(stream, now) {
     const wy = y * WORLD_SCALE
     // Daemon sends 0..1 floats; simulation sends 0..255 integers.
     const scale = (r > 1 || g > 1 || b > 1) ? 1 / 255 : 1
-    const cr = r * scale, cg = g * scale, cb = b * scale
-    const fanBrightness = Math.min(1, Math.max(0.01, 5 / frame.length) * laserState.intensity)
+    let cr = r * scale, cg = g * scale, cb = b * scale
+    if (flicker[0] > 0 && !flickerIsLit(clockSync.toServer(t) + (flickerOffsets[stream.id] || 0), flicker[0], flicker[1])) cr = cg = cb = 0
+    // Point colors already carry master brightness, gate/flash and masks
+    // (the daemon sends the real output), so no extra intensity factor here.
+    const fanBrightness = Math.min(1, Math.max(0.01, 5 / frame.length))
 
     // Spoke: source (local origin) -> shape point -> far continuation.
     // Segment 1 (source->point) fades bright-to-dim; segment 2
