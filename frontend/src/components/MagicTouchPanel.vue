@@ -96,6 +96,15 @@
             </div>
           </section>
           <section class="control-section">
+            <div class="section-heading"><div><h2>Dots &amp; flicker</h2><p>Part of the look - saved in cues.</p></div></div>
+            <div class="range-grid">
+              <div v-for="control in LOOK_FX_CONTROLS" :key="control.key" class="range-control">
+                <label :for="`magic-${control.key}`">{{ control.label }} <output>{{ formatValue(laserState[control.key], control) }}</output></label>
+                <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="laserState[control.key]" @input="setNumeric(control.key, $event.target.value)" />
+              </div>
+            </div>
+          </section>
+          <section class="control-section">
             <div class="section-heading"><div><h2>Wave</h2><p>Set the wave profile and phase movement.</p></div></div>
             <div class="range-grid">
               <div v-for="control in WAVE_CONTROLS" :key="control.key" class="range-control">
@@ -150,7 +159,7 @@
             </div>
           </section>
           <section class="control-section">
-            <div class="section-heading"><div><h2>Beam detail</h2><p>Control dot density and flicker rate, on time and phase.</p></div></div>
+            <div class="section-heading"><div><h2>Scanner tuning</h2><p>Raise the dot times if dots look like streaks on your projector.</p></div></div>
             <div class="range-grid">
               <div v-for="control in BEAM_CONTROLS" :key="control.key" class="range-control">
                 <label :for="`magic-${control.key}`">{{ control.label }} <output>{{ formatValue(laserState[control.key], control) }}</output></label>
@@ -254,11 +263,11 @@ const PAGES = [
   { id: 'builder', label: 'Magic Touch', title: 'Magic Touch' }, // no subtitle: header room goes to the page tabs
   { id: 'cues', label: 'Cues', title: 'Cues', description: 'Recall, save, and arrange live looks.' },
   { id: 'color', label: 'Color', title: 'Color', description: 'Set a solid color or add animated rainbow.' },
-  { id: 'shapes', label: 'Shapes', title: 'Shapes', description: 'Choose a shape and tune its geometry.' },
+  { id: 'shapes', label: 'Shapes', title: 'Shapes', description: 'Choose a shape, its geometry, dots and flicker.' },
   { id: 'move', label: 'Move', title: 'Move', description: 'Animate the shape and adjust its position.' },
-  { id: 'beam', label: 'Beam', title: 'Beam', description: 'Scan rate, dots, flicker and preview - saved centrally, not in cues.' },
-  { id: 'zoning', label: 'Zoning', title: 'Zoning', description: 'Calibrate the output area for each laser.' },
   { id: 'lasers', label: 'Lasers', title: 'Lasers', description: 'Configure and arm connected laser projectors.' },
+  { id: 'zoning', label: 'Zoning', title: 'Zoning', description: 'Calibrate the output area for each laser.' },
+  { id: 'beam', label: 'Beam', title: 'Beam', description: 'Projector settings - saved centrally, not in cues.' },
 ]
 const PAGE_ICONS = {
   cues: '<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v18M16 3v18M3 8h5M16 8h5M3 16h5M16 16h5"/></svg>',
@@ -306,11 +315,14 @@ const TRANSFORM_CONTROLS = [
   { label: 'Position Y', key: 'pos_y', min: -1, max: 1, step: 0.01, decimals: 2 },
   { label: 'Rotation', key: 'rotation_speed', min: -4, max: 4, step: 0.1, decimals: 1, suffix: ' rot/s' },
 ]
+// Beam page = projector/scanner settings: global, saved centrally (settings.json), never in cues.
 const BEAM_CONTROLS = [
-  { label: 'Dot density', key: 'dot_amount', min: 0.01, max: 1, step: 0.01, decimals: 2 },
-  // Scanner tuning for crisp dots (global, not saved in cues): raise them if dots look like streaks.
   { label: 'Dot dwell (lit time per dot)', key: 'dot_dwell_us', min: 30, max: 3000, step: 10, decimals: 0, suffix: ' µs' },
   { label: 'Dot blanking (dark before/after)', key: 'dot_blank_us', min: 0, max: 3000, step: 10, decimals: 0, suffix: ' µs' },
+]
+// Dots and flicker are part of the look (Shapes page) and saved in cues.
+const LOOK_FX_CONTROLS = [
+  { label: 'Dot density', key: 'dot_amount', min: 0.01, max: 1, step: 0.01, decimals: 2 },
   { label: 'Flicker rate', key: 'flicker_hz', min: 0, max: 30, step: 0.5, decimals: 1, suffix: ' Hz' },
   // How long each flicker flash is lit; 0 = auto (half of every period).
   { label: 'Flicker on time', key: 'flicker_on_ms', min: 0, max: 1000, step: 5, decimals: 0, suffix: ' ms', zeroLabel: 'Auto (50 %)' },

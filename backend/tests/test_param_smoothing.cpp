@@ -127,12 +127,14 @@ TEST(snap_speeds_leaves_shape_gliding) {
     t.shape_scale = 1.0f; s.snap_speeds(t);
     CHECK(s.shape_scale == 0.0f);
 }
-TEST(dot_amount_glides_slower_than_shape) {
-    ShowParamSmoother<State> s; State t; t.dot_amount = 0.1f; t.shape_scale = 0; s.update(t, 0.01f);
-    t.dot_amount = 0.9f; t.shape_scale = 0.8f; run(s, t, 0.3f);
-    const float dotProgress = (s.dot_amount - 0.1f) / 0.8f, scaleProgress = s.shape_scale / 0.8f;
-    CHECK(dotProgress < scaleProgress);
-    CHECK(dotProgress > 0.4f && dotProgress < 0.7f); // ~1 - e^(-0.3/0.35)
+TEST(dot_amount_follows_the_knob_almost_instantly) {
+    ShowParamSmoother<State> s; State t; t.dot_amount = 0.1f; s.update(t, 0.01f);
+    t.dot_amount = 1.0f; run(s, t, 0.05f);
+    CHECK(s.dot_amount > 0.6f);         // most of the way after 50 ms
+    run(s, t, 0.25f);
+    CHECK(rendered(s).dot_amount == 1.0f); // fully there (dots off) after 0.3 s
+    t.dot_amount = 0.1f; run(s, t, 0.3f);
+    CHECK(rendered(s).dot_amount < 0.101f); // and back
 }
 TEST(rainbow_amount_reaches_exact_zero) {
     ShowParamSmoother<State> s; State t; t.rainbow_amount = 0.6f; s.update(t, 0.01f);

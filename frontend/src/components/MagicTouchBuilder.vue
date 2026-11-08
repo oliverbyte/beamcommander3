@@ -281,13 +281,13 @@ const VALUE_FNS = {
   // Double tap = full rotation reset (angle back to 0 + stop), unless the
   // element opts out via w.keepAngle (then it only stops spinning).
   rotation: { ...num('Move', 'Rotation', 'rotation_speed', -4, 4, 1, ' rot/s'), tapReset: (w) => (w.keepAngle ? null : rotationReset()) },
-  dot_amount: num('Beam', 'Dot density', 'dot_amount', 0.01, 1),
+  dot_amount: num('Shapes', 'Dot density', 'dot_amount', 0.01, 1),
   dot_dwell: num('Beam', 'Dot dwell', 'dot_dwell_us', 30, 3000, 0, ' µs'),
   dot_blank: num('Beam', 'Dot blanking', 'dot_blank_us', 0, 3000, 0, ' µs'),
-  flicker: num('Beam', 'Flicker rate', 'flicker_hz', 0, 30, 1, ' Hz'),
+  flicker: num('Shapes', 'Flicker rate', 'flicker_hz', 0, 30, 1, ' Hz'),
   // Lit time per flicker flash; 0 = auto (half of every period, the old behaviour).
-  flicker_on: { ...num('Beam', 'Flicker on time', 'flicker_on_ms', 0, 1000, 0, ' ms'), format: (v) => (Number(v) === 0 ? 'Auto' : `${Math.round(v)} ms`) },
-  flicker_phase: num('Beam', 'Flicker phase per laser', 'flicker_phase_degrees', 0, 360, 0, '°'),
+  flicker_on: { ...num('Shapes', 'Flicker on time', 'flicker_on_ms', 0, 1000, 0, ' ms'), format: (v) => (Number(v) === 0 ? 'Auto' : `${Math.round(v)} ms`) },
+  flicker_phase: num('Shapes', 'Flicker phase per laser', 'flicker_phase_degrees', 0, 360, 0, '°'),
   max_rate: num('Beam', 'Maximum rate', 'max_rate_kpps', 1, 100, 0, ' kpps'),
   output_latency: num('Beam', 'Output latency', 'output_latency_ms', 10, 200, 0, ' ms'),
   rate: {

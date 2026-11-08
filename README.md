@@ -182,7 +182,8 @@ for how the packaged macOS/Windows builds are put together.
    **Rainbow phase per laser** makes the rainbow run from laser to laser:
    laser 1 changes color first, each following laser follows one phase step
    later, and inside each line/wave the new colors run in from the left.
-   In Beam, **Flicker rate** strobes the output, **Flicker on time** sets how
+   In Shapes (Dots & flicker), **Dot density** turns the shape into dots and
+   **Flicker rate** strobes the output, **Flicker on time** sets how
    long each flash is lit (0 = auto, half of every period) and **Flicker
    phase per laser** staggers the flashes across the lasers (a chase).
    Flicker is timed per point, so the preview blinks in the same rhythm as
@@ -412,14 +413,15 @@ and after each dot, on top of the scanner travel time), `output_latency_ms` (10-
 ahead frames are queued for the lasers - lower shows changes and cues sooner, too low can cause brief blank gaps on a
 slow network).
 
-`flash_release_ms`, `intensity`, `blackout` and **every Beam setting**
-(`rate_kpps`, `max_rate_kpps`, `output_latency_ms`, `dot_amount`,
-`dot_dwell_us`, `dot_blank_us`, `flicker_hz`, `flicker_on_ms`,
-`flicker_phase_degrees`) are *global* daemon settings, not part of a cue's
-show state: saving a cue never captures them, and recalling a cue, a
-momentary cue, a cue layer or a show reset never changes them (values stored
-in cues by older versions are ignored). The Beam settings are saved centrally
-in `settings.json` in the app data directory and survive a restart. Recalling a cue (also a momentary one, and its
+`flash_release_ms`, `intensity`, `blackout` and the **Beam page's projector
+settings** (`rate_kpps`, `max_rate_kpps`, `output_latency_ms`,
+`dot_dwell_us`, `dot_blank_us`) are *global* daemon settings, not part of a
+cue's show state: saving a cue never captures them, and recalling a cue, a
+momentary cue, a cue layer or a show reset never changes them (a scan rate
+stored in cues by older versions is ignored). The projector settings are
+saved centrally in `settings.json` in the app data directory and survive a
+restart. Dot density and flicker (Shapes page) are part of the look and are
+saved in cues. Recalling a cue (also a momentary one, and its
 release) switches instantly - no gliding between the old and the new look;
 fader/knob changes still glide softly. `max_rate_kpps` also caps and defaults `rate_kpps` on
 the fader/REST/MIDI - turning it down lowers the scan-rate fader's usable

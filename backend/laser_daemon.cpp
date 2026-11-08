@@ -265,22 +265,19 @@ static std::vector<ShowLayer> G_show_layers;
 
 // `next` (a cue, a momentary snapshot, the defaults) with the *global* daemon
 // settings taken over from `current`: footswitch fade time, blackout, - for
-// cue recall - master brightness, and every Beam setting (scan rate and its
-// ceiling, output latency, dot density/dwell/blanking, flicker rate/on
-// time/phase). None of these are part of a look, so switching looks or
-// resetting the show never changes them; the Beam settings are also
-// persisted centrally in settings.json (see save_settings_if_changed()).
+// cue recall - master brightness, and the Beam page's projector settings
+// (scan rate and its ceiling, output latency, dot dwell/blanking). None of
+// these are part of a look, so switching looks or resetting the show never
+// changes them; the projector settings are also persisted centrally in
+// settings.json (see save_settings_if_changed()). Dot density and flicker
+// ARE part of the look (Shapes page) and come with the cue.
 static LaserState with_global_settings(LaserState next, const LaserState& current, bool keepIntensity) {
     next.flash_release_ms  = current.flash_release_ms;
     next.max_rate_kpps     = current.max_rate_kpps;
     next.rate_kpps         = current.rate_kpps;
     next.output_latency_ms = current.output_latency_ms;
-    next.dot_amount        = current.dot_amount;
     next.dot_dwell_us      = current.dot_dwell_us;
     next.dot_blank_us      = current.dot_blank_us;
-    next.flicker_hz        = current.flicker_hz;
-    next.flicker_on_ms     = current.flicker_on_ms;
-    next.flicker_phase_degrees = current.flicker_phase_degrees;
     next.blackout          = current.blackout;
     if (keepIntensity) next.intensity = current.intensity;
     next.rate_kpps = std::clamp(next.rate_kpps, 0.0f, next.max_rate_kpps);
@@ -999,9 +996,9 @@ static LaserState layer_render_state(const ShowLayer& L, const LaserState& mainL
     LaserState s = L.s;
     s.intensity = mainLook.intensity;
     s.move_mode_from = s.move_mode; s.move_blend = 1.0f;
-    // Beam settings are global, not the layer cue's
+    // Projector settings are global, not the layer cue's (its own dot
+    // density stays - dots are part of the look)
     s.rate_kpps = mainLook.rate_kpps;
-    s.dot_amount = mainLook.dot_amount;
     s.dot_dwell_us = mainLook.dot_dwell_us; s.dot_blank_us = mainLook.dot_blank_us;
     if (g_flash_active) { s.r = 1.0f; s.g = 1.0f; s.b = 1.0f; }
     return s;
@@ -1594,7 +1591,7 @@ static std::mutex                G_cues_mtx;
 static const std::string         CUES_FILE = resolve_data_file("cues.json");
 
 // ── Central Beam settings (settings.json) ────────────────────────────────────
-// The Beam page's settings are global (see with_global_settings()) and kept
+// The Beam page's projector settings are global (see with_global_settings()) and kept
 // across daemon restarts in their own file in the app data directory - not in
 // cues. Loaded once at startup; saved by a background thread within ~1 s of
 // any change, no matter which input changed them (REST, MIDI, Magic Touch).
@@ -1604,12 +1601,8 @@ static std::string beam_settings_json(const LaserState& s) {
     ss << "{\"rate_kpps\":" << s.rate_kpps
        << ",\"max_rate_kpps\":" << s.max_rate_kpps
        << ",\"output_latency_ms\":" << s.output_latency_ms
-       << ",\"dot_amount\":" << s.dot_amount
        << ",\"dot_dwell_us\":" << s.dot_dwell_us
        << ",\"dot_blank_us\":" << s.dot_blank_us
-       << ",\"flicker_hz\":" << s.flicker_hz
-       << ",\"flicker_on_ms\":" << s.flicker_on_ms
-       << ",\"flicker_phase_degrees\":" << s.flicker_phase_degrees
        << "}";
     return ss.str();
 }
@@ -1627,12 +1620,8 @@ static void load_settings_from_disk() {
     G.max_rate_kpps     = num("max_rate_kpps", G.max_rate_kpps, 1, 100);
     G.rate_kpps         = num("rate_kpps", G.rate_kpps, 0, G.max_rate_kpps);
     G.output_latency_ms = num("output_latency_ms", G.output_latency_ms, 10, 200);
-    G.dot_amount        = num("dot_amount", G.dot_amount, 0, 1);
     G.dot_dwell_us      = num("dot_dwell_us", G.dot_dwell_us, 30, 3000);
     G.dot_blank_us      = num("dot_blank_us", G.dot_blank_us, 0, 3000);
-    G.flicker_hz        = num("flicker_hz", G.flicker_hz, 0, 1000);
-    G.flicker_on_ms     = num("flicker_on_ms", G.flicker_on_ms, 0, kFlickerOnMsMax);
-    G.flicker_phase_degrees = num("flicker_phase_degrees", G.flicker_phase_degrees, 0, 360);
     G_settings_saved = beam_settings_json(G);
     std::cout << "[laser_daemon] Loaded Beam settings from " << SETTINGS_FILE << "\n";
 }
@@ -1668,9 +1657,14 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"wave_speed\":"    << s.wave_speed    << ","
        << "\"rainbow_amount\":" << s.rainbow_amount << ","
        << "\"rainbow_speed\":" << s.rainbow_speed << ","
-       << "\"rainbow_phase_degrees\":" << s.rainbow_phase_degrees
-       // Beam settings (scan rate, dot density, flicker, ...) are global and
-       // never part of a cue - see with_global_settings().
+       << "\"rainbow_phase_degrees\":" << s.rainbow_phase_degrees << ","
+       << "\"dot_amount\":"    << s.dot_amount    << ","
+       << "\"flicker_hz\":"    << s.flicker_hz    << ","
+       << "\"flicker_on_ms\":" << s.flicker_on_ms << ","
+       << "\"flicker_phase_degrees\":" << s.flicker_phase_degrees
+       // The Beam page's projector settings (scan rate, max rate, output
+       // latency, dot dwell/blanking) are global and never part of a cue -
+       // see with_global_settings().
        << "}";
     return ss.str();
 }
@@ -1699,8 +1693,14 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.rainbow_amount  = json_float(obj,"rainbow_amount",s.rainbow_amount);
     s.rainbow_speed   = json_float(obj,"rainbow_speed",s.rainbow_speed);
     s.rainbow_phase_degrees = json_float(obj,"rainbow_phase_degrees",s.rainbow_phase_degrees);
-    // Beam settings stored by older versions (rate_kpps, dot_amount,
-    // flicker_*) are ignored on purpose: they are global now.
+    s.dot_amount      = std::clamp(json_float(obj,"dot_amount",s.dot_amount),0.0f,1.0f);
+    s.flicker_hz      = std::max(0.0f, json_float(obj,"flicker_hz",s.flicker_hz));
+    // Cues saved before the on time existed have no such key: keep the
+    // default 0 (= auto, half the period), i.e. exactly how they looked.
+    s.flicker_on_ms   = std::clamp(json_float(obj,"flicker_on_ms",0.0f),0.0f,kFlickerOnMsMax);
+    s.flicker_phase_degrees = std::clamp(json_float(obj,"flicker_phase_degrees",0.0f),0.0f,360.0f);
+    // rate_kpps stored by older versions is ignored on purpose: the scan
+    // rate is a global projector setting.
     return s;
 }
 

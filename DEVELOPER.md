@@ -139,8 +139,8 @@ before pushing and commit whatever it changed:
 packaging/sync_default_data.sh   # copies them from the app data dir into backend/
 ```
 
-`settings.json` holds the central Beam settings (scan rate, max rate, output
-latency, dot density/dwell/blanking, flicker): loaded at startup
+`settings.json` holds the central Beam/projector settings (scan rate, max
+rate, output latency, dot dwell/blanking): loaded at startup
 (`load_settings_from_disk()`), written by a small background thread within
 ~1 s of any change (`save_settings_if_changed()`). Like `lasers.json` it is
 tuned to this rig's projectors and not shipped.
@@ -407,7 +407,8 @@ still show the target immediately.
 - `radius`, `shape_scale`, `move_size`, `rainbow_amount`, per-laser
   `move_phase_degrees`/`rainbow_phase_degrees`/`flicker_phase_degrees`:
   tau 0.15 s (~0.45 s to 95 %).
-- `dot_amount`: tau 0.35 s (~1 s), so dots visibly fade in/out one by one
+- `dot_amount`: tau 0.05 s (~0.15 s) - feels instant on the knob, only
+  smooths a MIDI knob's steps; the dots themselves still slide and fade
   (see "Dot rendering").
 - `move_speed`, `rotation_speed`, `rainbow_speed`: tau 0.25 s, and the phase
   accumulators integrate the *smoothed* speeds, so the motion accelerates/
@@ -579,11 +580,12 @@ Cues are snapshots of `LaserState` in `std::map<int, LaserState> G_cues`,
 guarded by its own `G_cues_mtx` and persisted to `backend/cues.json`. A
 handful of fields are deliberately *not* part of that snapshot even though
 they live on `LaserState` - `flash_release_ms`, `intensity`
-(master brightness), `blackout` and all Beam settings (`rate_kpps`,
-`max_rate_kpps`, `output_latency_ms`, `dot_amount`, `dot_dwell_us`,
-`dot_blank_us`, `flicker_hz`, `flicker_on_ms`, `flicker_phase_degrees`) are
-global daemon/safety settings, not per-look show state (one place for this:
-`with_global_settings()`): they're excluded from
+(master brightness), `blackout` and the Beam page's projector settings
+(`rate_kpps`, `max_rate_kpps`, `output_latency_ms`, `dot_dwell_us`,
+`dot_blank_us`) are global daemon/safety settings, not per-look show state
+(one place for this: `with_global_settings()`). `dot_amount` and the
+flicker settings *are* part of the look (Shapes page) and stored in cues -
+cues that only differ in dots/flicker must stay different: they're excluded from
 `cue_state_to_json`/`cue_state_from_json` and explicitly re-applied on top
 of `G` after every `do_cue_recall()` (and preserved across `/api/reset` the
 same way), so switching cues or resetting the show can never change the
@@ -633,10 +635,9 @@ The dot count is continuous (`dot_amount * n`, `place_dots()` in
 `show_fx.h`): dots sit evenly spaced at fractional base-point positions
 (interpolated between base points; closed shapes wrap, lines/waves don't),
 and with a fractional count the newest dot is drawn at that fraction's
-brightness. Together with the slower `dot_amount` glide, turning the knob
-makes the dots slide apart/together continuously while new dots fade in (or
-out) - instead of every dot jumping to a new position each time the
-whole-number count changed.
+brightness. So turning the knob makes the dots slide apart/together
+continuously while new dots fade in (or out) - instead of every dot jumping
+to a new position each time the whole-number count changed.
 
 `make_frame()` doesn't just thin the point list by an integer stride - a
 DAC plays a frame's points back-to-back at a fixed rate, moving the galvo

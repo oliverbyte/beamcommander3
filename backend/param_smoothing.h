@@ -31,7 +31,7 @@ inline float glide_toward(float cur, float target, float dt, float tau, float sn
 
 inline constexpr float kShapeGlideTau = 0.15f; // size/scale/density: ~0.45 s to 95 %
 inline constexpr float kSpeedGlideTau = 0.25f; // speeds: ~0.75 s, gentle acceleration
-inline constexpr float kDotGlideTau   = 0.35f; // dot amount: ~1 s, so new dots visibly fade in/out one by one
+inline constexpr float kDotGlideTau   = 0.05f; // dot amount: ~0.15 s - feels instant, only smooths knob steps
 inline constexpr float kMoveModeBlendSec = 0.45f; // crossfade between movement patterns
 
 // State needs: radius, shape_scale, dot_amount, move_size, move_speed,
@@ -52,7 +52,10 @@ struct ShowParamSmoother {
         const float d = std::clamp(dt, 0.0f, 0.25f);
         radius                = glide_toward(radius,                t.radius,                d, kShapeGlideTau);
         shape_scale           = glide_toward(shape_scale,           t.shape_scale,           d, kShapeGlideTau);
-        dot_amount            = glide_toward(dot_amount,            t.dot_amount,            d, kDotGlideTau);
+        // Snap from 1 % away: dot_amount == 1 means "no dots", and anything
+        // below it is still drawn dotted - a long exponential tail made
+        // "turn the dots fully up" take seconds to actually go solid.
+        dot_amount            = glide_toward(dot_amount,            t.dot_amount,            d, kDotGlideTau, 0.01f);
         move_size             = glide_toward(move_size,             t.move_size,             d, kShapeGlideTau);
         rainbow_amount        = glide_toward(rainbow_amount,        t.rainbow_amount,        d, kShapeGlideTau);
         move_phase_degrees    = glide_toward(move_phase_degrees,    t.move_phase_degrees,    d, kShapeGlideTau, 1e-3f);

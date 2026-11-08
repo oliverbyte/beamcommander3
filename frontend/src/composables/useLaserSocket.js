@@ -315,13 +315,15 @@ export async function recallCue(n) {
   applyStateIfCurrent(seq, await api(`/cue/${n}/recall`, { method: 'POST' }))
 }
 
-// Fields a cue stores (the look). Beam settings - scan rate, dot density,
-// dot timing, flicker, output latency - are global, not part of cues.
+// Fields a cue stores (the look, incl. dots and flicker). The Beam page's
+// projector settings - scan rate, max rate, output latency, dot dwell/blanking -
+// are global, not part of cues.
 const CUE_STATE_FIELDS = [
   'shape', 'radius', 'points', 'r', 'g', 'b', 'shape_scale',
   'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed',
   'move_size', 'move_phase_degrees', 'wave_frequency', 'wave_amplitude', 'wave_speed',
   'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees',
+  'dot_amount', 'flicker_hz', 'flicker_on_ms', 'flicker_phase_degrees',
 ]
 
 // True when cue slot n is populated and every saved field equals the live state.
