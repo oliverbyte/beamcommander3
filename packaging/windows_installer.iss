@@ -6,7 +6,7 @@
 ;        /DIconFile=C:\path\to\AppIcon.ico packaging\windows_installer.iss
 ;
 ; StageDir must contain laser_daemon.exe, libusb-1.0.dll, midi_map.json, cues.json, magic_touch.json,
-; run.bat, and a frontend_dist\ folder (see the release workflow's
+; lasers.json, settings.json, run.bat, and a frontend_dist\ folder (see the release workflow's
 ; "Assemble release package" step for how that's put together).
 
 #ifndef MyAppVersion

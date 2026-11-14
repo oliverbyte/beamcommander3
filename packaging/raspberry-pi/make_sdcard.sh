@@ -4,7 +4,7 @@
 #
 #   packaging/raspberry-pi/make_sdcard.sh disk4
 #
-# 1. syncs the current user data (app data dir -> backend/ + rig/), so the
+# 1. syncs the current user data (app data dir -> backend/), so the
 #    card gets exactly the settings in use on this Mac,
 # 2. downloads + verifies Raspberry Pi OS Lite (cached in $BC3_PI_WORK),
 # 3. builds laser_daemon for armhf (build_daemon.sh) if not built yet and the
@@ -63,9 +63,9 @@ cp "$HERE"/files/* "$STAGE/bc3/"
 cp "$WORK/out/laser_daemon" "$STAGE/bc3/"
 cp -R "$REPO/frontend/dist" "$STAGE/bc3/frontend_dist"
 # First-run seeds next to the binary (like the desktop releases) ...
-cp "$REPO"/backend/{cues,magic_touch,midi_map}.json "$STAGE/bc3/"
-# ... and this rig's complete data set for the Pi's data directory.
-cp "$REPO"/backend/{cues,magic_touch}.json "$HERE"/rig/*.json "$STAGE/bc3/data/"
+cp "$REPO"/backend/{cues,magic_touch,midi_map,lasers,settings}.json "$STAGE/bc3/"
+# ... and the complete data set for the Pi's data directory.
+cp "$REPO"/backend/{cues,magic_touch,lasers,settings}.json "$STAGE/bc3/data/"
 chmod +x "$STAGE"/bc3/*.sh "$STAGE/bc3/laser_daemon"
 
 # ── Write the card ─────────────────────────────────────────────────────────

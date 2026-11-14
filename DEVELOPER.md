@@ -129,29 +129,27 @@ aren't in the same directory - a sibling `Resources/` folder too).
 
 ### Shipped defaults (sync before every release)
 
-Releases ship the maintainer's own `cues.json` and `magic_touch.json`
-(committed in `backend/`, next to `midi_map.json`) as first-run defaults, so new
-users start with useful cues and a ready-made Magic Touch layout instead of
-an empty app. Since every push to `main` publishes a release, run this
+Releases ship the maintainer's own `cues.json`, `magic_touch.json`,
+`lasers.json` and `settings.json` (committed in `backend/`, next to
+`midi_map.json`) as first-run defaults, so new users start with useful cues,
+a ready-made Magic Touch layout and an example laser setup instead of an
+empty app. Since every push to `main` publishes a release, run this
 before pushing and commit whatever it changed:
 
 ```sh
 packaging/sync_default_data.sh   # copies them from the app data dir into backend/
 ```
 
-The same script also copies this rig's `lasers.json` and `settings.json` into
-`packaging/raspberry-pi/rig/`. Those are used only for the Raspberry Pi SD
-card (see "Raspberry Pi (standalone)" below) and never shipped in releases.
-
 `settings.json` holds the central Beam/projector settings (scan rate, max
 rate, output latency, dot dwell/blanking): loaded at startup
 (`load_settings_from_disk()`), written by a small background thread within
-~1 s of any change (`save_settings_if_changed()`). Like `lasers.json` it is
-tuned to this rig's projectors and not shipped.
+~1 s of any change (`save_settings_if_changed()`).
 
-`lasers.json` is intentionally not shipped (it holds this rig's DAC IP
-addresses), and `midi_map.json` isn't synced because the app never writes
-it - edit `backend/midi_map.json` in the repo directly. Existing users are unaffected: seeding only happens for files
+The shipped `lasers.json` holds the maintainer's rig (DAC IP addresses,
+armed state, zones, masks); the daemon always starts blacked out, so an
+armed seeded laser never fires on its own. `midi_map.json` isn't synced
+because the app never writes it - edit `backend/midi_map.json` in the repo
+directly. Existing users are unaffected: seeding only happens for files
 that don't exist in their data directory yet.
 
 This replaced an earlier CWD-relative-path approach that had a real bug:

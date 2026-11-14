@@ -156,7 +156,7 @@ jobs:
           cp backend/laser_daemon "$app/Contents/MacOS/laser_daemon"
           # First-run defaults for new users (maintainer's data, synced via
           # packaging/sync_default_data.sh) - seeded into the user data dir.
-          cp backend/midi_map.json backend/cues.json backend/magic_touch.json "$app/Contents/Resources/"
+          cp backend/midi_map.json backend/cues.json backend/magic_touch.json backend/lasers.json backend/settings.json "$app/Contents/Resources/"
           cp -r frontend/dist "$app/Contents/Resources/frontend_dist"
           chmod +x "$app/Contents/MacOS/BeamCommander3" "$app/Contents/MacOS/laser_daemon"
 
@@ -262,7 +262,7 @@ jobs:
 
           Copy-Item build/laser_daemon.exe $stage/
           # First-run defaults for new users (see packaging/sync_default_data.sh).
-          Copy-Item backend/midi_map.json, backend/cues.json, backend/magic_touch.json $stage/
+          Copy-Item backend/midi_map.json, backend/cues.json, backend/magic_touch.json, backend/lasers.json, backend/settings.json $stage/
           Copy-Item -Recurse frontend/dist $stage/frontend_dist
           Copy-Item packaging/run_windows.bat $stage/run.bat
 

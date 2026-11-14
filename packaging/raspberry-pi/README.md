@@ -26,8 +26,8 @@ The script asks you to type the disk name to confirm the erase, asks for the
 Pi user's password, then:
 
 1. runs `packaging/sync_default_data.sh`, so the card gets the settings
-   currently in use on this Mac: cues and Magic Touch layout (`backend/`) plus
-   this rig's lasers and Beam settings (`rig/lasers.json`, `rig/settings.json`),
+   currently in use on this Mac: cues, Magic Touch layout, lasers and Beam
+   settings (`backend/*.json`),
 2. downloads and verifies the Raspberry Pi OS image (cached in `~/bc3-pi`),
 3. builds `laser_daemon` for armhf in Docker (`build_daemon.sh`, ~10 min
    the first time; `REBUILD=1` forces a rebuild after backend changes) and the
