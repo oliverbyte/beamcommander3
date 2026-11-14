@@ -17,3 +17,6 @@ backend/frontend_dist/
 # Editor / workspace
 .vscode/
 BeamCommander.code-workspace
+
+# Python bytecode
+__pycache__/

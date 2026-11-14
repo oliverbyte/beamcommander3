@@ -69,10 +69,12 @@ cp "$REPO"/backend/{cues,magic_touch,lasers,settings}.json "$STAGE/bc3/data/"
 chmod +x "$STAGE"/bc3/*.sh "$STAGE/bc3/laser_daemon"
 
 # ── Write the card ─────────────────────────────────────────────────────────
-diskutil unmountDisk "/dev/$DISK"
 echo "[pi] writing image to /dev/r$DISK (a few minutes)..."
-sudo dd if="$IMG" of="/dev/r$DISK" bs=4m status=progress
-sync
+# write_image.py instead of dd: macOS remounts the card's partitions mid-write
+# ("Resource busy"); it locks the device, writes the partition table last,
+# retries after unmounting, and verifies the card by reading it back.
+# SUDO_ASKPASS set (e.g. to a password dialog helper): sudo asks through it.
+sudo ${SUDO_ASKPASS:+-A} /usr/bin/python3 -I "$HERE/write_image.py" "$IMG" "$DISK"
 diskutil mountDisk "/dev/$DISK" || true
 BOOT=/Volumes/bootfs
 for _ in $(seq 1 20); do [[ -d "$BOOT" ]] && break; sleep 1; done
