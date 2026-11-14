@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BeamCommander3 — Laser Show Control for Laser Operators</title>
-  <meta name="description" content="BeamCommander3 is a free, open-source laser show controller: live multi-laser preview, phase-offset movement, 128 cues, per-laser zoning, and MIDI control from a web page.">
+  <meta name="description" content="BeamCommander3 is a free, open-source laser show controller: live multi-laser preview, phase-offset movement, 128 cues, per-laser zoning, and MIDI control from a web page. Runs on macOS, Windows and as a standalone Raspberry Pi box.">
   <meta property="og:title" content="BeamCommander3 — Laser Show Control for Laser Operators">
   <meta property="og:description" content="Run a real laser show from any browser: movable per-laser previews, ordered phase-offset movement, 128 saved cues, zoning, and MIDI/foot pedal control. Free & open source.">
   <meta property="og:image" content="img/screenshot-background.png">
@@ -42,7 +42,7 @@
         <span class="badge">🌐 Runs in Any Browser</span>
         <span class="badge">🎛️ Akai APC40 mkII Ready</span>
         <span class="badge">🔌 Multi-Laser &amp; Zoning</span>
-        <span class="badge">🖥️ macOS &amp; Windows</span>
+        <span class="badge">🖥️ macOS, Windows &amp; Raspberry Pi</span>
       </div>
       <p class="experimental-notice">
         🧪 <strong>Experimental project — hobby use only.</strong> Early-stage
@@ -163,6 +163,11 @@
           <h3>Cross-Platform Installers</h3>
           <p>Packaged builds for macOS (.dmg) and Windows (.exe installer) — no compiler or Node.js needed to just run a show.</p>
         </div>
+        <div class="feature-card">
+          <span class="icon">🍓</span>
+          <h3>Standalone Raspberry Pi</h3>
+          <p>Turn a Raspberry Pi (2 Model B or newer) into a dedicated show box: it boots straight into BeamCommander3 with a fixed IP on the laser network, restarts it automatically after a crash or hang, and serves the UI to any phone, tablet or laptop. Your cues, Magic Touch layout, lasers and settings come along on the SD card.</p>
+        </div>
       </div>
     </div>
   </section>
@@ -230,7 +235,7 @@
   <section id="install">
     <div class="container">
       <h2 class="section-title">Get Started</h2>
-      <p class="section-subtitle">No compiler, Node.js, or source checkout needed to just run a show.</p>
+      <p class="section-subtitle">No compiler, Node.js, or source checkout needed to just run a show on macOS or Windows.</p>
       <div class="install-grid">
         <div class="install-card">
           <h3>🍎 macOS</h3>
@@ -246,6 +251,12 @@
           <pre><code>git clone https://github.com/oliverbyte/beamcommander3.git
 cd beamcommander3
 ./start.sh</code></pre>
+        </div>
+        <div class="install-card">
+          <h3>🍓 Raspberry Pi</h3>
+          <p>Write a ready-to-boot SD card from a Mac (needs Docker Desktop and Node.js), put it in the Pi and power it up. Then open <code>http://10.10.10.40:8000</code>. No MIDI on the Pi; a wired network gives the smoothest live preview.</p>
+          <pre><code>packaging/raspberry-pi/make_sdcard.sh disk4</code></pre>
+          <p style="margin-top:0.6rem;"><a href="https://github.com/oliverbyte/beamcommander3/blob/main/packaging/raspberry-pi/README.md" target="_blank" rel="noopener">Raspberry Pi guide →</a></p>
         </div>
       </div>
       <div class="cta-section" style="margin-top:2.5rem;">
