@@ -1,0 +1,8 @@
+#cloud-config
+# BeamCommander3 standalone setup (first boot only).
+hostname: beamcommander
+manage_etc_hosts: true
+timezone: Europe/Berlin
+ssh_pwauth: true
+runcmd:
+  - [bash, -c, "bash /boot/firmware/bc3/install.sh > /boot/firmware/bc3/install.log 2>&1"]

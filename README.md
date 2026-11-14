@@ -130,6 +130,16 @@ compiler, Node.js, or source checkout needed.
    after install.
 3. A browser tab opens automatically at `http://localhost:8000`.
 
+### Raspberry Pi (standalone box)
+
+A Raspberry Pi (2 Model B or newer) can run BeamCommander3 on its own: it
+boots straight into the laser daemon (restarted automatically after a crash)
+and serves the UI at `http://10.10.10.40:8000` to any phone, tablet or laptop
+on the laser network. Write the SD card from a Mac with
+`packaging/raspberry-pi/make_sdcard.sh` (needs Docker); see
+[packaging/raspberry-pi/README.md](packaging/raspberry-pi/README.md). There is
+no MIDI on the Pi.
+
 ### Manual / from source (any OS, or for development)
 
 ```sh

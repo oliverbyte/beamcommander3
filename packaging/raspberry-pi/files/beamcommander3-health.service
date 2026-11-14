@@ -1,0 +1,6 @@
+[Unit]
+Description=BeamCommander3 laser daemon health check
+
+[Service]
+Type=oneshot
+ExecStart=/opt/beamcommander3/beamcommander3-health.sh

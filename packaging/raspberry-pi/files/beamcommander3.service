@@ -1,0 +1,21 @@
+[Unit]
+Description=BeamCommander3 laser daemon
+After=network.target
+# Never give up restarting.
+StartLimitIntervalSec=0
+
+[Service]
+User=beamcommander
+Group=beamcommander
+SupplementaryGroups=plugdev
+WorkingDirectory=/opt/beamcommander3
+# App data (cues, lasers, Magic Touch, settings): /var/lib/beamcommander3/BeamCommander3/
+Environment=XDG_CONFIG_HOME=/var/lib/beamcommander3
+Environment=FRONTEND_DIST=/opt/beamcommander3/frontend_dist
+ExecStart=/opt/beamcommander3/laser_daemon --port 8000
+Restart=always
+RestartSec=2
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

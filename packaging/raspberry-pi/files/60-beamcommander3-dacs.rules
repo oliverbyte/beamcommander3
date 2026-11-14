@@ -1,0 +1,2 @@
+# Helios USB laser DAC: let the laser daemon (group plugdev) open it.
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="e500", MODE="0660", GROUP="plugdev"

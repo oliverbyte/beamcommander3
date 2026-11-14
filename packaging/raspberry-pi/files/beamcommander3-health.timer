@@ -1,0 +1,9 @@
+[Unit]
+Description=Check every 30 s that the BeamCommander3 laser daemon answers
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30s
+
+[Install]
+WantedBy=timers.target

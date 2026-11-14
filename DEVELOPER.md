@@ -139,6 +139,10 @@ before pushing and commit whatever it changed:
 packaging/sync_default_data.sh   # copies them from the app data dir into backend/
 ```
 
+The same script also copies this rig's `lasers.json` and `settings.json` into
+`packaging/raspberry-pi/rig/`. Those are used only for the Raspberry Pi SD
+card (see "Raspberry Pi (standalone)" below) and never shipped in releases.
+
 `settings.json` holds the central Beam/projector settings (scan rate, max
 rate, output latency, dot dwell/blanking): loaded at startup
 (`load_settings_from_disk()`), written by a small background thread within
@@ -217,6 +221,20 @@ To regenerate locally: build the backend and frontend as above, `cd frontend
 && npx playwright install chromium`, start `laser_daemon` pointed at
 `frontend/dist` via `FRONTEND_DIST`, then run
 `BASE_URL=http://localhost:8000 OUT_DIR=../docs/screenshots node scripts/screenshots.mjs`.
+
+## Raspberry Pi (standalone)
+
+`packaging/raspberry-pi/` builds a standalone SD card for a Raspberry Pi 2
+Model B v1.1 (32-bit Raspberry Pi OS Lite, also boots on a Pi 3/4): static IP
+10.10.10.40, `laser_daemon` as a systemd service that starts at boot, restarts
+after crashes and on hangs (health-check timer), and this rig's complete
+data set (cues, Magic Touch layout, lasers, Beam settings). `laser_daemon` is
+cross-built for armhf in an emulated `linux/arm/v7` Debian Trixie container
+(`build_daemon.sh`, CMake like the Windows build, libstdc++ linked
+statically). Everything else is set up on first boot from the boot partition
+(cloud-init `network-config`/`user-data`, `userconf.txt`,
+`files/install.sh`). Usage: `packaging/raspberry-pi/make_sdcard.sh disk4`,
+details in `packaging/raspberry-pi/README.md`.
 
 ## Building for Windows
 
