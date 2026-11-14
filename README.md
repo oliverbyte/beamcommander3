@@ -142,8 +142,7 @@ no MIDI on the Pi.
 
 ### Updating: save and load your settings
 
-Your settings live in one folder, separate from the app, as plain JSON
-files:
+Your settings are plain JSON files in one folder, separate from the app:
 
 | File | Contents |
 |---|---|
@@ -153,48 +152,66 @@ files:
 | `settings.json` | Beam settings (scan rate, output latency, dot timing) |
 | `midi_map.json` | MIDI mapping |
 
-| System | Folder |
-|---|---|
-| macOS | `~/Library/Application Support/BeamCommander3/` (Finder: **Go → Go to Folder…**) |
-| Windows | `%APPDATA%\BeamCommander3\` (paste into the Explorer address bar) |
-| Linux | `~/.config/BeamCommander3/` |
-| Raspberry Pi | `/var/lib/beamcommander3/BeamCommander3/` |
+| System | Settings folder | How to open it |
+|---|---|---|
+| macOS | `~/Library/Application Support/BeamCommander3` | Finder → **Go → Go to Folder…**, paste the path |
+| Windows | `%APPDATA%\BeamCommander3` | paste the path into the File Explorer address bar |
+| Linux | `~/.config/BeamCommander3` (or `$XDG_CONFIG_HOME/BeamCommander3` if set) | file manager: **Ctrl+H** shows the hidden `.config` folder |
+| Raspberry Pi | `/var/lib/beamcommander3/BeamCommander3` (on the Pi) | over the network, see below |
 
-Installing a newer version over the old one keeps this folder untouched, so
-your settings carry over automatically. The built-in example cues/layout
-of a new version are only used for files that don't exist in the folder yet.
+Installing a newer version (or uninstalling the old one first) never touches
+this folder, so your settings carry over automatically. A new version's
+built-in example cues/layout are only used for files that don't exist in the
+folder yet.
 
-**Save (back up) before updating:** quit BeamCommander3, then copy the whole
-`BeamCommander3` folder somewhere safe (e.g. a USB stick).
+How to quit BeamCommander3 (needed before restoring files - the running app
+keeps the settings in memory and would overwrite restored files on the next
+change):
 
-**Load (restore) after updating or on another computer:** quit
-BeamCommander3, copy the saved `.json` files back into the folder (replace
-the existing ones), then start it again. Always quit first - the running
-app keeps its settings in memory and would overwrite restored files on the
-next change.
+- **macOS:** right-click the BeamCommander3 icon in the Dock → **Quit**.
+- **Windows:** close the `laser_daemon` console window (or end
+  `laser_daemon.exe` in Task Manager).
+- **Linux / from source:** press **Ctrl-C** in the terminal running `./start.sh`.
 
-**Get the new version's defaults for one file:** quit, delete that file
-(e.g. `cues.json`), start again - it's recreated from the new version's
-built-in defaults.
+#### On a computer (macOS, Windows, Linux)
 
-**Raspberry Pi:** writing a new SD card erases the Pi's settings, so save
-them first and load them back afterwards (from a Mac/Linux terminal, Pi at
-10.10.10.40):
+- **Save (back up), e.g. before updating:** quit BeamCommander3, copy the
+  whole `BeamCommander3` settings folder somewhere safe (another folder, a USB
+  stick).
+- **Load (restore), after updating or on another computer:** quit
+  BeamCommander3, copy the saved `.json` files into the settings folder
+  (replace the existing ones), start BeamCommander3 again.
+- **Use a new version's defaults for one file:** quit, delete that file
+  (e.g. `cues.json`), start again - it's recreated from the built-in defaults.
+
+#### On a Raspberry Pi
+
+Updating only the app on a running Pi keeps its settings (see
+[packaging/raspberry-pi/README.md](packaging/raspberry-pi/README.md)), but
+writing a new SD card erases them - save them first and load them back
+afterwards. Run these from any computer on the laser network, in a terminal
+(macOS/Linux: Terminal, Windows 10/11: PowerShell or Command Prompt - `ssh`
+and `scp` are built in). Pi at 10.10.10.40, user `bc3`; the commands ask for
+the Pi's password.
+
+Save - copies the Pi's settings folder into a folder `BeamCommander3` in the
+terminal's current folder (your home folder unless you `cd` elsewhere):
 
 ```sh
-# save
-scp 'bc3@10.10.10.40:/var/lib/beamcommander3/BeamCommander3/*.json' ~/bc3-backup/
-# load (after the new card has booted once)
-scp ~/bc3-backup/*.json bc3@10.10.10.40:/tmp/
-ssh bc3@10.10.10.40 'sudo systemctl stop beamcommander3 &&
-  sudo cp /tmp/*.json /var/lib/beamcommander3/BeamCommander3/ &&
-  sudo chown beamcommander: /var/lib/beamcommander3/BeamCommander3/*.json &&
-  sudo systemctl start beamcommander3'
+scp -r bc3@10.10.10.40:/var/lib/beamcommander3/BeamCommander3 .
 ```
 
-(Create `~/bc3-backup` first with `mkdir -p ~/bc3-backup`.) Updating only
-the app on a running Pi keeps its settings, see
-[packaging/raspberry-pi/README.md](packaging/raspberry-pi/README.md).
+Load - from the same folder, after the new card has booted once:
+
+```sh
+scp -r BeamCommander3 bc3@10.10.10.40:/tmp/
+ssh -t bc3@10.10.10.40 "sudo systemctl stop beamcommander3 && sudo cp /tmp/BeamCommander3/*.json /var/lib/beamcommander3/BeamCommander3/ && sudo chown -R beamcommander: /var/lib/beamcommander3 && sudo systemctl start beamcommander3"
+```
+
+If the Pi was set up from scratch, `ssh` first asks to confirm the Pi's new
+host key; after re-flashing a card it may refuse with "REMOTE HOST
+IDENTIFICATION HAS CHANGED" - remove the old key with
+`ssh-keygen -R 10.10.10.40` and try again.
 
 ### Manual / from source (any OS, or for development)
 
