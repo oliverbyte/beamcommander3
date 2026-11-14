@@ -140,6 +140,62 @@ on the laser network. Write the SD card from a Mac with
 [packaging/raspberry-pi/README.md](packaging/raspberry-pi/README.md). There is
 no MIDI on the Pi.
 
+### Updating: save and load your settings
+
+Your settings live in one folder, separate from the app, as plain JSON
+files:
+
+| File | Contents |
+|---|---|
+| `cues.json` | your cues |
+| `magic_touch.json` | your Magic Touch layout |
+| `lasers.json` | your lasers: IP, armed, zones, masks |
+| `settings.json` | Beam settings (scan rate, output latency, dot timing) |
+| `midi_map.json` | MIDI mapping |
+
+| System | Folder |
+|---|---|
+| macOS | `~/Library/Application Support/BeamCommander3/` (Finder: **Go → Go to Folder…**) |
+| Windows | `%APPDATA%\BeamCommander3\` (paste into the Explorer address bar) |
+| Linux | `~/.config/BeamCommander3/` |
+| Raspberry Pi | `/var/lib/beamcommander3/BeamCommander3/` |
+
+Installing a newer version over the old one keeps this folder untouched, so
+your settings carry over automatically. The built-in example cues/layout
+of a new version are only used for files that don't exist in the folder yet.
+
+**Save (back up) before updating:** quit BeamCommander3, then copy the whole
+`BeamCommander3` folder somewhere safe (e.g. a USB stick).
+
+**Load (restore) after updating or on another computer:** quit
+BeamCommander3, copy the saved `.json` files back into the folder (replace
+the existing ones), then start it again. Always quit first - the running
+app keeps its settings in memory and would overwrite restored files on the
+next change.
+
+**Get the new version's defaults for one file:** quit, delete that file
+(e.g. `cues.json`), start again - it's recreated from the new version's
+built-in defaults.
+
+**Raspberry Pi:** writing a new SD card erases the Pi's settings, so save
+them first and load them back afterwards (from a Mac/Linux terminal, Pi at
+10.10.10.40):
+
+```sh
+# save
+scp 'bc3@10.10.10.40:/var/lib/beamcommander3/BeamCommander3/*.json' ~/bc3-backup/
+# load (after the new card has booted once)
+scp ~/bc3-backup/*.json bc3@10.10.10.40:/tmp/
+ssh bc3@10.10.10.40 'sudo systemctl stop beamcommander3 &&
+  sudo cp /tmp/*.json /var/lib/beamcommander3/BeamCommander3/ &&
+  sudo chown beamcommander: /var/lib/beamcommander3/BeamCommander3/*.json &&
+  sudo systemctl start beamcommander3'
+```
+
+(Create `~/bc3-backup` first with `mkdir -p ~/bc3-backup`.) Updating only
+the app on a running Pi keeps its settings, see
+[packaging/raspberry-pi/README.md](packaging/raspberry-pi/README.md).
+
 ### Manual / from source (any OS, or for development)
 
 ```sh
