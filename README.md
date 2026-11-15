@@ -367,6 +367,18 @@ for how the packaged macOS/Windows builds are put together.
    blacked out, and switches off automatically when the panel closes or the
    app restarts. Each laser has its own masks; like the zone they're not
    part of cues and survive a show reset.
+10. **Optional: ILDA test pattern** — the Lasers panel's **Test pattern**
+    section plays the official ILDA Standard Test Pattern (12K or 30K, ILDA's
+    own files from [ilda.com](https://www.ilda.com/technical.htm)) on every
+    *armed* laser instead of the show, for tuning the scanners. As the ILDA
+    standard requires, it runs at exactly 12 or 30 kpps: switching it on sets
+    the scan rate (shown on the Beam page) to that rate, switching it off
+    puts your previous scan rate back - also after a restart, since the saved
+    settings keep it. A pattern faster than the max scan rate can't be started. Scan it
+    small while tuning (**Size**; ILDA: about 8° optical or less for 30K).
+    Blackout, master brightness, zone, mirror and safety masks still apply.
+    Switch it **Off** to get the show back; it's never saved, so a restart
+    always comes back with the show.
 
 ---
 
@@ -472,6 +484,8 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","mirror_y","preview_x","preview_y"}` - setting `armed` to `true` connects + streams this laser's own zone-calibrated output, `false` disconnects/idles it. `mirror_x`/`mirror_y` flip this laser's output horizontally/vertically in hardware and preview (both = rotated 180°, e.g. an upside-down mounted projector). `zone_x`/`zone_y` (-1..1, offset) and `zone_scale_x`/`zone_scale_y` (0.1..2, independent per-axis scale) are this laser's own pan/zoom calibration - set by dragging in the Zoning panel. `preview_x`/`preview_y` (0..1) are its position in the browser preview and do not affect hardware output |
 | `POST /api/lasers/<id>/masks` | Replace this laser's safety masks: `{"masks":[{"x0","y0","x1","y1","reduce","outline"}, ...]}` (complete list, up to 64). Coordinates are the laser's real output range (-1..1, y up, after the zone); `reduce` is 0..100 % of light removed inside; `outline` draws the border in red on the laser (setup aid, never saved). Invalid/non-numeric values → 400 |
 | `DELETE /api/lasers/<id>` | Remove a laser |
+| `GET /api/test-patterns` | The available official ILDA test patterns: `[{"id":"ilda_12k","label":"ILDA 12K","kpps":12}, {"id":"ilda_30k",...}]` |
+| `POST /api/test-pattern` | `{"pattern":"off"\|"ilda_12k"\|"ilda_30k","size":0.05..1}` (either key optional): every armed laser outputs that pattern instead of the show, at exactly its point rate: switching a pattern on sets `rate_kpps` to it, `"off"` restores the previous `rate_kpps`. 400 for an unknown pattern or one faster than `max_rate_kpps`. `GET /api/state` reports `test_pattern` and `test_pattern_size` (runtime only, never saved) |
 | `GET /api/cues` | List all populated cue slots (1-128) |
 | `POST /api/cue/<n>/save` | Snapshot current show params into slot `n` |
 | `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the global `flash_release_ms` setting - see below). The look starts exactly at the rotation angle it was saved at, with its own rotation speed - a previously spinning look doesn't turn it further |

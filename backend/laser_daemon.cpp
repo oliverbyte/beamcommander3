@@ -13,6 +13,7 @@
 #include "output_pipeline.h" // LaserMask + hardware output safety pipeline (unit-tested, see backend/tests/)
 #include "param_smoothing.h" // soft transitions of show parameters (unit-tested, see backend/tests/)
 #include "show_fx.h"         // flicker rate + on time (unit-tested, see backend/tests/)
+#include "test_patterns.h"   // official ILDA test patterns + ILDA file reader (unit-tested, see backend/tests/)
 
 #include <atomic>
 #include <algorithm>
@@ -262,6 +263,23 @@ struct ShowLayer {
 };
 static constexpr std::size_t MAX_SHOW_LAYERS = 8;
 static std::vector<ShowLayer> G_show_layers;
+
+// ── Test pattern ─────────────────────────────────────────────────────────────
+// "off" or a test_patterns.h catalog id (official ILDA 12K/30K test pattern).
+// While set, every *armed* laser outputs the pattern instead of the show
+// (see laser_thread()); unarmed lasers stay dark as always. Switching a
+// pattern on sets the real scan rate (G.rate_kpps) to the pattern's required
+// rate, so the Beam page always shows what the DACs run at; switching it off
+// restores the rate from before (G_rate_before_test_pattern). Meanwhile
+// settings.json keeps that earlier rate, so a crash or quit during a test
+// can't leave the scan rate at the pattern's. Blackout, master brightness, footswitch, mirror, zone and
+// safety masks still apply; flicker, layers and the look don't. Size scales
+// the signal (ILDA: scan the pattern small while tuning). Set from the
+// Lasers panel via POST /api/test-pattern. Runtime only - never saved, so a
+// restart is always back to the show. Guarded by G_mtx.
+static std::string G_test_pattern      = "off";
+static float       G_test_pattern_size = 1.0f;
+static float       G_rate_before_test_pattern = -1.0f; // < 0: no pattern active
 
 // `next` (a cue, a momentary snapshot, the defaults) with the *global* daemon
 // settings taken over from `current`: footswitch fade time, blackout, - for
@@ -876,7 +894,8 @@ static core::Frame make_frame(const LaserState& s, double movement_phase, double
 static std::string frame_to_ws_json(const core::Frame& fr,
                                     const std::vector<std::pair<int, core::Frame>>& laserFrames,
                                     double showTime, float flickerHz, float flickerOnMs,
-                                    const std::vector<std::pair<int, double>>& flickerOffsets) {
+                                    const std::vector<std::pair<int, double>>& flickerOffsets,
+                                    const std::vector<int>& testPatternLasers = {}, float testPatternKpps = 0.0f) {
     std::ostringstream ss;
     ss << std::fixed << std::setprecision(4);
     auto writePoints = [&](const core::Frame& frame) {
@@ -898,6 +917,14 @@ static std::string frame_to_ws_json(const core::Frame& fr,
     for (std::size_t i = 0; i < flickerOffsets.size(); ++i)
         ss << (i ? "," : "") << '\"' << flickerOffsets[i].first << "\":" << std::setprecision(6) << flickerOffsets[i].second << std::setprecision(4);
     ss << "}";
+    // tp = lasers showing a test pattern -> its point rate (kpps): the
+    // preview replays those at that rate and without flicker, like the DAC.
+    if (!testPatternLasers.empty()) {
+        ss << ",\"tp\":{";
+        for (std::size_t i = 0; i < testPatternLasers.size(); ++i)
+            ss << (i ? "," : "") << '\"' << testPatternLasers[i] << "\":" << testPatternKpps;
+        ss << "}";
+    }
     ss << ",\"pts\":";
     writePoints(fr);
     if (!laserFrames.empty()) {
@@ -953,7 +980,9 @@ static std::string state_to_json() {
        << "\"layers\":[";
     for (std::size_t i = 0; i < G_show_layers.size(); ++i) ss << (i ? "," : "") << G_show_layers[i].cue;
     ss << "],"
-       << "\"brightness_gate_open\":" << (g_brightness_gate_open.load()?"true":"false")
+       << "\"brightness_gate_open\":" << (g_brightness_gate_open.load()?"true":"false") << ","
+       << "\"test_pattern\":\"" << G_test_pattern << "\","
+       << "\"test_pattern_size\":" << G_test_pattern_size
        << "}";
     return ss.str();
 }
@@ -1108,10 +1137,14 @@ static void laser_thread() {
         G_time += dt;
         last_tick = now_tp;
 
-        float rate;
+        float rate, maxRate, testPatternSize;
+        std::string testPatternId;
         {
             std::lock_guard<std::mutex> lk(G_mtx);
             rate = G.rate_kpps;
+            maxRate = G.max_rate_kpps;
+            testPatternId = G_test_pattern;
+            testPatternSize = G_test_pattern_size;
 
             // Glide the rendered show parameters towards their targets
             // (snapping the speeds when motion hold/rotation reset asked
@@ -1257,6 +1290,12 @@ static void laser_thread() {
         constexpr auto  DAC_MIN_RECONNECT        = 250ms;
         constexpr auto  DAC_MAX_BACKOFF          = std::chrono::seconds(30);
         constexpr float DAC_MIN_KPPS = 1.0f, DAC_MAX_KPPS = 100.0f;
+        // Test pattern: POST /api/test-pattern set the scan rate to the
+        // pattern's rate. Armed lasers only show it while their DAC really runs
+        // at it (ILDA: +-1%, checked per laser below) and stay dark otherwise -
+        // e.g. if the scan rate or max rate is changed while the pattern runs.
+        const TestPatternInfo* testPattern = find_test_pattern(testPatternId);
+        const bool testPatternRunnable = testPattern && testPattern->kpps <= maxRate;
         const float hwRate = std::clamp(rate, DAC_MIN_KPPS, DAC_MAX_KPPS);
 
         for (const auto& l : lasers_snapshot) {
@@ -1334,6 +1373,14 @@ static void laser_thread() {
         { std::lock_guard<std::mutex> lk(G_mtx); snap = G; layers = G_show_layers; }
         smooth.apply(snap); // render the glided values, not the raw targets
 
+        // The test pattern exactly as in the ILDA file, sized and dimmed
+        // (master brightness) - shared by the preview and every armed laser.
+        std::vector<core::LaserPoint> testPoints;
+        if (testPattern) {
+            testPoints = test_pattern_points(testPattern->id);
+            apply_test_pattern_output(testPoints, testPatternSize, snap.intensity);
+        }
+
         // The main look plus every active cue layer, each with its share of
         // the frame's point budget, joined into one frame per laser
         // (compose_figures). Per-laser offsets: laser i (Lasers-list order,
@@ -1387,6 +1434,7 @@ static void laser_thread() {
             // the single virtual preview laser still honours the gate.
             std::vector<std::pair<int, core::Frame>> previewFrames;
             std::vector<std::pair<int, double>> flickerOffsets;
+            std::vector<int> testPatternLasers;
             previewFrames.reserve(lasers_snapshot.size());
             for (std::size_t li = 0; li < lasers_snapshot.size(); ++li) {
                 const auto& l = lasers_snapshot[li];
@@ -1394,7 +1442,12 @@ static void laser_thread() {
                 const core::Frame* base = &frame;
                 for (const auto& [lid, lf] : laserFrames) if (lid == l.id) { base = &lf; break; }
                 core::Frame pf = *base;
-                HardwareOutputParams pp = hardware_params(&l, snap, l.armed);
+                bool previewAllowed = l.armed;
+                if (testPattern && l.armed) {
+                    pf.points = testPoints; previewAllowed = testPatternRunnable;
+                    testPatternLasers.push_back(l.id);
+                }
+                HardwareOutputParams pp = hardware_params(&l, snap, previewAllowed);
                 pp.blackout = false; // preview ignores blackout (see above)
                 finalize_hardware_frame(pf.points, pp);
                 previewFrames.emplace_back(l.id, std::move(pf));
@@ -1405,7 +1458,8 @@ static void laser_thread() {
                 HardwareOutputParams virt; virt.blackout = false; virt.outputAllowed = true; virt.gateLevel = g_gate_level;
                 finalize_hardware_frame(mainPreview.points, virt);
             }
-            ws_broadcast(frame_to_ws_json(mainPreview, previewFrames, G_time, snap.flicker_hz, snap.flicker_on_ms, flickerOffsets));
+            ws_broadcast(frame_to_ws_json(mainPreview, previewFrames, G_time, snap.flicker_hz, snap.flicker_on_ms, flickerOffsets,
+                                          testPatternLasers, testPattern ? testPattern->kpps : 0.0f));
         }
 
         if (anyHardwareReady) {
@@ -1431,12 +1485,21 @@ static void laser_thread() {
                     if (it != laserFrames.end()) phaseFrame = &it->second;
                 }
                 core::Frame toSend = *phaseFrame;
+                // Test pattern instead of the show: only once this DAC really
+                // runs at the pattern's rate (dark until then), never flickered.
+                const bool showsTestPattern = testPattern && cfg && cfg->armed;
+                bool outputAllowed = cfg && cfg->armed && rt.output_armed;
+                if (showsTestPattern) {
+                    toSend.points = testPoints;
+                    outputAllowed = outputAllowed && testPatternRunnable &&
+                                    test_pattern_rate_ok(rt.connected_rate, testPattern->kpps);
+                }
                 // Flicker, per point by playback time: pad the frame so the
                 // DAC plays it once instead of looping it until the next one
                 // arrives, then blank the points that fall into an "off"
                 // phase of the continuous timeline (see show_fx.h).
                 const double pointRateHz = std::max(1.0f, rt.connected_rate) * 1000.0;
-                const bool flickering = snap.flicker_hz > 0.0f;
+                const bool flickering = snap.flicker_hz > 0.0f && !showsTestPattern;
                 if (flickering) {
                     pad_frame_to_duration(toSend.points, pointRateHz, kFlickerMinFrameSeconds, kFlickerMaxFramePoints);
                     // Flicker phase: this laser runs its flicker that much later.
@@ -1452,8 +1515,7 @@ static void laser_thread() {
                 // Only an armed laser may emit light - checked here too,
                 // independent of the connection handling above and of
                 // libera's own blanking.
-                finalize_hardware_frame(toSend.points,
-                                        hardware_params(cfg, snap, cfg && cfg->armed && rt.output_armed));
+                finalize_hardware_frame(toSend.points, hardware_params(cfg, snap, outputAllowed));
                 if (flickering) rt.flicker.advance(toSend.points.size(), pointRateHz);
                 rt.ctrl->sendFrame(std::move(toSend));
             }
@@ -1627,7 +1689,13 @@ static void load_settings_from_disk() {
 }
 static void save_settings_if_changed() {
     std::string now;
-    { std::lock_guard<std::mutex> lk(G_mtx); now = beam_settings_json(G); }
+    {
+        std::lock_guard<std::mutex> lk(G_mtx);
+        LaserState s = G;
+        // A test pattern only borrows the scan rate (see G_test_pattern).
+        if (G_rate_before_test_pattern >= 0.0f) s.rate_kpps = G_rate_before_test_pattern;
+        now = beam_settings_json(s);
+    }
     if (now == G_settings_saved) return;
     std::ofstream f(SETTINGS_FILE, std::ios::trunc);
     if (f) { f << now; G_settings_saved = now; }
@@ -3042,6 +3110,54 @@ int main(int argc, char* argv[]) {
         res.set_content(state_to_json(),"application/json");
     });
 
+    // ── Test patterns (test_patterns.h) ─────────────────────────────────────────
+    // GET lists the official patterns; POST {"pattern":"off"|<id>, "size":0.05..1}
+    // switches armed lasers to a pattern (either key optional). A pattern
+    // that needs a higher point rate than the max scan rate is refused.
+    svr.Get("/api/test-patterns",[](const httplib::Request&,httplib::Response& res){
+        std::ostringstream ss; ss << "[";
+        const auto& c = test_pattern_catalog();
+        for (std::size_t i = 0; i < c.size(); ++i)
+            ss << (i ? "," : "") << "{\"id\":\"" << c[i].id << "\",\"label\":\"" << c[i].label
+               << "\",\"kpps\":" << c[i].kpps << "}";
+        ss << "]";
+        res.set_content(ss.str(),"application/json");
+    });
+    svr.Post("/api/test-pattern",[](const httplib::Request& req,httplib::Response& res){
+        const std::string pattern = json_str(req.body, "pattern");
+        const float size = json_float(req.body, "size", -1.0f);
+        const TestPatternInfo* tp = pattern.empty() || pattern == "off" ? nullptr : find_test_pattern(pattern);
+        if (!pattern.empty() && pattern != "off" && !tp) {
+            res.status=400; res.set_content("{\"error\":\"unknown test pattern\"}","application/json"); return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(G_mtx);
+            if (tp && tp->kpps > G.max_rate_kpps) {
+                std::ostringstream ss;
+                ss << "{\"error\":\"" << tp->label << " needs " << tp->kpps << " kpps, max scan rate is "
+                   << G.max_rate_kpps << " kpps\"}";
+                res.status=400; res.set_content(ss.str(),"application/json"); return;
+            }
+            if (!pattern.empty()) {
+                // Scan rate follows the pattern (Beam page shows the real
+                // value); switching off - not from one pattern to the other -
+                // restores the rate from before the first pattern.
+                const bool wasActive = G_rate_before_test_pattern >= 0.0f;
+                if (tp) {
+                    if (!wasActive) G_rate_before_test_pattern = G.rate_kpps;
+                    G.rate_kpps = tp->kpps;
+                    G_test_pattern = tp->id;
+                } else {
+                    if (wasActive) G.rate_kpps = std::clamp(G_rate_before_test_pattern, 0.0f, G.max_rate_kpps);
+                    G_rate_before_test_pattern = -1.0f;
+                    G_test_pattern = "off";
+                }
+            }
+            if (size >= 0.0f && std::isfinite(size)) G_test_pattern_size = std::clamp(size, kTestPatternMinSize, 1.0f);
+        }
+        res.set_content(state_to_json(),"application/json");
+    });
+
     // ── GET /api/lasers — list every configured laser (DAC) ─────────────────────
     svr.Get("/api/lasers",[](const httplib::Request&,httplib::Response& res){
         std::vector<LaserConfig> snapshot;
@@ -3288,6 +3404,7 @@ int main(int argc, char* argv[]) {
               << "  POST /blackout/<0|1>  /flash/<0|1>  /mirror/x/<0|1>  /motion/hold/<0|1>\n"
               << "  POST /brightness/gate/<0|1>  /rotation/reset\n"
               << "  GET /api/lasers   POST /api/lasers   POST /api/lasers/<id>   POST /api/lasers/<id>/masks   DELETE /api/lasers/<id>\n"
+              << "  GET /api/test-patterns   POST /api/test-pattern   (ILDA test patterns on armed lasers)\n"
               << "  GET/POST /api/magic-touch   (shared Magic Touch layout)\n"
               << "  WS   /ws/points\n"
               << "  MIDI: optional, see backend/midi_map.json (Akai APC40 mkII or any USB controller)\n";

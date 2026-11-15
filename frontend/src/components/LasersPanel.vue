@@ -70,6 +70,39 @@
       </div>
       <button class="add-btn" :disabled="!newIp" @click="onAdd">+ Add laser</button>
       <p class="error" v-if="error">{{ error }}</p>
+
+      <hr />
+      <h2>Test pattern</h2>
+      <p class="hint">Official ILDA Standard Test Pattern (ILDA's own files)
+        for scanner tuning. Every armed laser shows it instead of the show, at
+        exactly the point rate the standard requires: the scan rate (Beam) is
+        set to 12 or 30 kpps while it's on and restored when it's switched
+        off. Scan it small while tuning (30K: about 8° optical or less).
+        Blackout, master brightness, zone and safety masks still apply.</p>
+      <div class="tp-buttons">
+        <button
+          class="tp-btn"
+          :class="{ active: laserState.test_pattern === 'off' }"
+          @click="selectTestPattern('off')"
+        >Off</button>
+        <button
+          v-for="t in testPatterns"
+          :key="t.id"
+          class="tp-btn"
+          :class="{ active: laserState.test_pattern === t.id }"
+          :disabled="t.kpps > laserState.max_rate_kpps"
+          :title="t.kpps > laserState.max_rate_kpps
+            ? `Needs ${t.kpps} kpps - above the max scan rate (${laserState.max_rate_kpps} kpps)`
+            : `Show ${t.label} on all armed lasers at ${t.kpps} kpps`"
+          @click="selectTestPattern(t.id)"
+        >{{ t.label }}</button>
+      </div>
+      <label class="tp-size">
+        <span>Size</span>
+        <input type="range" min="5" max="100" step="1" :value="sizePercent" @input="onSize($event.target.value)" />
+        <span class="tp-size-value">{{ sizePercent }}%</span>
+      </label>
+      <p v-if="testPatternStatus" class="tp-status" :class="{ warn: testPatternWarn }">{{ testPatternStatus }}</p>
     </div>
   </div>
 </template>
@@ -85,8 +118,11 @@
 // same Zone 1 show to all of them in parallel (not sequentially), so
 // arming more lasers never adds lag to the ones already streaming. Each
 // laser's own pan/zoom calibration is set separately, in the Zoning panel.
-import { ref, onMounted } from 'vue'
-import { lasers, fetchLasers, addLaser, updateLaser, deleteLaser, reorderLasers } from '../composables/useLaserSocket.js'
+import { ref, computed, onMounted } from 'vue'
+import {
+  lasers, fetchLasers, addLaser, updateLaser, deleteLaser, reorderLasers,
+  laserState, testPatterns, fetchTestPatterns, setTestPattern,
+} from '../composables/useLaserSocket.js'
 
 const { popout } = defineProps({ popout: { type: Boolean, default: false } })
 
@@ -96,7 +132,44 @@ const error = ref(null)
 const draggedId = ref(null)
 const dropTargetId = ref(null)
 
-onMounted(() => { fetchLasers().catch(() => {}) })
+onMounted(() => {
+  fetchLasers().catch(() => {})
+  fetchTestPatterns().catch(() => {})
+})
+
+// ── Test pattern (see backend/test_patterns.h) ────────────────────────────
+const sizePercent = computed(() => Math.round((laserState.test_pattern_size ?? 1) * 100))
+const activePattern = computed(() => testPatterns.find((t) => t.id === laserState.test_pattern))
+const armedCount = computed(() => lasers.filter((l) => l.armed).length)
+// ILDA: the pattern only works within +-1% of its rate - the daemon keeps lasers dark otherwise.
+const rateMismatch = computed(() => {
+  const t = activePattern.value
+  return !!t && Math.abs(laserState.rate_kpps - t.kpps) > t.kpps * 0.01
+})
+const testPatternWarn = computed(() => !!activePattern.value && (laserState.blackout || armedCount.value === 0 || rateMismatch.value))
+const testPatternStatus = computed(() => {
+  const t = activePattern.value
+  if (!t) return ''
+  if (armedCount.value === 0) return `${t.label} is active, but no laser is armed.`
+  if (rateMismatch.value) return `${t.label} needs ${t.kpps} kpps, but the scan rate is ${laserState.rate_kpps} kpps - lasers stay dark. Select ${t.label} again to reset the rate.`
+  if (laserState.blackout) return `${t.label} is active - blackout is on, nothing is output.`
+  return `${t.label} on ${armedCount.value} armed laser${armedCount.value === 1 ? '' : 's'} at ${t.kpps} kpps.`
+})
+
+async function selectTestPattern(id) {
+  try { await setTestPattern({ pattern: id }); error.value = null } catch (e) { error.value = String(e.message || e) }
+}
+
+// The slider updates locally right away; the daemon gets at most one request per 60 ms.
+let sizeTimer = null
+function onSize(percent) {
+  laserState.test_pattern_size = Number(percent) / 100
+  clearTimeout(sizeTimer)
+  sizeTimer = setTimeout(async () => {
+    try { await setTestPattern({ size: laserState.test_pattern_size }); error.value = null }
+    catch (e) { error.value = String(e.message || e) }
+  }, 60)
+}
 
 async function onAdd() {
   if (!newIp.value) return
@@ -203,6 +276,15 @@ button:disabled { opacity:0.5; cursor:default; }
 .mirror-btn { flex-shrink:0; padding:4px 7px; }
 .mirror-btn.active { background:rgba(120,170,255,0.18); border-color:#78aaff; color:#78aaff; }
 .del-btn { flex-shrink:0; padding:4px 7px; color:#ff8080; border-color:rgba(255,100,100,0.35); }
+
+.tp-buttons { display:flex; gap:5px; margin-bottom:8px; }
+.tp-btn { flex:1 1 0; padding:6px 4px; }
+.tp-btn.active { background:rgba(255,200,60,0.18); border-color:#ffc83c; color:#ffc83c; }
+.tp-size { display:flex; align-items:center; gap:8px; font-size:11px; color:#9aa0bd; margin-bottom:6px; }
+.tp-size input { flex:1; min-width:0; }
+.tp-size-value { width:34px; text-align:right; font-variant-numeric:tabular-nums; }
+.tp-status { font-size:11px; color:#ffc83c; margin:2px 0 4px; }
+.tp-status.warn { color:#ff8080; }
 
 .row { margin-bottom:6px; }
 .row input { width:100%; box-sizing:border-box; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15); color:#cfd3e6; border-radius:4px; padding:6px 8px; font-size:12px; }

@@ -8,6 +8,10 @@ backend/
   output_pipeline.h  Hardware output safety pipeline: blackout/arm gate, zone, safety masks
   param_smoothing.h  Soft transitions of show parameters (scale, speeds, move size, ...)
   show_fx.h          Flicker rate + on time
+  ilda_file.h        ILDA file reader (all formats of the ILDA IDTF spec, rev. 011)
+  test_patterns.h    Official ILDA 12K/30K test patterns (played from ILDA's files)
+  test_patterns/     The original ILDA files (TEST_12K.ILD, TEST_30K.ILD)
+  ilda_test_pattern_data.h  Generated: those files embedded byte for byte
   json_lite.h        Tiny JSON field readers shared by the daemon and the tests
   tests/             Backend unit tests, run before every push (.githooks/pre-push)
   httplib.h          Vendored header-only HTTP/WebSocket server (yhirose/cpp-httplib)
@@ -164,6 +168,36 @@ state and its own zone_x/zone_y/zone_scale_x/zone_scale_y pan/zoom
 calibration - see "Lasers (multi-DAC output)" below) lives in the same
 per-user app-data directory and is seeded/resolved the same way, via
 `load_lasers_from_disk()`/`save_lasers_to_disk()`.
+
+## ILDA files and test patterns
+
+`ilda_file.h` reads ILDA Image Data Transfer Format files exactly per the
+official spec (Revision 011, 2014): formats 0/1/4/5 (indexed/true color, 2D/3D),
+format 2 palettes (per projector), the spec's default 64-color palette for
+files without one, multi-frame files, blanking bit before color. Points are
+never resampled - ILDA data are samples for the scanners. It's generic, so
+playing arbitrary ILDA files later can build on it.
+
+The Lasers panel's test patterns are ILDA's own `TEST_12K.ILD`/`TEST_30K.ILD`
+(from the "ILDA format files" zip on https://www.ilda.com/technical.htm),
+kept unmodified in `backend/test_patterns/` and embedded via the generated
+`ilda_test_pattern_data.h` (regeneration command in its header), so every
+build has them without locating extra files; `tests/test_ilda_file.cpp`
+checks the embedded bytes still equal the files. While a pattern is active
+(`G_test_pattern`, runtime only), `laser_thread()` gives every *armed* laser
+the pattern instead of the show. The ILDA tuning procedure requires
+12,000/30,000 pps +-1%: `POST /api/test-pattern` sets the real scan rate
+(`G.rate_kpps`, so the Beam page always shows what the DACs run at) and
+restores the earlier one (`G_rate_before_test_pattern`) on "off";
+`save_settings_if_changed()` keeps writing that earlier rate meanwhile, so a
+quit during a test can't leave the scan rate at the pattern's. A laser stays
+dark until its DAC actually runs at the pattern's rate
+(`test_pattern_rate_ok()`), e.g. if the rate is changed during the test.
+Size and master brightness are applied first (`apply_test_pattern_output()`),
+then the normal `finalize_hardware_frame()` (blackout/arm gate, footswitch,
+mirror, zone, masks); flicker and layers are skipped. The WS preview gets
+`tp: {laserId: kpps}` so it replays those lasers at the pattern's rate
+without flicker.
 
 ## Standalone / packaged builds
 

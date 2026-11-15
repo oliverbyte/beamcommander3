@@ -338,11 +338,13 @@ const MAX_EMIT_PER_TICK = 4000  // safety cap (e.g. tab was backgrounded)
 const clockSync = createClockSync()
 let flicker = [0, 0] // [rate Hz, on time ms]
 let flickerOffsets = {} // laser id -> seconds (flicker phase per laser)
+let testPatternRates = {} // laser id -> kpps, for armed lasers showing an ILDA test pattern
 
 function handleIncomingPoints(msg) {
   if (Number.isFinite(msg.t)) clockSync.update(msg.t, performance.now() / 1000)
   if (Array.isArray(msg.fl)) flicker = msg.fl
   flickerOffsets = msg.flo || {}
+  testPatternRates = msg.tp || {}
   for (const [id, stream] of laserStreams) {
     stream.currentFrame = msg.laser_pts?.[id] || msg.pts || []
   }
@@ -392,7 +394,9 @@ function emitScanPoints(now) {
 
 function emitLaserScan(stream, now) {
   if (stream.currentFrame.length === 0) return
-  const pointRateHz = Math.max(1, laserState.rate_kpps * 1000)
+  // A test pattern runs at its own fixed rate (ILDA 12K/30K), never flickered.
+  const testPatternKpps = testPatternRates[stream.id]
+  const pointRateHz = Math.max(1, (testPatternKpps || laserState.rate_kpps) * 1000)
   const period = 1 / pointRateHz
 
   let n = Math.floor((now - stream.lastEmitTime) / period)
@@ -415,7 +419,7 @@ function emitLaserScan(stream, now) {
     // Daemon sends 0..1 floats; simulation sends 0..255 integers.
     const scale = (r > 1 || g > 1 || b > 1) ? 1 / 255 : 1
     let cr = r * scale, cg = g * scale, cb = b * scale
-    if (flicker[0] > 0 && !flickerIsLit(clockSync.toServer(t) + (flickerOffsets[stream.id] || 0), flicker[0], flicker[1])) cr = cg = cb = 0
+    if (!testPatternKpps && flicker[0] > 0 && !flickerIsLit(clockSync.toServer(t) + (flickerOffsets[stream.id] || 0), flicker[0], flicker[1])) cr = cg = cb = 0
     // Point colors already carry master brightness, gate/flash and masks
     // (the daemon sends the real output), so no extra intensity factor here.
     const fanBrightness = Math.min(1, Math.max(0.01, 5 / frame.length))

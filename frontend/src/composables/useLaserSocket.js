@@ -50,6 +50,10 @@ export const laserState = reactive({
   // active safety default. Hardware output stays forced dark only if this
   // is explicitly closed (rigs with a physical footswitch) or blackout is on.
   brightness_gate_open: true,
+  // ILDA test pattern on every armed laser ('off' or an id from
+  // GET /api/test-patterns) and its size (0.05..1) - runtime only.
+  test_pattern:    'off',
+  test_pattern_size: 1.0,
   // UI-only
   wsConnected:     false,
   error:           null,
@@ -257,6 +261,31 @@ export async function reorderLasers(ids) {
     await fetchLasers().catch(() => {})
     throw error
   }
+}
+
+// ── Test patterns ────────────────────────────────────────────────────────────
+// The official ILDA test patterns the daemon can output ({id, label, kpps},
+// see backend/test_patterns.h). While one is active, every armed laser shows
+// it instead of the show, at exactly `kpps` (the ILDA standard requires it).
+export const testPatterns = reactive([])
+
+export async function fetchTestPatterns() {
+  testPatterns.splice(0, testPatterns.length, ...(await api('/test-patterns')))
+}
+
+// partial: { pattern: 'off' | <id> } and/or { size: 0.05..1 }. Rejected by
+// the daemon if the pattern needs more than the max scan rate.
+export async function setTestPattern(partial) {
+  markLocalChange()
+  const seq = nextStateSeq()
+  const res = await fetch('/api/test-pattern', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(partial),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `/api/test-pattern → ${res.status}`)
+  applyStateIfCurrent(seq, data)
 }
 
 // Momentary flash: forces color to white *and* full brightness only while
