@@ -3,7 +3,7 @@
 //       POST /laser/connect/<ip>  POST /laser/disconnect
 //       GET /api/cues  POST /api/cue/<n>/save|recall|clear
 //       WS   /ws/points
-import { reactive } from 'vue'
+import { reactive, watch } from 'vue'
 
 export const laserState = reactive({
   // Shape
@@ -54,6 +54,12 @@ export const laserState = reactive({
   // active safety default. Hardware output stays forced dark only if this
   // is explicitly closed (rigs with a physical footswitch) or blackout is on.
   brightness_gate_open: true,
+  // Every laser's own look (laser id -> look fields, "0" = the virtual
+  // preview laser while no laser is configured) - see GET /api/state. The
+  // look fields above always show the look of the first laser in this
+  // browser's selection (projectSelection()), so every control displays and
+  // edits "the selected lasers" without knowing about selections itself.
+  looks: {},
   // ILDA test pattern on every armed laser ('off' or an id from
   // GET /api/test-patterns) and its size (0.05..1) - runtime only.
   test_pattern:    'off',
@@ -127,6 +133,7 @@ async function laser(path, options = {}) {
 function applyState(s) {
   if (!s) return
   Object.assign(laserState, s)
+  projectSelection()
 }
 
 // Guards against out-of-order network responses: if two state-mutating
@@ -159,7 +166,93 @@ function applyPolledState(s) {
   if (!s) return
   if (Date.now() - lastLocalChangeAt < 700) return
   Object.assign(laserState, s)
+  projectSelection()
 }
+
+// ── Laser selection (per browser) ──────────────────────────────────────────────
+// Which lasers the look controls, cues and Magic Touch act on - kept in this
+// browser only (localStorage), never on the daemon, so operators on
+// different devices don't change each other's selection. Empty = all
+// lasers. Every look change and cue action sends it as `lasers`; the daemon
+// then changes only those lasers' looks (see request_lasers() in
+// laser_daemon.cpp).
+const SELECTION_KEY = 'bc3.laserSelection'
+function loadSelection() {
+  try {
+    const ids = JSON.parse(localStorage.getItem(SELECTION_KEY))
+    return Array.isArray(ids) ? ids.filter(Number.isInteger) : []
+  } catch (_) { return [] }
+}
+export const laserSelection = reactive({ ids: loadSelection() })
+
+// Selected lasers that still exist, in Lasers-list order ([] = all).
+export function selectedLaserIds() {
+  const chosen = new Set(laserSelection.ids)
+  return lasers.filter((l) => chosen.has(l.id)).map((l) => l.id)
+}
+export function setLaserSelection(ids) {
+  laserSelection.ids = [...ids]
+  try { localStorage.setItem(SELECTION_KEY, JSON.stringify(laserSelection.ids)) } catch (_) {}
+  projectSelection()
+}
+export function toggleLaserSelected(id) {
+  const ids = selectedLaserIds()
+  setLaserSelection(ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id])
+}
+// The looks the controls show and change: the selection, else every laser
+// (or the virtual preview look without lasers).
+export function targetLookIds() {
+  const selected = selectedLaserIds()
+  if (selected.length) return selected
+  return lasers.length ? lasers.map((l) => l.id) : [0]
+}
+// `lasers` for a request: the selection, or null = all lasers.
+function selectionTargets() {
+  const selected = selectedLaserIds()
+  return selected.length ? selected : null
+}
+function withLasers(path) {
+  const targets = selectionTargets()
+  return targets ? `${path}${path.includes('?') ? '&' : '?'}lasers=${targets.join(',')}` : path
+}
+
+// Fields of a laser's look (GET /api/state "looks").
+export const LOOK_FIELDS = [
+  'shape', 'ilda_file', 'ilda_name', 'ilda_fps', 'radius', 'points', 'r', 'g', 'b', 'shape_scale',
+  'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed', 'move_size', 'move_phase_degrees',
+  'wave_frequency', 'wave_amplitude', 'wave_speed', 'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees',
+  'dot_amount', 'flicker_hz', 'flicker_on_ms', 'flicker_phase_degrees', 'layers',
+]
+const LOOK_FIELD_SET = new Set(LOOK_FIELDS)
+// Shows the first targeted laser's look in the top-level fields.
+function projectSelection() {
+  const look = laserState.looks?.[targetLookIds()[0]]
+  if (!look) return
+  for (const key of LOOK_FIELDS) if (key in look) laserState[key] = look[key]
+}
+// Local echo of a look change on every targeted laser, so "mixed" marks and
+// the projection agree with the change before the daemon answers.
+function patchLocalLooks(partial) {
+  const lookPart = Object.fromEntries(Object.entries(partial).filter(([k]) => LOOK_FIELD_SET.has(k)))
+  if (!Object.keys(lookPart).length || !laserState.looks) return
+  for (const id of targetLookIds()) if (laserState.looks[id]) Object.assign(laserState.looks[id], lookPart)
+}
+function sameValue(a, b) {
+  if (typeof a === 'number' && typeof b === 'number') return Math.abs(a - b) <= 0.00011
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => v === b[i])
+  return a === b
+}
+// True when the targeted lasers' looks differ in `key` (the control then
+// shows the first laser's value and is marked "mixed").
+export function isLookMixed(key) {
+  const values = targetLookIds().map((id) => laserState.looks?.[id]?.[key]).filter((v) => v !== undefined)
+  return values.some((v) => !sameValue(v, values[0]))
+}
+// Every value `key` has across the targeted lasers (e.g. all their shapes).
+export function lookValues(key) {
+  return new Set(targetLookIds().map((id) => laserState.looks?.[id]?.[key]).filter((v) => v !== undefined))
+}
+watch(() => [laserSelection.ids.join(','), lasers.map((l) => l.id).join(',')], projectSelection)
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
@@ -167,21 +260,28 @@ export async function fetchState() {
   applyState(await api('/state'))
 }
 
+// Global settings change for everyone; look fields only on the selected
+// lasers (the daemon sorts the keys).
 export async function updateState(partial) {
   markLocalChange()
+  patchLocalLooks(partial)
   const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await api('/state', { method: 'POST', body: JSON.stringify(partial) }))
+  const targets = selectionTargets()
+  const body = targets ? { ...partial, lasers: targets } : partial
+  applyStateIfCurrent(seq, await api('/state', { method: 'POST', body: JSON.stringify(body) }))
 }
 
+// Resets the selected lasers' looks (all lasers: also master brightness).
 export async function resetState() {
   markLocalChange()
   const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await api('/reset', { method: 'POST' }))
+  applyStateIfCurrent(seq, await api(withLasers('/reset'), { method: 'POST' }))
 }
 
 export async function setShape(shape) {
   markLocalChange()
-  await laser(`/shape/${shape}`, { method: 'POST' })
+  patchLocalLooks({ shape })
+  await laser(withLasers(`/shape/${shape}`), { method: 'POST' })
   laserState.shape = shape
 }
 
@@ -323,7 +423,7 @@ export async function rotationReset() {
   markLocalChange()
   laserState.rotation_speed = 0
   const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await (await fetch('/rotation/reset', { method: 'POST' })).json())
+  applyStateIfCurrent(seq, await (await fetch(withLasers('/rotation/reset'), { method: 'POST' })).json())
 }
 
 // ── Cue save/recall ─────────────────────────────────────────────────────────────
@@ -338,14 +438,14 @@ export async function fetchCues() {
 }
 
 export async function saveCue(n) {
-  await api(`/cue/${n}/save`, { method: 'POST' })
+  await api(withLasers(`/cue/${n}/save`), { method: 'POST' })
   await fetchCues()
 }
 
 export async function recallCue(n) {
   markLocalChange()
   const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await api(`/cue/${n}/recall`, { method: 'POST' }))
+  applyStateIfCurrent(seq, await api(withLasers(`/cue/${n}/recall`), { method: 'POST' }))
 }
 
 // Fields a cue stores (the look, incl. dots and flicker). The Beam page's
@@ -359,17 +459,16 @@ const CUE_STATE_FIELDS = [
   'dot_amount', 'flicker_hz', 'flicker_on_ms', 'flicker_phase_degrees',
 ]
 
-// True when cue slot n is populated and every saved field equals the live state.
+// True when recalling cue n onto the selected lasers would change nothing:
+// every selected laser already shows the cue's look for it (its own saved
+// look, or the cue's main look - see CueData in laser_daemon.cpp).
 export function isCueCurrent(n) {
   const cue = cues[n]
   if (!cue) return false
-  return CUE_STATE_FIELDS.every((field) => {
-    const saved = cue[field]
-    const current = laserState[field]
-    if (typeof saved === 'number' && typeof current === 'number') {
-      return Math.abs(saved - current) <= 0.00011
-    }
-    return saved === current
+  return targetLookIds().every((id) => {
+    const current = laserState.looks?.[id] || laserState
+    const saved = cue.lasers?.[id] || cue
+    return CUE_STATE_FIELDS.every((field) => sameValue(saved[field], current[field]))
   })
 }
 
@@ -388,7 +487,8 @@ function momentaryRequest(n, on) {
   const run = async () => {
     markLocalChange()
     const seq = nextStateSeq()
-    applyStateIfCurrent(seq, await api(`/cue/${n}/momentary/${on ? 1 : 0}`, { method: 'POST' }))
+    const path = `/cue/${n}/momentary/${on ? 1 : 0}`
+    applyStateIfCurrent(seq, await api(on ? withLasers(path) : path, { method: 'POST' }))
   }
   const next = momentaryChain.then(run)
   momentaryChain = next.catch(() => {})
@@ -412,12 +512,12 @@ export function momentaryCueRelease(n) {
 export async function setCueLayer(n, mode) {
   markLocalChange()
   const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await api(`/cue/${n}/layer/${mode}`, { method: 'POST' }))
+  applyStateIfCurrent(seq, await api(withLasers(`/cue/${n}/layer/${mode}`), { method: 'POST' }))
 }
 export async function clearLayers() {
   markLocalChange()
   const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await api('/layers/clear', { method: 'POST' }))
+  applyStateIfCurrent(seq, await api(withLasers('/layers/clear'), { method: 'POST' }))
 }
 
 // Drag & drop of an ILDA file onto a cue slot: the daemon checks and stores
@@ -426,7 +526,7 @@ export async function clearLayers() {
 export async function uploadIldaCue(n, file) {
   markLocalChange()
   const seq = nextStateSeq()
-  const res = await fetch(`/api/cue/${n}/ilda?name=${encodeURIComponent(file.name)}`, {
+  const res = await fetch(withLasers(`/api/cue/${n}/ilda?name=${encodeURIComponent(file.name)}`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },
     body: file,

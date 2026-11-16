@@ -6,7 +6,7 @@
       :key="entry.id"
       type="button"
       class="laser-marker"
-      :class="{ 'is-armed': entry.armed, 'is-connected': entry.connected }"
+      :class="{ 'is-armed': entry.armed, 'is-connected': entry.connected, 'is-selected': selectedIds.includes(entry.id) }"
       :style="positionStyle(entry)"
       :title="`Drag to arrange ${entry.name}`"
       @pointerdown="startLaserDrag($event, entry)"
@@ -19,10 +19,12 @@
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import { fetchLasers, lasers, laserState, onPoints, patchLaserLocal, updateLaser } from '../composables/useLaserSocket.js'
+import { fetchLasers, lasers, laserSelection, laserState, onPoints, patchLaserLocal, selectedLaserIds, updateLaser } from '../composables/useLaserSocket.js'
+// Lasers selected in this browser (look controls act on them) - highlighted on the preview markers.
+const selectedIds = computed(() => (laserSelection.ids.length, selectedLaserIds()))
 import { createClockSync, flickerIsLit } from './showFx.js'
 
 const props = defineProps({
@@ -666,6 +668,7 @@ onBeforeUnmount(() => {
   border-color: #48e07a;
 }
 .laser-marker.is-armed .laser-marker-name { color: #48e07a; }
+.laser-marker.is-selected { outline: 2px solid #65e6a5; outline-offset: 2px; }
 .laser-marker.is-connected .laser-marker-status {
   background: #48e07a;
   box-shadow: 0 0 9px rgba(72, 224, 122, 0.7);
