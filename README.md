@@ -22,20 +22,20 @@ curious how it's built, or want to modify it, the rest of this file and
 ## Screenshots
 
 <p align="center">
-   <img src="docs/screenshots/screenshot-background.png" alt="Three laser sources rendering a saved test cue in the live preview" width="820">
+   <img src="https://oliverbyte.github.io/beamcommander3/img/screenshot-background.png" alt="Three laser sources rendering a saved test cue in the live preview" width="820">
 </p>
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/screenshot-settings.png" alt="Shapes view with labeled icons and touch-friendly faders"></td>
-<td width="50%"><img src="docs/screenshots/screenshot-cues.png" alt="Cues panel"></td>
+<td width="50%"><img src="https://oliverbyte.github.io/beamcommander3/img/screenshot-settings.png" alt="Shapes view with labeled icons and touch-friendly faders"></td>
+<td width="50%"><img src="https://oliverbyte.github.io/beamcommander3/img/screenshot-cues.png" alt="Cues panel"></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/screenshots/screenshot-zoning.png" alt="Zoning panel"></td>
-<td width="50%"><img src="docs/screenshots/screenshot-lasers.png" alt="Lasers panel"></td>
+<td width="50%"><img src="https://oliverbyte.github.io/beamcommander3/img/screenshot-zoning.png" alt="Zoning panel"></td>
+<td width="50%"><img src="https://oliverbyte.github.io/beamcommander3/img/screenshot-lasers.png" alt="Lasers panel"></td>
 </tr>
 <tr>
-<td colspan="2" align="center"><img src="docs/screenshots/screenshot-magictouch.png" alt="Magic Touch: a custom live control surface" width="50%"></td>
+<td colspan="2" align="center"><img src="https://oliverbyte.github.io/beamcommander3/img/screenshot-magictouch.png" alt="Magic Touch: a custom live control surface" width="50%"></td>
 </tr>
 </table>
 

@@ -254,35 +254,37 @@ on the target machine), and ships a `.dmg` with a drag-to-Applications
 shortcut. See `packaging/launcher.sh` and `packaging/Info.plist.template`
 for the app bundle's launcher script and metadata.
 
-## README screenshots
+## Screenshots
 
-The screenshots in [README.md](README.md#screenshots) (`docs/screenshots/*.png`)
-are generated, not hand-captured, and committed straight into the repo so
-they render even when README.md is viewed offline/from a clone. Regenerated
-automatically by the `build-macos` job of `.github/workflows/release.yml`
-on every push to `main`:
+The screenshots in [README.md](README.md#screenshots) and on the homepage are
+generated, not hand-captured, and **never committed**: the `build-macos` job
+of `.github/workflows/release.yml` makes fresh ones on every push to `main`
+and the `pages` job of the same workflow publishes them with the homepage
+(GitHub Pages, `website/` + `img/`). README.md links them from there
+(`https://oliverbyte.github.io/beamcommander3/img/screenshot-*.png`), so a
+push never races a CI commit and the repo carries no generated images.
 
 1. Builds `laser_daemon` and `frontend/dist` as usual, then runs the real
-   backend against the built frontend (`FRONTEND_DIST=... ./laser_daemon`) -
-   no mocking, so the screenshots reflect an actually-working app.
-2. Applies a colorful demo look via `POST /api/state` and saves it into cue
-   slot 1 (`backend/cues.json` is gitignored/local-only runtime data, so a
-   fresh checkout has no saved cues to rely on) and adds one example
-   (unarmed) laser so the Lasers/Zoning panels aren't empty placeholders.
-3. `frontend/scripts/screenshots.mjs` (Playwright) drives a headless
-   Chromium at a fixed 1440×900 viewport (the default MacBook Air
-   resolution, kept fixed so image dimensions never drift release to
-   release) and captures one shot of the idle preview plus one per dock
-   menu button (Settings/Cues/Zoning/Lasers).
-4. The workflow commits the resulting PNGs back to `main` as
-   `docs: update screenshots [skip ci]`. The `on.push.paths-ignore` filter
-   for `docs/screenshots/**` stops that commit from re-triggering this same
-   workflow.
+   backend against the built frontend (`FRONTEND_DIST=... ./laser_daemon`)
+   with an isolated, empty data directory - no mocking, so the screenshots
+   reflect an actually-working app.
+2. `frontend/scripts/screenshots.mjs` (Playwright) applies a colorful demo
+   look, saves it as a cue and adds example (unarmed, loopback) lasers, then
+   drives a headless Chromium at a fixed 1440×900 viewport (the default
+   MacBook Air resolution, kept fixed so image dimensions never drift) and
+   captures the idle preview plus one shot per view.
+3. The PNGs go to the `pages` job as the `screenshots` artifact, which
+   deploys the site with them in `img/`.
 
-To regenerate locally: build the backend and frontend as above, `cd frontend
-&& npx playwright install chromium`, start `laser_daemon` pointed at
-`frontend/dist` via `FRONTEND_DIST`, then run
-`BASE_URL=http://localhost:8000 OUT_DIR=../docs/screenshots node scripts/screenshots.mjs`.
+`website/` changes are therefore deployed by the release workflow too (every
+push to `main`); there is no separate Pages workflow.
+
+To generate them locally (e.g. to check a UI change): build the backend and
+frontend as above, `cd frontend && npx playwright install chromium`, start
+`laser_daemon` with its own `HOME` and `FRONTEND_DIST` pointing at
+`frontend/dist`, then run
+`BASE_URL=http://localhost:8000 node scripts/screenshots.mjs` - they land in
+`frontend/screenshots/` (gitignored).
 
 ## Raspberry Pi (standalone)
 
