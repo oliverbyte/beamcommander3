@@ -336,14 +336,14 @@ const MAX_EMIT_PER_TICK = 4000  // safety cap (e.g. tab was backgrounded)
 // daemon sends unflickered frames plus its clock `t` and settings `fl`), with
 // the same formula the daemon uses per point for the laser - see showFx.js.
 const clockSync = createClockSync()
-let flicker = [0, 0] // [rate Hz, on time ms]
-let flickerOffsets = {} // laser id -> seconds (flicker phase per laser)
+let flicker = [0, 0] // [rate Hz, on time ms] of the virtual preview laser (no lasers configured)
+let laserFlicker = {} // laser id -> [rate Hz, on time ms, offset s] - every laser's own look, own flicker
 let testPatternRates = {} // laser id -> kpps, for armed lasers showing an ILDA test pattern
 
 function handleIncomingPoints(msg) {
   if (Number.isFinite(msg.t)) clockSync.update(msg.t, performance.now() / 1000)
   if (Array.isArray(msg.fl)) flicker = msg.fl
-  flickerOffsets = msg.flo || {}
+  laserFlicker = msg.fll || {}
   testPatternRates = msg.tp || {}
   for (const [id, stream] of laserStreams) {
     stream.currentFrame = msg.laser_pts?.[id] || msg.pts || []
@@ -419,7 +419,8 @@ function emitLaserScan(stream, now) {
     // Daemon sends 0..1 floats; simulation sends 0..255 integers.
     const scale = (r > 1 || g > 1 || b > 1) ? 1 / 255 : 1
     let cr = r * scale, cg = g * scale, cb = b * scale
-    if (!testPatternKpps && flicker[0] > 0 && !flickerIsLit(clockSync.toServer(t) + (flickerOffsets[stream.id] || 0), flicker[0], flicker[1])) cr = cg = cb = 0
+    const fl = laserFlicker[stream.id] || [flicker[0], flicker[1], 0]
+    if (!testPatternKpps && fl[0] > 0 && !flickerIsLit(clockSync.toServer(t) + fl[2], fl[0], fl[1])) cr = cg = cb = 0
     // Point colors already carry master brightness, gate/flash and masks
     // (the daemon sends the real output), so no extra intensity factor here.
     const fanBrightness = Math.min(1, Math.max(0.01, 5 / frame.length))

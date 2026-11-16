@@ -28,6 +28,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -260,7 +261,7 @@ struct LaserState {
     // payload - see do_cue_save/do_cue_recall. Not part of the live
     // /api/state contract (deliberately excluded from state_to_json and
     // the /api/state bulk update), since the true live angle lives in the
-    // G_rotation_phase global and changes every frame; this field just
+    // look's animation state (LookSlot::rotation_phase) and changes every frame; this field just
     // carries that value into and out of a saved cue.
     double rotation_phase = 0.0;
 
@@ -315,12 +316,14 @@ struct LaserState {
 static LaserState        G;
 
 // ── Cue layers ───────────────────────────────────────────────────────────────
-// Besides the main look (G, which a normal "Solo" cue recall replaces), up to
+// Besides a laser's look (which a normal "Solo" cue recall replaces), up to
 // MAX_SHOW_LAYERS cues can play *on top of it* ("Layer" playback, like
 // Pangolin Beyond / lighting consoles): each layer is a copy of a cue's look
 // with its own running movement/rotation/wave/rainbow, drawn into the same
-// frame as the main look (compose_figures(), show_fx.h). Master brightness,
+// frame as the look (compose_figures(), show_fx.h). Master brightness,
 // flash, blackout, gate, zone, masks and flicker apply to the whole output.
+// Each laser has its own layers (LookSlot::layers) - a layer plays on the
+// lasers it was started on.
 // Turned on/off via POST /api/cue/<n>/layer/<on|off|toggle> (Magic Touch
 // "Layer" cue buttons, MIDI cue_layer / cue_layer_flash), all off via
 // POST /api/layers/clear or /api/reset. Solo cue recalls leave layers
@@ -332,7 +335,6 @@ struct ShowLayer {
     double     ilda_time = 0.0; // seconds since the layer started (ILDA animation)
 };
 static constexpr std::size_t MAX_SHOW_LAYERS = 8;
-static std::vector<ShowLayer> G_show_layers;
 
 // ── Test pattern ─────────────────────────────────────────────────────────────
 // "off" or a test_patterns.h catalog id (official ILDA 12K/30K test pattern).
@@ -429,71 +431,117 @@ static bool get_laser_connected(int id) {
 // Runtime animation clock (seconds since start, never locked — only laser thread writes)
 static double G_time = 0.0;
 
-// Phase accumulators for animated parameters (move/rotation/wave/rainbow).
-// These integrate `speed * dt` every tick instead of computing `speed *
-// G_time` fresh each frame - the latter makes the phase jump discontinuously
-// the instant a speed changes (since G_time has already accumulated a large
-// elapsed value, multiplying it by a *new* speed lands on a completely
-// different point in the cycle). Integrating incrementally means changing a
-// speed only changes the rate of change from that moment on - the current
-// position/rotation/wave/hue is preserved and the animation stays smooth.
-// Never locked - only laser_thread writes and reads these (single-threaded),
-// *except* G_rotation_phase, which cue save reads from other threads (atomic).
-// Cue recall / rotation reset never write it directly: they call
-// request_rotation_angle(), and laser_thread applies the angle (together with
-// the new rotation speed, no glide) at its next tick - so a recalled cue
-// always starts exactly at its saved angle.
-static double             G_move_phase     = 0.0; // radians
-static std::atomic<double> G_rotation_phase{0.0}; // radians
+// ── Per-laser looks ──────────────────────────────────────────────────────────
+// Every configured laser has its own complete look (shape, color, movement,
+// rainbow, dots, flicker, ILDA file, ...), its own cue layers and its own
+// animation state. Look 0 is the preview's virtual laser, used while no laser
+// is configured. G keeps only the *global* settings - blackout, master
+// brightness, flash release, the Beam/projector settings (see
+// with_global_settings()); its look fields are unused.
+//
+// A change goes to a set of target lasers - the browser's laser selection,
+// sent as `lasers` (see request_lasers()). Without targets it goes to every
+// look, so anything that knows nothing about selections (MIDI, scripts, an
+// older UI) drives all lasers alike, as before per-laser looks existed.
+//
+// Animation state lives here too and is integrated by laser_thread() (under
+// G_mtx) every tick. Phase accumulators integrate `speed * dt` instead of
+// computing `speed * G_time` fresh each frame - the latter jumps the instant
+// a speed changes (G_time has accumulated a large value, so a *new* speed
+// lands on a completely different point in the cycle). Integrating means a
+// speed change only changes the rate from that moment on. Other threads
+// never write the animation state directly: they set the request flags
+// below (cue recall: snap_all + a start angle; motion hold: snap_speeds;
+// rotation reset: a start angle) and laser_thread() applies them at its next
+// tick - so a recalled cue always starts exactly at its saved angle.
+struct LookSlot {
+    LaserState look;               // look fields only - global settings come from G
+    std::vector<ShowLayer> layers; // cue layers playing on this laser
+    ShowParamSmoother<LaserState> smooth; // rendered (glided) values, see param_smoothing.h
+    double move_phase = 0.0, rotation_phase = 0.0, wave_phase = 0.0; // radians
+    double rainbow_phase = 0.0;    // cycles, *unwrapped* (0 = rainbow just switched on) - see animate_look()
+    double ilda_time = 0.0;        // seconds since the look started (ILDA animation)
+    // Exponential position smoothing (ported from the original
+    // BeamCommander's ofApp.cpp `smoothOne`, see smooth_toward()): pos_x/
+    // pos_y are a *target*, the rendered value slews toward it - hides
+    // MIDI's 7-bit stepping, while big jumps still feel responsive. Same
+    // for the wave shape's three knobs.
+    float  pos_x_smooth = 0.0f, pos_y_smooth = 0.0f;
+    float  wave_frequency_smooth = 1.0f, wave_amplitude_smooth = 0.45f, wave_speed_smooth = 0.0f;
+    // Requests for laser_thread()'s next tick.
+    bool   snap_all = true;        // every glide jumps to the target (cue recall, new look)
+    bool   snap_speeds = false;    // speeds jump - a freeze must be a freeze (motion hold)
+    bool   rotation_pending = false;
+    double pending_angle = 0.0;    // start angle (radians), applied with the look's own rotation speed
+    // Speeds to restore when motion hold is released.
+    float  pre_motion_move_speed = 0.0f, pre_motion_rotation_speed = 0.0f, pre_motion_rainbow_speed = 0.0f;
+
+    // The current rotation angle - including a requested one laser_thread()
+    // hasn't applied yet (e.g. a cue saved right after a rotation reset).
+    double current_angle() const { return rotation_pending ? pending_angle : rotation_phase; }
+    // Call while holding G_mtx right after setting look.rotation_speed, so
+    // laser_thread() sees the new speed and the angle in the same tick.
+    void request_angle(double radians) { pending_angle = radians; rotation_pending = true; }
+};
+static constexpr int kVirtualLook = 0;
+static std::map<int, LookSlot> G_looks{{kVirtualLook, LookSlot{}}}; // laser id -> look. Guarded by G_mtx.
 // Motion hold also freezes cue layers (see do_motion_hold_press()).
-static std::atomic<bool>   G_motion_frozen{false};
-static double             G_wave_phase     = 0.0; // radians
-static double             G_ilda_time      = 0.0; // seconds since the main look started (ILDA animation; reset by cue recall)
-static double             G_rainbow_phase  = 0.0; // cycles, *unwrapped* (0 = rainbow just switched on) - see laser_thread()
-// Bumped by motion hold / rotation reset: laser_thread() then applies the
-// new speeds immediately instead of gliding (see ShowParamSmoother) - a
-// freeze must be a freeze, not a slow-down.
-static std::atomic<unsigned> G_speed_snap_seq{0};
-// Rotation start angle requests (cue recall, rotation reset, momentary cue
-// release) - see request_rotation_angle().
-static std::atomic<double>   G_pending_rotation_angle{0.0};
-static std::atomic<unsigned> G_rotation_set_seq{0};
-static std::atomic<unsigned> G_rotation_applied_seq{0}; // last request laser_thread applied
-// The current rotation angle - including a requested one laser_thread
-// hasn't applied yet (e.g. a cue saved right after a rotation reset).
-static double current_rotation_angle() {
-    if (G_rotation_set_seq.load() != G_rotation_applied_seq.load()) return G_pending_rotation_angle.load();
-    return G_rotation_phase.load();
-}
-// Cue recall / momentary cue: the whole new look applies at once - no glide
-// of any parameter (scale, speeds, position, wave, movement crossfade, ...),
-// see laser_thread(). Live fader/knob changes keep gliding.
-static std::atomic<unsigned> G_show_snap_seq{0};
+static std::atomic<bool> G_motion_frozen{false};
 
-// Call while holding G_mtx right after setting G.rotation_speed, so
-// laser_thread sees the new speed and the angle in the same tick.
-static void request_rotation_angle(double radians) {
-    G_pending_rotation_angle.store(radians);
-    G_rotation_set_seq.fetch_add(1);
+// Configured laser ids in Lasers-list order. Takes G_lasers_mtx - call it
+// *before* locking G_mtx (the two are never held at the same time).
+static std::vector<int> laser_order() {
+    std::lock_guard<std::mutex> lk(G_lasers_mtx);
+    std::vector<int> ids;
+    for (const auto& l : G_lasers) ids.push_back(l.id);
+    return ids;
 }
 
-// Exponential position smoothing (ported from the original BeamCommander's
-// ofApp.cpp `smoothOne`): pos_x/pos_y are treated as a *target*, and the
-// value actually used for rendering slews toward it with an adaptive time
-// constant - finer/slower blending for tiny moves (hides MIDI's 7-bit/
-// 128-step resolution as visible stepping) and a boost for big jumps so
-// large moves still feel responsive instead of sluggish. Never locked -
-// only laser_thread writes and reads these (single-threaded).
-static float G_pos_x_smooth = 0.0f;
-static float G_pos_y_smooth = 0.0f;
-
-// Same treatment for the wave shape's three MIDI-driven knobs (frequency,
-// amplitude, speed): each is a *target*, and the smoothed value below is
-// what's actually used for rendering / phase integration, so a coarse
-// 7-bit MIDI knob glides instead of visibly stepping - same as pos_x/pos_y.
-static float G_wave_frequency_smooth = 1.0f;
-static float G_wave_amplitude_smooth = 0.45f;
-static float G_wave_speed_smooth     = 0.0f;
+// The following helpers expect G_mtx to be held.
+// The first laser's look (or the virtual one without lasers): what clients
+// that show a single look - the top level of GET /api/state, MIDI LEDs - see.
+static int primary_look_id(const std::vector<int>& order) {
+    for (int id : order) if (G_looks.count(id)) return id;
+    return kVirtualLook;
+}
+// Every configured laser has a look; a new laser starts as a copy of the
+// first laser's look, running animation and layers included, so it joins
+// the show in sync. Looks of removed lasers are dropped; the virtual look
+// always stays.
+static void sync_look_slots(const std::vector<int>& order) {
+    for (auto it = G_looks.begin(); it != G_looks.end(); ) {
+        if (it->first != kVirtualLook && std::find(order.begin(), order.end(), it->first) == order.end()) it = G_looks.erase(it);
+        else ++it;
+    }
+    for (int id : order) {
+        if (G_looks.count(id)) continue;
+        const LookSlot copy = G_looks.at(primary_look_id(order));
+        G_looks[id] = copy;
+    }
+}
+// The looks a change applies to, in Lasers-list order: the requested
+// lasers (ids that aren't configured are ignored), or - when nothing was
+// requested - every look: all lasers, then the virtual one.
+static std::vector<int> look_targets(const std::optional<std::vector<int>>& requested, const std::vector<int>& order) {
+    sync_look_slots(order);
+    std::vector<int> out;
+    if (!requested) {
+        out = order;
+        out.push_back(kVirtualLook);
+        return out;
+    }
+    auto wanted = [&](int id) { return std::find(requested->begin(), requested->end(), id) != requested->end(); };
+    for (int id : order) if (wanted(id)) out.push_back(id);
+    if (order.empty() && wanted(kVirtualLook)) out.push_back(kVirtualLook);
+    return out;
+}
+// Runs fn on the look of every target (locks G_mtx itself).
+static void for_target_looks(const std::optional<std::vector<int>>& requested, const std::function<void(LookSlot&)>& fn) {
+    const std::vector<int> order = laser_order();
+    std::lock_guard<std::mutex> lk(G_mtx);
+    for (int id : look_targets(requested, order)) fn(G_looks.at(id));
+}
+static void for_all_looks(const std::function<void(LookSlot&)>& fn) { for_target_looks(std::nullopt, fn); }
 
 // Whether a momentary white flash (REST /flash, MIDI note/CC "flash") is
 // currently held. Declared up here (ahead of its do_flash_press/release
@@ -571,8 +619,8 @@ static float smooth_toward(float cur, float target, float dt, float tau) {
 // ── Shape generators ───────────────────────────────────────────────────────────
 struct Pt { float x, y; };
 
-// The animated state a look is drawn with - its own for the main look
-// (base_pose(): the smoothed globals) and for every layer (ShowLayer).
+// The animated state a look is drawn with - its own for every laser's look
+// (LookSlot, see look_render_input()) and for every layer (ShowLayer).
 // maxPoints is the look's share of the frame's point budget (see
 // kFramePointBudget): with layers active, each look gets fewer points so the
 // combined frame still fits the DAC buffer.
@@ -651,8 +699,8 @@ static Pt calc_movement(const std::string& mode, float move_size, double phase_v
         // bottom (-amp) to the top (+amp) as phase runs 0..tau, then wraps
         // instantly back to the bottom - i.e. it never comes back down, it
         // "re-enters" from the bottom once it exits the top of the screen.
-        // G_move_phase is already kept in [0,tau) via fmod (see the phase
-        // update loop below), so a plain linear map of that range is enough.
+        // The movement phase is already kept in [0,tau) via fmod (see
+        // animate_look()), so a plain linear map of that range is enough.
         return {0.0f, amp*(2.0f*(phase/tau) - 1.0f)};
     }
     if (mode=="tiltdown") {
@@ -693,7 +741,7 @@ static void hsv_to_rgb(float h, float s, float v, float& r, float& g, float& b) 
 }
 
 // Where a look sits: its (smoothed) position plus the movement offset.
-// Uses the smoothed position (see G_pos_x_smooth above), not the raw target
+// Uses the smoothed position (see LookSlot::pos_x_smooth), not the raw target
 // s.pos_x/s.pos_y directly, so manual moves - especially MIDI, whose 7-bit
 // knobs would otherwise visibly step - glide instead of jumping. Switching
 // the movement pattern crossfades from the old one (blend driven by
@@ -756,7 +804,7 @@ static core::Frame make_frame(const LaserState& s, double movement_phase, double
     // speed knob itself is at 0). Previously this was gated on
     // `rotation_speed != 0.0f`, so the instant speed hit 0 the shape
     // snapped back to its unrotated base orientation instead of holding
-    // whatever angle it had reached - G_rotation_phase itself was already
+    // whatever angle it had reached - the rotation phase itself was already
     // frozen correctly (integrates by speed*dt, so 0 speed = no further
     // change), it just wasn't being drawn. Rotating by phase 0 is a no-op,
     // so applying it unconditionally is always safe.
@@ -1008,10 +1056,13 @@ static core::Frame make_frame(const LaserState& s, double movement_phase, double
 }
 
 // ── JSON helpers ───────────────────────────────────────────────────────────────
+// A laser's flicker for the preview (its look's rate and on time, plus its
+// flicker phase as a time offset in seconds).
+struct PreviewFlicker { int id; float hz, onMs; double offset; };
 static std::string frame_to_ws_json(const core::Frame& fr,
                                     const std::vector<std::pair<int, core::Frame>>& laserFrames,
                                     double showTime, float flickerHz, float flickerOnMs,
-                                    const std::vector<std::pair<int, double>>& flickerOffsets,
+                                    const std::vector<PreviewFlicker>& flickers,
                                     const std::vector<int>& testPatternLasers = {}, float testPatternKpps = 0.0f) {
     std::ostringstream ss;
     ss << std::fixed << std::setprecision(4);
@@ -1024,15 +1075,18 @@ static std::string frame_to_ws_json(const core::Frame& fr,
         }
         ss << "]";
     };
-    // t = show clock (G_time) and fl = [flicker_hz, flicker_on_ms]: the
-    // preview applies flicker per simulated point itself, in step with the
-    // laser (frames here are sent unflickered - see make_frame()).
+    // t = show clock (G_time) and fl = [flicker_hz, flicker_on_ms] of the
+    // virtual preview laser: the preview applies flicker per simulated point
+    // itself, in step with the laser (frames here are sent unflickered - see
+    // make_frame()).
     ss << "{\"t\":" << std::setprecision(6) << showTime << std::setprecision(4)
        << ",\"fl\":[" << flickerHz << ',' << flickerOnMs << "]";
-    // flo = per-laser flicker time offset in seconds (flicker phase).
-    ss << ",\"flo\":{";
-    for (std::size_t i = 0; i < flickerOffsets.size(); ++i)
-        ss << (i ? "," : "") << '\"' << flickerOffsets[i].first << "\":" << std::setprecision(6) << flickerOffsets[i].second << std::setprecision(4);
+    // fll = per laser [flicker_hz, flicker_on_ms, time offset in s (flicker phase)] -
+    // every laser has its own look, so its own flicker.
+    ss << ",\"fll\":{";
+    for (std::size_t i = 0; i < flickers.size(); ++i)
+        ss << (i ? "," : "") << '\"' << flickers[i].id << "\":[" << flickers[i].hz << ',' << flickers[i].onMs << ','
+           << std::setprecision(6) << flickers[i].offset << std::setprecision(4) << ']';
     ss << "}";
     // tp = lasers showing a test pattern -> its point rate (kpps): the
     // preview replays those at that rate and without flicker, like the DAC.
@@ -1057,16 +1111,51 @@ static std::string frame_to_ws_json(const core::Frame& fr,
     return ss.str();
 }
 
+// A look's fields as JSON members (no braces), incl. its active cue layers.
+static void look_fields_json(std::ostringstream& ss, const LookSlot& sl) {
+    const LaserState& L = sl.look;
+    ss << "\"shape\":\""       << L.shape         << "\","
+       << "\"ilda_file\":\""   << L.ilda_file     << "\","
+       << "\"ilda_name\":\""   << L.ilda_name     << "\","
+       << "\"ilda_fps\":"      << L.ilda_fps       << ","
+       << "\"radius\":"        << L.radius         << ","
+       << "\"points\":"        << L.points         << ","
+       << "\"r\":"             << L.r              << ","
+       << "\"g\":"             << L.g              << ","
+       << "\"b\":"             << L.b              << ","
+       << "\"shape_scale\":"   << L.shape_scale    << ","
+       << "\"pos_x\":"         << L.pos_x          << ","
+       << "\"pos_y\":"         << L.pos_y          << ","
+       << "\"rotation_speed\":" << L.rotation_speed << ","
+       << "\"mirror_x\":"      << (L.mirror_x?"true":"false") << ","
+       << "\"move_mode\":\""   << L.move_mode      << "\","
+       << "\"move_speed\":"    << L.move_speed     << ","
+       << "\"move_size\":"     << L.move_size      << ","
+       << "\"move_phase_degrees\":" << L.move_phase_degrees << ","
+       << "\"wave_frequency\":" << L.wave_frequency << ","
+       << "\"wave_amplitude\":" << L.wave_amplitude << ","
+       << "\"wave_speed\":"    << L.wave_speed     << ","
+       << "\"rainbow_amount\":" << L.rainbow_amount << ","
+       << "\"rainbow_speed\":" << L.rainbow_speed  << ","
+       << "\"rainbow_phase_degrees\":" << L.rainbow_phase_degrees << ","
+       << "\"dot_amount\":"    << L.dot_amount     << ","
+       << "\"flicker_hz\":"    << L.flicker_hz     << ","
+       << "\"flicker_on_ms\":" << L.flicker_on_ms  << ","
+       << "\"flicker_phase_degrees\":" << L.flicker_phase_degrees << ","
+       << "\"layers\":[";
+    for (std::size_t i = 0; i < sl.layers.size(); ++i) ss << (i ? "," : "") << sl.layers[i].cue;
+    ss << "]";
+}
+
+// GET /api/state: the global settings, the first laser's look at the top
+// level (clients that only know one look keep working), and every laser's
+// own look under "looks" (laser id -> look; "0" = the virtual preview laser).
 static std::string state_to_json() {
+    const std::vector<int> order = laser_order();
     std::lock_guard<std::mutex> lk(G_mtx);
+    sync_look_slots(order);
     std::ostringstream ss; ss << std::fixed << std::setprecision(4);
     ss << "{"
-       << "\"shape\":\""       << G.shape         << "\","
-       << "\"ilda_file\":\""   << G.ilda_file     << "\","
-       << "\"ilda_name\":\""   << G.ilda_name     << "\","
-       << "\"ilda_fps\":"      << G.ilda_fps       << ","
-       << "\"radius\":"        << G.radius         << ","
-       << "\"points\":"        << G.points         << ","
        << "\"rate_kpps\":"     << G.rate_kpps      << ","
        << "\"max_rate_kpps\":" << G.max_rate_kpps  << ","
        << "\"output_latency_ms\":" << G.output_latency_ms << ","
@@ -1074,36 +1163,20 @@ static std::string state_to_json() {
        << "\"dot_blank_us\":" << G.dot_blank_us << ","
        << "\"intensity\":"     << G.intensity      << ","
        << "\"flash_release_ms\":" << G.flash_release_ms << ","
-       << "\"r\":"             << G.r              << ","
-       << "\"g\":"             << G.g              << ","
-       << "\"b\":"             << G.b              << ","
-       << "\"shape_scale\":"   << G.shape_scale    << ","
-       << "\"pos_x\":"         << G.pos_x          << ","
-       << "\"pos_y\":"         << G.pos_y          << ","
-       << "\"rotation_speed\":" << G.rotation_speed << ","
-       << "\"mirror_x\":"      << (G.mirror_x?"true":"false") << ","
-       << "\"move_mode\":\""   << G.move_mode      << "\","
-       << "\"move_speed\":"    << G.move_speed     << ","
-       << "\"move_size\":"     << G.move_size      << ","
-    << "\"move_phase_degrees\":" << G.move_phase_degrees << ","
-       << "\"wave_frequency\":" << G.wave_frequency << ","
-       << "\"wave_amplitude\":" << G.wave_amplitude << ","
-       << "\"wave_speed\":"    << G.wave_speed     << ","
-       << "\"rainbow_amount\":" << G.rainbow_amount << ","
-       << "\"rainbow_speed\":" << G.rainbow_speed  << ","
-       << "\"rainbow_phase_degrees\":" << G.rainbow_phase_degrees << ","
        << "\"blackout\":"      << (G.blackout?"true":"false") << ","
-       << "\"dot_amount\":"    << G.dot_amount     << ","
-       << "\"flicker_hz\":"    << G.flicker_hz     << ","
-       << "\"flicker_on_ms\":" << G.flicker_on_ms  << ","
-       << "\"flicker_phase_degrees\":" << G.flicker_phase_degrees << ","
-       << "\"layers\":[";
-    for (std::size_t i = 0; i < G_show_layers.size(); ++i) ss << (i ? "," : "") << G_show_layers[i].cue;
-    ss << "],"
        << "\"brightness_gate_open\":" << (g_brightness_gate_open.load()?"true":"false") << ","
        << "\"test_pattern\":\"" << G_test_pattern << "\","
-       << "\"test_pattern_size\":" << G_test_pattern_size
-       << "}";
+       << "\"test_pattern_size\":" << G_test_pattern_size << ",";
+    look_fields_json(ss, G_looks.at(primary_look_id(order)));
+    ss << ",\"looks\":{";
+    bool first = true;
+    for (const auto& [id, sl] : G_looks) {
+        ss << (first ? "" : ",") << '\"' << id << "\":{";
+        look_fields_json(ss, sl);
+        ss << "}";
+        first = false;
+    }
+    ss << "}}";
     return ss.str();
 }
 
@@ -1121,16 +1194,6 @@ static void on_signal(int) { G_running = false; }
 // ── Rendering looks (main look + cue layers) ─────────────────────────────────
 // The main look is drawn with the smoothed globals; each layer with its own
 // phases and its cue's fixed values.
-static RenderPose base_pose(int maxPoints) {
-    RenderPose p;
-    p.rotation = G_rotation_phase.load();
-    p.pos_x = G_pos_x_smooth; p.pos_y = G_pos_y_smooth;
-    p.wave_frequency = G_wave_frequency_smooth; p.wave_amplitude = G_wave_amplitude_smooth;
-    p.wave_phase = G_wave_phase;
-    p.ilda_time = G_ilda_time;
-    p.maxPoints = maxPoints;
-    return p;
-}
 static RenderPose layer_pose(const ShowLayer& L, int maxPoints) {
     RenderPose p;
     p.rotation = L.rotation_phase;
@@ -1154,10 +1217,6 @@ static LaserState layer_render_state(const ShowLayer& L, const LaserState& mainL
     if (g_flash_active) { s.r = 1.0f; s.g = 1.0f; s.b = 1.0f; }
     return s;
 }
-static bool look_is_phased(const LaserState& s) {
-    return (s.move_mode != "none" && std::abs(s.move_phase_degrees) > 1e-6f) ||
-           (s.rainbow_amount > 0.0f && std::abs(s.rainbow_phase_degrees) > 1e-6f);
-}
 // One look as seen by laser k (Lasers-list order, laser 1 = 0): laser k gets
 // k * move_phase_degrees added to its movement phase, and runs the rainbow
 // k * rainbow_phase_degrees behind laser 1 (a delay chain that never goes
@@ -1175,6 +1234,108 @@ static core::Frame render_look_for_laser(const LaserState& s, double movePhase, 
                                        : std::min(0.0, huePhase + kk * rainbowStep);
     }
     return make_frame(s, laserMove, laserHue, pose);
+}
+
+// Everything needed to draw one laser's look, copied under G_mtx so the
+// drawing itself runs unlocked: the look with the global settings (master
+// brightness, ...) and its glided values, a held white flash (full white at
+// full brightness, any look), its animation pose and its cue layers.
+struct LookRender {
+    LaserState s;
+    RenderPose pose;
+    double move_phase = 0.0, rainbow_phase = 0.0;
+    std::vector<ShowLayer> layers;
+};
+static LookRender look_render_input(const LookSlot& sl, const LaserState& globals) {
+    LookRender r;
+    r.s = with_global_settings(sl.look, globals, /*keepIntensity=*/true);
+    sl.smooth.apply(r.s); // render the glided values, not the raw targets
+    if (g_flash_active) { r.s.r = r.s.g = r.s.b = 1.0f; r.s.intensity = 1.0f; }
+    r.pose.rotation = sl.rotation_phase;
+    r.pose.pos_x = sl.pos_x_smooth; r.pose.pos_y = sl.pos_y_smooth;
+    r.pose.wave_frequency = sl.wave_frequency_smooth; r.pose.wave_amplitude = sl.wave_amplitude_smooth;
+    r.pose.wave_phase = sl.wave_phase;
+    r.pose.ilda_time = sl.ilda_time;
+    r.move_phase = sl.move_phase;
+    r.rainbow_phase = sl.rainbow_phase;
+    r.layers = sl.layers;
+    return r;
+}
+// The frame laser k (Lasers-list position, laser 1 = 0) shows: its look plus
+// its cue layers, each with its share of the frame's point budget, joined
+// into one frame (compose_figures).
+static core::Frame render_look_frame(const LookRender& r, std::size_t k) {
+    const int budget = kFramePointBudget / (int)(1 + r.layers.size());
+    RenderPose pose = r.pose;
+    pose.maxPoints = budget;
+    core::Frame f = render_look_for_laser(r.s, r.move_phase, r.rainbow_phase, pose, k);
+    if (r.layers.empty()) return f;
+    std::vector<std::vector<core::LaserPoint>> figures;
+    figures.push_back(std::move(f.points));
+    for (const auto& L : r.layers)
+        figures.push_back(render_look_for_laser(layer_render_state(L, r.s), L.move_phase, L.rainbow_phase,
+                                                layer_pose(L, budget), k).points);
+    f.points = compose_figures(figures);
+    return f;
+}
+
+// One laser_thread() tick of a look's animation (G_mtx held).
+static void animate_look(LookSlot& sl, double dt, bool frozen) {
+    const LaserState& L = sl.look;
+    // Glide the rendered values towards their targets *before* integrating
+    // the phases below, so speed changes accelerate/decelerate smoothly too.
+    sl.smooth.update(L, (float)dt);
+    // Cue switch: the new look appears at once - every glide (incl.
+    // position and wave knobs) jumps straight to the target.
+    if (sl.snap_all) {
+        sl.snap_all = false;
+        sl.smooth.snap_all(L);
+        sl.pos_x_smooth = L.pos_x; sl.pos_y_smooth = L.pos_y;
+        sl.wave_frequency_smooth = L.wave_frequency;
+        sl.wave_amplitude_smooth = L.wave_amplitude;
+        sl.wave_speed_smooth     = L.wave_speed;
+        sl.ilda_time = 0.0; // an ILDA look starts at its first frame
+    }
+    if (sl.snap_speeds) { sl.snap_speeds = false; sl.smooth.snap_speeds(L); }
+    // Cue recall / rotation reset: jump to the requested start angle and
+    // take the new rotation speed as is (no leftover spin).
+    if (sl.rotation_pending) {
+        sl.rotation_pending = false;
+        sl.rotation_phase = sl.pending_angle;
+        sl.smooth.snap_rotation(L);
+    }
+
+    const double tau = 2.0 * std::acos(-1.0);
+    sl.move_phase     = std::fmod(sl.move_phase + sl.smooth.move_speed * dt * tau, tau);
+    // Negated here (not at every rotation_speed setter) so the reversed
+    // direction applies no matter which API set the speed.
+    sl.rotation_phase = std::fmod(sl.rotation_phase - sl.smooth.rotation_speed * dt * tau, tau);
+    // The *smoothed* wave speed, so a MIDI knob jump changes the wave's
+    // animation rate gradually, like the value knobs.
+    sl.wave_phase     = std::fmod(sl.wave_phase + sl.wave_speed_smooth * dt * tau, tau);
+    // Held at 0 while the rainbow is off, so turning it back on always starts
+    // at the current beam color (see make_frame()). Deliberately not wrapped:
+    // the per-laser rainbow delay (render_look_for_laser()) needs to know how
+    // far the hue has travelled since switch-on.
+    sl.rainbow_phase  = sl.smooth.rainbow_amount > 0.0f ? sl.rainbow_phase + sl.smooth.rainbow_speed * dt : 0.0;
+    // ILDA animations play on regardless of motion hold.
+    sl.ilda_time += dt;
+    for (auto& Ly : sl.layers) Ly.ilda_time += dt;
+    // Cue layers run their own animation (frozen by motion hold).
+    if (!frozen) {
+        for (auto& Ly : sl.layers) {
+            Ly.move_phase     = std::fmod(Ly.move_phase     + Ly.s.move_speed     * dt * tau, tau);
+            Ly.rotation_phase = std::fmod(Ly.rotation_phase - Ly.s.rotation_speed * dt * tau, tau);
+            Ly.wave_phase     = std::fmod(Ly.wave_phase     + Ly.s.wave_speed     * dt * tau, tau);
+            Ly.rainbow_phase  = Ly.s.rainbow_amount > 0.0f ? Ly.rainbow_phase + Ly.s.rainbow_speed * dt : 0.0;
+        }
+    }
+    // Slew the rendered position and wave knobs toward their targets.
+    sl.pos_x_smooth = smooth_toward(sl.pos_x_smooth, L.pos_x, (float)dt, 0.090f);
+    sl.pos_y_smooth = smooth_toward(sl.pos_y_smooth, L.pos_y, (float)dt, 0.090f);
+    sl.wave_frequency_smooth = smooth_toward(sl.wave_frequency_smooth, L.wave_frequency, (float)dt, 0.090f);
+    sl.wave_amplitude_smooth = smooth_toward(sl.wave_amplitude_smooth, L.wave_amplitude, (float)dt, 0.090f);
+    sl.wave_speed_smooth     = smooth_toward(sl.wave_speed_smooth,     L.wave_speed,     (float)dt, 0.090f);
 }
 
 // Per-laser settings for finalize_hardware_frame() - shared by the real DAC
@@ -1244,12 +1405,6 @@ static void laser_thread() {
     };
     std::map<int, LaserRuntime> runtimes; // keyed by LaserConfig::id - this thread's own state, never shared
 
-    // Rendered (smoothed) show parameters - see param_smoothing.h. Owned by
-    // this thread only; G keeps the targets set by REST/MIDI/cues.
-    ShowParamSmoother<LaserState> smooth;
-    unsigned lastSpeedSnap = G_speed_snap_seq.load();
-    unsigned lastRotationSet = G_rotation_set_seq.load();
-    unsigned lastShowSnap = G_show_snap_seq.load();
     float appliedLatencyMs = -1.0f;
 
     while (G_running) {
@@ -1258,6 +1413,14 @@ static void laser_thread() {
         double dt = std::chrono::duration<double>(now_tp - last_tick).count();
         G_time += dt;
         last_tick = now_tp;
+
+        // Snapshot the configured laser list (id/ip/armed/zone calibration)
+        // - kept brief so no HTTP request (add/remove/(un)arm/re-calibrate)
+        // is ever blocked on this thread's connect/send work below.
+        std::vector<LaserConfig> lasers_snapshot;
+        { std::lock_guard<std::mutex> lk(G_lasers_mtx); lasers_snapshot = G_lasers; }
+        std::vector<int> order;
+        for (const auto& l : lasers_snapshot) order.push_back(l.id);
 
         float rate, maxRate, testPatternSize;
         std::string testPatternId;
@@ -1268,86 +1431,17 @@ static void laser_thread() {
             testPatternId = G_test_pattern;
             testPatternSize = G_test_pattern_size;
 
-            // Glide the rendered show parameters towards their targets
-            // (snapping the speeds when motion hold/rotation reset asked
-            // for it), *before* integrating the phases below, so speed
-            // changes accelerate/decelerate smoothly too.
-            smooth.update(G, (float)dt);
-            // Cue switch: the new look appears at once - every glide (incl.
-            // position and wave knobs below) jumps straight to the target.
-            if (const unsigned showSeq = G_show_snap_seq.load(); showSeq != lastShowSnap) {
-                lastShowSnap = showSeq;
-                smooth.snap_all(G);
-                G_pos_x_smooth = G.pos_x; G_pos_y_smooth = G.pos_y;
-                G_wave_frequency_smooth = G.wave_frequency;
-                G_wave_amplitude_smooth = G.wave_amplitude;
-                G_wave_speed_smooth     = G.wave_speed;
-                G_ilda_time = 0.0; // an ILDA cue starts at its first frame
-            }
             // Output latency (how far ahead libera queues frames).
             if (G.output_latency_ms != appliedLatencyMs) {
                 appliedLatencyMs = G.output_latency_ms;
                 core::LaserController::setTargetLatency(std::chrono::milliseconds(
                     (long long)std::lround(std::clamp(appliedLatencyMs, 10.0f, 200.0f))));
             }
-            if (const unsigned snapSeq = G_speed_snap_seq.load(); snapSeq != lastSpeedSnap) {
-                lastSpeedSnap = snapSeq;
-                smooth.snap_speeds(G);
-            }
-            // Cue recall / rotation reset: jump to the requested start angle
-            // and take the new rotation speed as is (no leftover spin).
-            if (const unsigned rotSeq = G_rotation_set_seq.load(); rotSeq != lastRotationSet) {
-                lastRotationSet = rotSeq;
-                G_rotation_phase.store(G_pending_rotation_angle.load());
-                smooth.snap_rotation(G);
-                G_rotation_applied_seq.store(rotSeq);
-            }
 
-            // Integrate each animated parameter's phase by its *current*
-            // speed - see the G_move_phase/etc. comment above for why this
-            // (rather than speed*G_time) is what keeps things smooth across
-            // a speed change instead of jumping/resetting.
-            const double tau = 2.0 * std::acos(-1.0);
-            G_move_phase     = std::fmod(G_move_phase     + smooth.move_speed * dt * tau, tau);
-            // Negated here (not at every rotation_speed setter) so the
-            // reversed direction applies no matter which API set the speed
-            // (REST bulk update, /laser/rotation/speed/<v>, or MIDI).
-            G_rotation_phase = std::fmod(G_rotation_phase - smooth.rotation_speed * dt * tau, tau);
-            // Uses the *smoothed* wave speed (updated below) rather than
-            // G.wave_speed directly, so a MIDI knob jump changes the wave's
-            // animation rate gradually instead of snapping to a new speed
-            // instantly - matching the same glide the value knobs get.
-            G_wave_phase     = std::fmod(G_wave_phase     + G_wave_speed_smooth * dt * tau, tau);
-            // Held at 0 while the rainbow is off, so turning it back on
-            // always starts at the current beam color (see make_frame()).
-            // Deliberately not wrapped: the per-laser rainbow delay below
-            // needs to know how far the hue has travelled since switch-on.
-            G_rainbow_phase  = smooth.rainbow_amount > 0.0f
-                ? G_rainbow_phase + smooth.rainbow_speed * dt : 0.0;
-            // ILDA animations play on regardless of motion hold.
-            G_ilda_time += dt;
-            for (auto& L : G_show_layers) L.ilda_time += dt;
-            // Cue layers run their own animation (frozen by motion hold).
-            if (!G_motion_frozen.load()) {
-                for (auto& L : G_show_layers) {
-                    L.move_phase     = std::fmod(L.move_phase     + L.s.move_speed     * dt * tau, tau);
-                    L.rotation_phase = std::fmod(L.rotation_phase - L.s.rotation_speed * dt * tau, tau);
-                    L.wave_phase     = std::fmod(L.wave_phase     + L.s.wave_speed     * dt * tau, tau);
-                    L.rainbow_phase  = L.s.rainbow_amount > 0.0f ? L.rainbow_phase + L.s.rainbow_speed * dt : 0.0;
-                }
-            }
-
-            // Slew the rendered position toward the latest pos_x/pos_y
-            // target (see smooth_toward's comment above).
-            G_pos_x_smooth = smooth_toward(G_pos_x_smooth, G.pos_x, (float)dt, 0.090f);
-            G_pos_y_smooth = smooth_toward(G_pos_y_smooth, G.pos_y, (float)dt, 0.090f);
-
-            // Same glide for the wave knobs (see G_wave_frequency_smooth's
-            // comment above) - identical tau to pos_x/pos_y per the request
-            // that these transition "as smooth as x/y changes".
-            G_wave_frequency_smooth = smooth_toward(G_wave_frequency_smooth, G.wave_frequency, (float)dt, 0.090f);
-            G_wave_amplitude_smooth = smooth_toward(G_wave_amplitude_smooth, G.wave_amplitude, (float)dt, 0.090f);
-            G_wave_speed_smooth     = smooth_toward(G_wave_speed_smooth,     G.wave_speed,     (float)dt, 0.090f);
+            // Every laser's own look animates on its own (see LookSlot).
+            sync_look_slots(order);
+            const bool frozen = G_motion_frozen.load();
+            for (auto& [id, sl] : G_looks) animate_look(sl, dt, frozen);
 
             // Brightness gate fade (see g_gate_level's comment): opening
             // the gate snaps g_gate_level to 1.0 instantly; closing it
@@ -1380,12 +1474,6 @@ static void laser_thread() {
             }
             g_prev_gate_open = gate_open_now;
         }
-
-        // Snapshot the configured laser list (id/ip/armed/zone calibration)
-        // - kept brief so no HTTP request (add/remove/(un)arm/re-calibrate)
-        // is ever blocked on this thread's connect/send work below.
-        std::vector<LaserConfig> lasers_snapshot;
-        { std::lock_guard<std::mutex> lk(G_lasers_mtx); lasers_snapshot = G_lasers; }
 
         // Drop runtime state for any laser no longer configured at all
         // (deleted via DELETE /api/lasers/<id>).
@@ -1495,9 +1583,31 @@ static void laser_thread() {
             continue;
         }
 
-        LaserState snap; std::vector<ShowLayer> layers;
-        { std::lock_guard<std::mutex> lk(G_mtx); snap = G; layers = G_show_layers; }
-        smooth.apply(snap); // render the glided values, not the raw targets
+        // Each laser's look, copied under the lock and drawn unlocked below,
+        // only for the lasers that need a frame this tick (cached).
+        LaserState snap;
+        std::map<int, LookRender> inputs; // laser id (kVirtualLook without lasers) -> its look
+        {
+            std::lock_guard<std::mutex> lk(G_mtx);
+            snap = G; // global settings (blackout, master brightness, ...)
+            for (int id : order) if (G_looks.count(id)) inputs[id] = look_render_input(G_looks.at(id), G);
+            if (order.empty()) inputs[kVirtualLook] = look_render_input(G_looks.at(kVirtualLook), G);
+        }
+        std::map<int, core::Frame> frames;
+        auto frameFor = [&](int id, std::size_t k) -> const core::Frame& {
+            auto it = frames.find(id);
+            if (it != frames.end()) return it->second;
+            core::Frame f;
+            auto in = inputs.find(id);
+            if (in != inputs.end()) f = render_look_frame(in->second, k);
+            else f.points.push_back(core::LaserPoint{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}); // look not there yet: dark
+            return frames.emplace(id, std::move(f)).first->second;
+        };
+        // A laser's flicker settings come with its look.
+        auto flickerOf = [&](int id) -> const LaserState& {
+            auto in = inputs.find(id);
+            return in != inputs.end() ? in->second.s : snap;
+        };
 
         // The test pattern exactly as in the ILDA file, sized and dimmed
         // (master brightness) - shared by the preview and every armed laser.
@@ -1505,44 +1615,6 @@ static void laser_thread() {
         if (testPattern) {
             testPoints = test_pattern_points(testPattern->id);
             apply_test_pattern_output(testPoints, testPatternSize, snap.intensity);
-        }
-
-        // The main look plus every active cue layer, each with its share of
-        // the frame's point budget, joined into one frame per laser
-        // (compose_figures). Per-laser offsets: laser i (Lasers-list order,
-        // laser 1 = 0) gets i * move_phase_degrees added to its movement
-        // phase, so the movement runs "one after another" across the rig;
-        // the rainbow runs as a delay chain i * rainbow_phase_degrees behind
-        // laser 1 (see render_look_for_laser()). Lasers only get their own
-        // frames when some look is phased - otherwise all share `frame`.
-        const int lookBudget = kFramePointBudget / (int)(1 + layers.size());
-        const RenderPose mainPose = base_pose(lookBudget);
-        std::vector<LaserState> layerLooks;
-        std::vector<RenderPose> layerPoses;
-        bool anyPhased = look_is_phased(snap);
-        for (const auto& L : layers) {
-            layerLooks.push_back(layer_render_state(L, snap));
-            layerPoses.push_back(layer_pose(L, lookBudget));
-            anyPhased = anyPhased || look_is_phased(layerLooks.back());
-        }
-        auto renderForLaser = [&](std::size_t k) {
-            core::Frame f = render_look_for_laser(snap, G_move_phase, G_rainbow_phase, mainPose, k);
-            if (layers.empty()) return f;
-            std::vector<std::vector<core::LaserPoint>> figures;
-            figures.push_back(std::move(f.points));
-            for (std::size_t li = 0; li < layers.size(); ++li)
-                figures.push_back(render_look_for_laser(layerLooks[li], layers[li].move_phase, layers[li].rainbow_phase,
-                                                        layerPoses[li], k).points);
-            f.points = compose_figures(figures);
-            return f;
-        };
-        auto frame = renderForLaser(0);
-        std::vector<std::pair<int, core::Frame>> laserFrames;
-        if (anyPhased && !lasers_snapshot.empty()) {
-            laserFrames.reserve(lasers_snapshot.size());
-            laserFrames.emplace_back(lasers_snapshot[0].id, frame);
-            for (std::size_t i = 1; i < lasers_snapshot.size(); ++i)
-                laserFrames.emplace_back(lasers_snapshot[i].id, renderForLaser(i));
         }
 
         if (previewDue) {
@@ -1559,15 +1631,15 @@ static void laser_thread() {
             // hidden in the 3D preview anyway). Without any configured laser
             // the single virtual preview laser still honours the gate.
             std::vector<std::pair<int, core::Frame>> previewFrames;
-            std::vector<std::pair<int, double>> flickerOffsets;
+            std::vector<PreviewFlicker> flickers;
             std::vector<int> testPatternLasers;
             previewFrames.reserve(lasers_snapshot.size());
             for (std::size_t li = 0; li < lasers_snapshot.size(); ++li) {
                 const auto& l = lasers_snapshot[li];
-                flickerOffsets.emplace_back(l.id, flicker_phase_offset(li, snap.flicker_hz, snap.flicker_phase_degrees));
-                const core::Frame* base = &frame;
-                for (const auto& [lid, lf] : laserFrames) if (lid == l.id) { base = &lf; break; }
-                core::Frame pf = *base;
+                const LaserState& fl = flickerOf(l.id);
+                flickers.push_back({l.id, fl.flicker_hz, fl.flicker_on_ms,
+                                    flicker_phase_offset(li, fl.flicker_hz, fl.flicker_phase_degrees)});
+                core::Frame pf = frameFor(l.id, li);
                 bool previewAllowed = l.armed;
                 if (testPattern && l.armed) {
                     pf.points = testPoints; previewAllowed = testPatternRunnable;
@@ -1579,38 +1651,35 @@ static void laser_thread() {
                 previewFrames.emplace_back(l.id, std::move(pf));
             }
             core::Frame mainPreview;
+            const LaserState& mainFlicker = order.empty() ? flickerOf(kVirtualLook) : snap;
             if (lasers_snapshot.empty()) {
-                mainPreview = frame;
+                mainPreview = frameFor(kVirtualLook, 0);
                 HardwareOutputParams virt; virt.blackout = false; virt.outputAllowed = true; virt.gateLevel = g_gate_level;
                 finalize_hardware_frame(mainPreview.points, virt);
             }
-            ws_broadcast(frame_to_ws_json(mainPreview, previewFrames, G_time, snap.flicker_hz, snap.flicker_on_ms, flickerOffsets,
+            ws_broadcast(frame_to_ws_json(mainPreview, previewFrames, G_time,
+                                          order.empty() ? mainFlicker.flicker_hz : 0.0f,
+                                          order.empty() ? mainFlicker.flicker_on_ms : 0.0f, flickers,
                                           testPatternLasers, testPattern ? testPattern->kpps : 0.0f));
         }
 
         if (anyHardwareReady) {
-            // Each controller gets the frame for its configured list index;
-            // global blackout/gate and per-laser zone transforms are then
-            // applied only to that hardware-bound copy.
+            // Each controller gets its own laser's frame; global
+            // blackout/gate and that laser's zone transform are then applied
+            // only to that hardware-bound copy.
             for (auto& [id, rt] : runtimes) {
                 if (!rt.ctrl) continue;
                 if (!(rt.ctrl->isReadyForNewFrame() && (now_tp - rt.last_hw_send) >= 20ms)) continue;
                 rt.last_hw_send = now_tp;
 
                 const LaserConfig* cfg = nullptr;
-                std::size_t laserIndex = 0; // Lasers-list order, laser 1 = 0 (flicker phase)
+                std::size_t laserIndex = 0; // Lasers-list order, laser 1 = 0 (phase offsets)
                 for (std::size_t i = 0; i < lasers_snapshot.size(); ++i) {
                     if (lasers_snapshot[i].id == id) { cfg = &lasers_snapshot[i]; laserIndex = i; break; }
                 }
 
-                const core::Frame* phaseFrame = &frame;
-                if (!laserFrames.empty()) {
-                    const int laserId = id;
-                    auto it = std::find_if(laserFrames.begin(), laserFrames.end(),
-                                           [laserId](const auto& item) { return item.first == laserId; });
-                    if (it != laserFrames.end()) phaseFrame = &it->second;
-                }
-                core::Frame toSend = *phaseFrame;
+                core::Frame toSend = frameFor(id, laserIndex);
+                const LaserState& fl = flickerOf(id);
                 // Test pattern instead of the show: only once this DAC really
                 // runs at the pattern's rate (dark until then), never flickered.
                 const bool showsTestPattern = testPattern && cfg && cfg->armed;
@@ -1625,13 +1694,13 @@ static void laser_thread() {
                 // arrives, then blank the points that fall into an "off"
                 // phase of the continuous timeline (see show_fx.h).
                 const double pointRateHz = std::max(1.0f, rt.connected_rate) * 1000.0;
-                const bool flickering = snap.flicker_hz > 0.0f && !showsTestPattern;
+                const bool flickering = fl.flicker_hz > 0.0f && !showsTestPattern;
                 if (flickering) {
                     pad_frame_to_duration(toSend.points, pointRateHz, kFlickerMinFrameSeconds, kFlickerMaxFramePoints);
                     // Flicker phase: this laser runs its flicker that much later.
-                    const double phaseOffset = flicker_phase_offset(laserIndex, snap.flicker_hz, snap.flicker_phase_degrees);
+                    const double phaseOffset = flicker_phase_offset(laserIndex, fl.flicker_hz, fl.flicker_phase_degrees);
                     apply_flicker_timeline(toSend.points, rt.flicker.begin(G_time) + phaseOffset, pointRateHz,
-                                           snap.flicker_hz, snap.flicker_on_ms);
+                                           fl.flicker_hz, fl.flicker_on_ms);
                 } else {
                     rt.flicker.reset();
                 }
@@ -1774,7 +1843,21 @@ static void load_lasers_from_disk() {
 // higher there would be silently rejected by do_cue_save/recall/clear/move
 // below (they all range-check against MAX_CUES).
 static constexpr int MAX_CUES = 128;
-static std::map<int, LaserState> G_cues;
+// A cue: the looks of the lasers it was saved on (laser id -> look) plus its
+// main look - the first of them, or the only look of a cue saved before
+// per-laser looks existed (or without any laser configured). Recalling it
+// onto a laser gives that laser its own saved look, or the main look if the
+// cue has none for it - so any cue can be put onto any laser.
+struct CueData {
+    LaserState main;
+    std::map<int, LaserState> lasers;
+    const LaserState& look_for(int id) const {
+        auto it = lasers.find(id);
+        return it != lasers.end() ? it->second : main;
+    }
+    template <class F> void for_each_look(F fn) const { fn(main); for (const auto& [id, l] : lasers) fn(l); }
+};
+static std::map<int, CueData> G_cues;
 static std::mutex                G_cues_mtx;
 static const std::string         CUES_FILE = resolve_data_file("cues.json");
 
@@ -1905,16 +1988,62 @@ static LaserState cue_state_from_json(const std::string& obj) {
     return s;
 }
 
+// {...main look..., "lasers":{"<id>":{...look...}, ...}} - older files have
+// no "lasers" (one look for all lasers).
+static std::string cue_to_json(const CueData& c) {
+    std::string out = cue_state_to_json(c.main);
+    out.pop_back(); // '}'
+    out += ",\"lasers\":{";
+    bool first = true;
+    for (const auto& [id, l] : c.lasers) {
+        out += (first ? "\"" : ",\"") + std::to_string(id) + "\":" + cue_state_to_json(l);
+        first = false;
+    }
+    return out + "}}";
+}
+static CueData cue_from_json(const std::string& obj) {
+    CueData c;
+    std::string mainPart = obj;
+    const auto key = obj.find("\"lasers\"");
+    if (key != std::string::npos) {
+        const auto open = obj.find('{', key);
+        std::size_t close = std::string::npos;
+        int depth = 0;
+        for (std::size_t j = open; open != std::string::npos && j < obj.size(); ++j) {
+            if (obj[j] == '{') ++depth;
+            else if (obj[j] == '}' && --depth == 0) { close = j; break; }
+        }
+        if (close != std::string::npos) {
+            // Each "<id>":{...} inside the lasers object.
+            std::size_t i = open + 1;
+            while (true) {
+                const auto q1 = obj.find('"', i);      if (q1 == std::string::npos || q1 > close) break;
+                const auto q2 = obj.find('"', q1 + 1); if (q2 == std::string::npos || q2 > close) break;
+                const auto b = obj.find('{', q2);      if (b == std::string::npos || b > close) break;
+                int d = 0; std::size_t e = b;
+                for (; e < close; ++e) { if (obj[e] == '{') ++d; else if (obj[e] == '}' && --d == 0) break; }
+                if (d != 0) break;
+                try { c.lasers[std::stoi(obj.substr(q1 + 1, q2 - q1 - 1))] = cue_state_from_json(obj.substr(b, e - b + 1)); }
+                catch (...) {}
+                i = e + 1;
+            }
+            mainPart = obj.substr(0, key) + obj.substr(close + 1); // the main look's own keys only
+        }
+    }
+    c.main = cue_state_from_json(mainPart);
+    return c;
+}
+
 static void save_cues_to_disk() {
     std::lock_guard<std::mutex> lk(G_cues_mtx);
     std::ofstream f(CUES_FILE, std::ios::trunc);
     if (!f) return;
     f << "{";
     bool first = true;
-    for (auto& [num, s] : G_cues) {
+    for (auto& [num, c] : G_cues) {
         if (!first) f << ",";
         first = false;
-        f << "\"" << num << "\":" << cue_state_to_json(s);
+        f << "\"" << num << "\":" << cue_to_json(c);
     }
     f << "}";
 }
@@ -1946,7 +2075,7 @@ static void load_cues_from_disk() {
         try {
             int num = std::stoi(key);
             if (num >= 1 && num <= MAX_CUES)
-                G_cues[num] = cue_state_from_json(body.substr(brace, j - brace));
+                G_cues[num] = cue_from_json(body.substr(brace, j - brace));
         } catch (...) {}
         i = j;
     }
@@ -1957,63 +2086,88 @@ static void load_cues_from_disk() {
 // MIDI dispatcher below, so there's exactly one place that knows the correct
 // (deadlock-safe) lock order: G_mtx and G_cues_mtx are NEVER held at the same
 // time by any of these.
-static void do_cue_save(int n) {
-    if (n < 1 || n > MAX_CUES) return;
-    LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap = G; }
-    // Rotation angle lives outside LaserState (see G_rotation_phase's
-    // comment) - stash the live value into the snapshot's transport field
-    // so recalling this cue restores the exact angle, not just the speed.
-    snap.rotation_phase = current_rotation_angle();
-    { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[n] = snap; }
-    save_cues_to_disk();
-}
-static bool do_cue_recall(int n) {
+using LaserTargets = std::optional<std::vector<int>>; // nullopt = every look (see look_targets())
+
+// Saves the looks of the target lasers into slot n (see CueData). The
+// rotation angle lives in the look's animation state, so it's stashed into
+// each saved look's transport field - recalling restores the exact angle.
+static bool do_cue_save(int n, const LaserTargets& targets = std::nullopt) {
     if (n < 1 || n > MAX_CUES) return false;
-    bool found = false; LaserState snap;
-    { std::lock_guard<std::mutex> lk(G_cues_mtx);
-      auto it = G_cues.find(n);
-      if (it != G_cues.end()) { snap = it->second; found = true; } }
-    if (!found) return false;
+    CueData cue;
     {
+        const std::vector<int> order = laser_order();
         std::lock_guard<std::mutex> lk(G_mtx);
-        // Global daemon settings aren't part of the per-cue show state -
-        // keep whatever they're currently set to across the recall.
-        G = with_global_settings(snap, G, /*keepIntensity=*/true);
-        G_show_snap_seq.fetch_add(1); // switch instantly, no morphing
-        // Start at the rotation angle the cue was saved at (see do_cue_save),
-        // with the cue's own rotation speed - not turned further by the
-        // previous look's rotation.
-        request_rotation_angle(snap.rotation_phase);
+        const std::vector<int> ids = look_targets(targets, order);
+        if (ids.empty()) return false;
+        for (int id : ids) {
+            const LookSlot& sl = G_looks.at(id);
+            LaserState look = sl.look;
+            look.rotation_phase = sl.current_angle();
+            if (id == ids.front()) cue.main = look;
+            if (id != kVirtualLook) cue.lasers[id] = look;
+        }
     }
+    { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[n] = cue; }
+    save_cues_to_disk();
     return true;
 }
-// Cue layers (see ShowLayer): mode 1 = on, 0 = off, 2 = toggle. Turning a
-// layer on starts it fresh at the cue's saved rotation angle; at most
-// MAX_SHOW_LAYERS at once (the oldest is dropped). Returns false for an
-// empty cue slot (turning off always works).
-static bool do_cue_layer(int n, int mode) {
+// Puts `look` onto a laser: instantly (no glide), at its saved rotation angle
+// with its own rotation speed. G_mtx held.
+static void set_look(LookSlot& sl, const LaserState& look) {
+    sl.look = look;
+    sl.snap_all = true;
+    sl.request_angle(look.rotation_phase);
+}
+// Recalls slot n onto the target lasers (see CueData). Lasers that aren't
+// targeted keep their look; global settings never change.
+static bool do_cue_recall(int n, const LaserTargets& targets = std::nullopt) {
     if (n < 1 || n > MAX_CUES) return false;
-    LaserState cue; bool found = false;
+    CueData cue;
+    { std::lock_guard<std::mutex> lk(G_cues_mtx);
+      auto it = G_cues.find(n);
+      if (it == G_cues.end()) return false;
+      cue = it->second; }
+    const std::vector<int> order = laser_order();
+    std::lock_guard<std::mutex> lk(G_mtx);
+    for (int id : look_targets(targets, order)) set_look(G_looks.at(id), cue.look_for(id));
+    return true;
+}
+// Cue layers (see ShowLayer) on the target lasers: mode 1 = on, 0 = off,
+// 2 = toggle (decided by the first target, then the same for all). Turning a
+// layer on starts it fresh at the cue's saved rotation angle; at most
+// MAX_SHOW_LAYERS per laser (the oldest is dropped). Returns false for an
+// empty cue slot (turning off always works).
+static bool do_cue_layer(int n, int mode, const LaserTargets& targets = std::nullopt) {
+    if (n < 1 || n > MAX_CUES) return false;
+    CueData cue; bool found = false;
     { std::lock_guard<std::mutex> lk(G_cues_mtx);
       auto it = G_cues.find(n);
       if (it != G_cues.end()) { cue = it->second; found = true; } }
+    const std::vector<int> order = laser_order();
     std::lock_guard<std::mutex> lk(G_mtx);
-    auto it = std::find_if(G_show_layers.begin(), G_show_layers.end(), [&](const ShowLayer& L) { return L.cue == n; });
-    const bool active = it != G_show_layers.end();
-    const bool wantOn = mode == 2 ? !active : mode == 1;
-    if (!wantOn) { if (active) G_show_layers.erase(it); return true; }
-    if (active) return true;
-    if (!found) return false;
-    ShowLayer L;
-    L.cue = n; L.s = cue;
-    L.rotation_phase = cue.rotation_phase;
-    G_show_layers.push_back(L);
-    if (G_show_layers.size() > MAX_SHOW_LAYERS) G_show_layers.erase(G_show_layers.begin());
+    const std::vector<int> ids = look_targets(targets, order);
+    if (ids.empty()) return true;
+    auto findLayer = [&](LookSlot& sl) {
+        return std::find_if(sl.layers.begin(), sl.layers.end(), [&](const ShowLayer& L) { return L.cue == n; });
+    };
+    LookSlot& firstSlot = G_looks.at(ids.front());
+    const bool wantOn = mode == 2 ? findLayer(firstSlot) == firstSlot.layers.end() : mode == 1;
+    if (wantOn && !found) return false;
+    for (int id : ids) {
+        LookSlot& sl = G_looks.at(id);
+        auto it = findLayer(sl);
+        if (!wantOn) { if (it != sl.layers.end()) sl.layers.erase(it); continue; }
+        if (it != sl.layers.end()) continue;
+        ShowLayer L;
+        L.cue = n; L.s = cue.look_for(id);
+        L.rotation_phase = L.s.rotation_phase;
+        sl.layers.push_back(L);
+        if (sl.layers.size() > MAX_SHOW_LAYERS) sl.layers.erase(sl.layers.begin());
+    }
     return true;
 }
-static void do_layers_clear() {
-    std::lock_guard<std::mutex> lk(G_mtx);
-    G_show_layers.clear();
+static void do_layers_clear(const LaserTargets& targets = std::nullopt) {
+    for_target_looks(targets, [](LookSlot& sl) { sl.layers.clear(); });
 }
 
 // ── ILDA file store (REST: /api/ilda..., /api/cue/<n>/ilda) ──────────────────
@@ -2063,7 +2217,11 @@ static IldaStoreResult ilda_store_upload(const std::string& body, const std::str
 static std::vector<int> ilda_used_by(const std::string& file) {
     std::vector<int> out;
     std::lock_guard<std::mutex> lk(G_cues_mtx);
-    for (const auto& [num, c] : G_cues) if (c.shape == "ilda" && c.ilda_file == file) out.push_back(num);
+    for (const auto& [num, c] : G_cues) {
+        bool uses = false;
+        c.for_each_look([&](const LaserState& l) { uses = uses || (l.shape == "ilda" && l.ilda_file == file); });
+        if (uses) out.push_back(num);
+    }
     return out;
 }
 
@@ -2072,21 +2230,25 @@ static std::string ilda_known_name(const std::string& file) {
     std::string name = ilda_stored_name(file);
     if (!name.empty()) return name;
     std::lock_guard<std::mutex> lk(G_cues_mtx);
-    for (const auto& [num, c] : G_cues) if (c.shape == "ilda" && c.ilda_file == file && !c.ilda_name.empty()) return c.ilda_name;
-    return {};
+    std::string found;
+    for (const auto& [num, c] : G_cues)
+        c.for_each_look([&](const LaserState& l) {
+            if (found.empty() && l.shape == "ilda" && l.ilda_file == file && !l.ilda_name.empty()) found = l.ilda_name;
+        });
+    return found;
 }
 
 // Slot n becomes a fresh ILDA look playing `file` (default position/scale,
 // no movement - tweak and Save to change), replacing the slot, and is
-// recalled right away.
-static void ilda_cue_assign(int n, const std::string& file, const std::string& name) {
-    LaserState cue{};
-    cue.shape = "ilda";
-    cue.ilda_file = file;
-    cue.ilda_name = name;
+// recalled right away onto the target lasers.
+static void ilda_cue_assign(int n, const std::string& file, const std::string& name, const LaserTargets& targets) {
+    CueData cue;
+    cue.main.shape = "ilda";
+    cue.main.ilda_file = file;
+    cue.main.ilda_name = name;
     { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[n] = cue; }
     save_cues_to_disk();
-    do_cue_recall(n);
+    do_cue_recall(n, targets);
     std::cout << "[ilda] cue " << n << " <- " << name << " (" << file << ")\n" << std::flush;
 }
 
@@ -2100,7 +2262,7 @@ static void do_cue_clear(int n) {
 // `from` has no saved cue, either number is out of range, or from == to.
 static bool do_cue_move(int from, int to) {
     if (from < 1 || from > MAX_CUES || to < 1 || to > MAX_CUES || from == to) return false;
-    bool found = false; LaserState snap;
+    bool found = false; CueData snap;
     { std::lock_guard<std::mutex> lk(G_cues_mtx);
       auto it = G_cues.find(from);
       if (it != G_cues.end()) { snap = it->second; found = true; } }
@@ -2262,87 +2424,82 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     // whether the pedal is currently held above/below the midpoint - see
     // g_brightness_gate_open's comment for the full behavior.
     if (action=="brightness_gate") { g_brightness_gate_open.store(out > 0.5f); return; }
-    if (action=="r")              { std::lock_guard<std::mutex> lk(G_mtx); G.r=std::clamp(out,0.0f,1.0f); return; }
-    if (action=="g")              { std::lock_guard<std::mutex> lk(G_mtx); G.g=std::clamp(out,0.0f,1.0f); return; }
-    if (action=="b")              { std::lock_guard<std::mutex> lk(G_mtx); G.b=std::clamp(out,0.0f,1.0f); return; }
+    // Look parameters go to every laser's look (MIDI has no laser selection
+    // yet); intensity, flash release, dot timing and scan rate are global.
+    if (action=="r")              { for_all_looks([&](LookSlot& sl) { sl.look.r=std::clamp(out,0.0f,1.0f); }); return; }
+    if (action=="g")              { for_all_looks([&](LookSlot& sl) { sl.look.g=std::clamp(out,0.0f,1.0f); }); return; }
+    if (action=="b")              { for_all_looks([&](LookSlot& sl) { sl.look.b=std::clamp(out,0.0f,1.0f); }); return; }
     if (action=="intensity")      { std::lock_guard<std::mutex> lk(G_mtx); G.intensity=std::clamp(out,0.0f,1.0f); g_brightness_gate_open.store(true); return; }
     if (action=="flash_release_ms") { std::lock_guard<std::mutex> lk(G_mtx); G.flash_release_ms=std::clamp(out,0.0f,2000.0f); return; }
-    if (action=="shape_scale")    { std::lock_guard<std::mutex> lk(G_mtx); G.shape_scale=std::clamp(out,-1.0f,1.0f); return; }
-    if (action=="rotation_speed") { std::lock_guard<std::mutex> lk(G_mtx); G.rotation_speed=out; return; }
-    if (action=="pos_x")          { std::lock_guard<std::mutex> lk(G_mtx); G.pos_x=std::clamp(out,-1.0f,1.0f); return; }
-    if (action=="pos_y")          { std::lock_guard<std::mutex> lk(G_mtx); G.pos_y=std::clamp(out,-1.0f,1.0f); return; }
-    if (action=="dot_amount")     { std::lock_guard<std::mutex> lk(G_mtx); G.dot_amount=std::clamp(out,0.0f,1.0f); return; }
-    if (action=="flicker_hz")     { std::lock_guard<std::mutex> lk(G_mtx); G.flicker_hz=std::max(0.0f,out); return; }
-    if (action=="flicker_on_ms")  { std::lock_guard<std::mutex> lk(G_mtx); G.flicker_on_ms=std::clamp(out,0.0f,kFlickerOnMsMax); return; }
+    if (action=="shape_scale")    { for_all_looks([&](LookSlot& sl) { sl.look.shape_scale=std::clamp(out,-1.0f,1.0f); }); return; }
+    if (action=="rotation_speed") { for_all_looks([&](LookSlot& sl) { sl.look.rotation_speed=out; }); return; }
+    if (action=="pos_x")          { for_all_looks([&](LookSlot& sl) { sl.look.pos_x=std::clamp(out,-1.0f,1.0f); }); return; }
+    if (action=="pos_y")          { for_all_looks([&](LookSlot& sl) { sl.look.pos_y=std::clamp(out,-1.0f,1.0f); }); return; }
+    if (action=="dot_amount")     { for_all_looks([&](LookSlot& sl) { sl.look.dot_amount=std::clamp(out,0.0f,1.0f); }); return; }
+    if (action=="flicker_hz")     { for_all_looks([&](LookSlot& sl) { sl.look.flicker_hz=std::max(0.0f,out); }); return; }
+    if (action=="flicker_on_ms")  { for_all_looks([&](LookSlot& sl) { sl.look.flicker_on_ms=std::clamp(out,0.0f,kFlickerOnMsMax); }); return; }
     if (action=="dot_dwell_us")   { std::lock_guard<std::mutex> lk(G_mtx); G.dot_dwell_us=std::clamp(out,30.0f,3000.0f); return; }
     if (action=="dot_blank_us")   { std::lock_guard<std::mutex> lk(G_mtx); G.dot_blank_us=std::clamp(out,0.0f,3000.0f); return; }
-    if (action=="flicker_phase_degrees") { std::lock_guard<std::mutex> lk(G_mtx); G.flicker_phase_degrees=std::clamp(out,0.0f,360.0f); return; }
-    if (action=="wave_frequency") { std::lock_guard<std::mutex> lk(G_mtx); G.wave_frequency=std::max(0.1f,out); return; }
-    if (action=="wave_amplitude") { std::lock_guard<std::mutex> lk(G_mtx); G.wave_amplitude=std::clamp(out,0.0f,1.0f); return; }
-    if (action=="wave_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.wave_speed=out; return; }
-    if (action=="rainbow_amount") { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_amount=std::clamp(out,0.0f,1.0f); return; }
-    if (action=="rainbow_speed")  { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_speed=out; return; }
-    if (action=="rainbow_phase_degrees") { std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_phase_degrees=std::clamp(out,0.0f,360.0f); return; }
-    if (action=="move_size")      { std::lock_guard<std::mutex> lk(G_mtx); G.move_size=std::clamp(out,0.0f,6.0f); return; }
-    if (action=="move_speed")     { std::lock_guard<std::mutex> lk(G_mtx); G.move_speed=std::max(0.0f,out); return; }
-    if (action=="move_phase_degrees") { std::lock_guard<std::mutex> lk(G_mtx); G.move_phase_degrees=std::clamp(out,0.0f,360.0f); return; }
+    if (action=="flicker_phase_degrees") { for_all_looks([&](LookSlot& sl) { sl.look.flicker_phase_degrees=std::clamp(out,0.0f,360.0f); }); return; }
+    if (action=="wave_frequency") { for_all_looks([&](LookSlot& sl) { sl.look.wave_frequency=std::max(0.1f,out); }); return; }
+    if (action=="wave_amplitude") { for_all_looks([&](LookSlot& sl) { sl.look.wave_amplitude=std::clamp(out,0.0f,1.0f); }); return; }
+    if (action=="wave_speed")     { for_all_looks([&](LookSlot& sl) { sl.look.wave_speed=out; }); return; }
+    if (action=="rainbow_amount") { for_all_looks([&](LookSlot& sl) { sl.look.rainbow_amount=std::clamp(out,0.0f,1.0f); }); return; }
+    if (action=="rainbow_speed")  { for_all_looks([&](LookSlot& sl) { sl.look.rainbow_speed=out; }); return; }
+    if (action=="rainbow_phase_degrees") { for_all_looks([&](LookSlot& sl) { sl.look.rainbow_phase_degrees=std::clamp(out,0.0f,360.0f); }); return; }
+    if (action=="move_size")      { for_all_looks([&](LookSlot& sl) { sl.look.move_size=std::clamp(out,0.0f,6.0f); }); return; }
+    if (action=="move_speed")     { for_all_looks([&](LookSlot& sl) { sl.look.move_speed=std::max(0.0f,out); }); return; }
+    if (action=="move_phase_degrees") { for_all_looks([&](LookSlot& sl) { sl.look.move_phase_degrees=std::clamp(out,0.0f,360.0f); }); return; }
     if (action=="rate_kpps")      { std::lock_guard<std::mutex> lk(G_mtx); G.rate_kpps=std::clamp(out,0.0f,G.max_rate_kpps); return; }
 }
 
 // State for the momentary (hold-to-preview) cue buttons and the momentary
 // flash button - both need to remember what to restore on release.
 static bool      g_midi_cue_save_armed = false;
-static LaserState g_cue_momentary_snapshot;
-static double     g_cue_momentary_angle = 0.0;
-static bool       g_cue_momentary_active = false;
-// Guards the three momentary fields above (MIDI thread + HTTP threads).
+static std::map<int, LaserState> g_cue_momentary_snapshot; // laser id -> look (incl. angle) before the first momentary press
+// Guards g_cue_momentary_snapshot (MIDI thread + HTTP threads).
 // Lock order: always taken *before* G_mtx / G_cues_mtx, never inside them.
 static std::mutex g_cue_momentary_mtx;
 
 // Momentary cue (active only while held) - shared by the MIDI
-// "cue_momentary:<n>" action and POST /api/cue/<n>/momentary/<0|1>: press
-// remembers the current look *and rotation angle* and recalls cue n,
-// release puts both back. Global settings (master brightness, blackout,
-// release time, max rate) aren't part of a recall and stay untouched.
-static bool do_cue_momentary_press(int n) {
+// "cue_momentary:<n>" action and POST /api/cue/<n>/momentary/<0|1>. The first press remembers the looks (and rotation angles)
+// of the lasers it's pressed on, the final release puts them back. Several
+// held at once (multitouch) only remember each laser once, the look from
+// before the first press. Global settings aren't touched.
+static bool do_cue_momentary_press(int n, const LaserTargets& targets = std::nullopt) {
     std::lock_guard<std::mutex> mlk(g_cue_momentary_mtx);
-    if (!g_cue_momentary_active) {
-        { std::lock_guard<std::mutex> lk(G_mtx); g_cue_momentary_snapshot = G; }
-        g_cue_momentary_angle = current_rotation_angle();
+    {
+        const std::vector<int> order = laser_order();
+        std::lock_guard<std::mutex> lk(G_mtx);
+        for (int id : look_targets(targets, order)) {
+            if (g_cue_momentary_snapshot.count(id)) continue;
+            LaserState look = G_looks.at(id).look;
+            look.rotation_phase = G_looks.at(id).current_angle();
+            g_cue_momentary_snapshot[id] = look;
+        }
     }
-    if (!do_cue_recall(n)) return false;
-    g_cue_momentary_active = true;
-    return true;
+    return do_cue_recall(n, targets);
 }
 static void do_cue_momentary_release() {
     std::lock_guard<std::mutex> mlk(g_cue_momentary_mtx);
-    if (!g_cue_momentary_active) return;
     std::lock_guard<std::mutex> lk(G_mtx);
-    G = with_global_settings(g_cue_momentary_snapshot, G, /*keepIntensity=*/true);
-    G_show_snap_seq.fetch_add(1); // back instantly, no morphing
-    request_rotation_angle(g_cue_momentary_angle);
-    g_cue_momentary_active = false;
+    for (const auto& [id, look] : g_cue_momentary_snapshot) {
+        auto it = G_looks.find(id);
+        if (it != G_looks.end()) set_look(it->second, look); // back instantly, at the remembered angle
+    }
+    g_cue_momentary_snapshot.clear();
 }
 static bool       g_motion_held = false;        // for "motion_hold" (freeze movement while held)
-static float      g_pre_motion_speed = 0.0f;
-static float      g_pre_motion_rotation_speed = 0.0f;
-static float      g_pre_motion_rainbow_speed = 0.0f;
-// g_flash_active is declared earlier (near G_pos_x_smooth) so make_frame()
-// can see it too.
-static float      g_pre_flash_r = 1.0f, g_pre_flash_g = 1.0f, g_pre_flash_b = 1.0f;
-static float      g_pre_flash_intensity = 1.0f;
+// g_flash_active is declared earlier so make_frame() can see it too.
 
 // Shared flash press/release - used by both the MIDI dispatcher and the
 // /flash/<0|1> HTTP route, so a flash triggered from either input behaves
-// identically: forces color to white *and* full brightness only while
-// held, restores the exact prior color and brightness on release.
+// identically: every laser shows its look in full white at full brightness
+// while held (applied when drawing - look_render_input() - so no look's own
+// color or the master brightness is changed), and goes back on release.
 static void do_flash_press() {
     std::lock_guard<std::mutex> lk(G_mtx);
     if (g_flash_active) return;
-    g_pre_flash_r = G.r; g_pre_flash_g = G.g; g_pre_flash_b = G.b;
-    g_pre_flash_intensity = G.intensity;
-    G.r = G.g = G.b = 1.0f;
-    G.intensity = 1.0f;
     // Flash must always be visible regardless of the footswitch gate -
     // force it open (and instantly at full level, bypassing any close
     // decay in progress) so pressing flash works even if the pedal was
@@ -2354,46 +2511,52 @@ static void do_flash_press() {
 }
 static void do_flash_release() {
     std::lock_guard<std::mutex> lk(G_mtx);
-    if (!g_flash_active) return;
     // Flash's own release is always instant - flash_release_ms only drives
     // the footswitch gate's close-fade (see g_gate_level), not this.
-    G.r = g_pre_flash_r; G.g = g_pre_flash_g; G.b = g_pre_flash_b;
-    G.intensity = g_pre_flash_intensity;
     g_flash_active = false;
 }
 
 // Shared motion_hold press/release - used by both the MIDI dispatcher and
 // the /motion/hold/<0|1> HTTP route: stops the movement pattern, rotation,
-// *and* the rainbow hue cycle in place while held, resumes all three on
-// release.
+// *and* the rainbow hue cycle in place on every laser while held, resumes
+// all three on release.
 static void do_motion_hold_press() {
-    std::lock_guard<std::mutex> lk(G_mtx);
-    if (g_motion_held) return;
-    g_pre_motion_speed = G.move_speed; G.move_speed = 0.0f;
-    g_pre_motion_rotation_speed = G.rotation_speed; G.rotation_speed = 0.0f;
-    g_pre_motion_rainbow_speed = G.rainbow_speed; G.rainbow_speed = 0.0f;
-    g_motion_held = true;
-    G_motion_frozen.store(true); // cue layers freeze too
-    G_speed_snap_seq.fetch_add(1); // freeze instantly, don't glide to a stop
+    {
+        std::lock_guard<std::mutex> lk(G_mtx);
+        if (g_motion_held) return;
+        g_motion_held = true;
+        G_motion_frozen.store(true); // cue layers freeze too
+    }
+    for_all_looks([](LookSlot& sl) {
+        sl.pre_motion_move_speed = sl.look.move_speed;         sl.look.move_speed = 0.0f;
+        sl.pre_motion_rotation_speed = sl.look.rotation_speed; sl.look.rotation_speed = 0.0f;
+        sl.pre_motion_rainbow_speed = sl.look.rainbow_speed;   sl.look.rainbow_speed = 0.0f;
+        sl.snap_speeds = true; // freeze instantly, don't glide to a stop
+    });
 }
 static void do_motion_hold_release() {
-    std::lock_guard<std::mutex> lk(G_mtx);
-    if (!g_motion_held) return;
-    G.move_speed = g_pre_motion_speed;
-    G.rotation_speed = g_pre_motion_rotation_speed;
-    G.rainbow_speed = g_pre_motion_rainbow_speed;
-    g_motion_held = false;
-    G_motion_frozen.store(false);
+    {
+        std::lock_guard<std::mutex> lk(G_mtx);
+        if (!g_motion_held) return;
+        g_motion_held = false;
+        G_motion_frozen.store(false);
+    }
+    for_all_looks([](LookSlot& sl) {
+        sl.look.move_speed = sl.pre_motion_move_speed;
+        sl.look.rotation_speed = sl.pre_motion_rotation_speed;
+        sl.look.rainbow_speed = sl.pre_motion_rainbow_speed;
+    });
 }
 
 // One-shot rotation reset - used by both the MIDI "rotation_reset" note
 // action and the /rotation/reset REST route: snaps the rotation angle back
 // to 0 and stops it from spinning further (rotation_speed to 0), rather
 // than the momentary hold/restore pattern the other do_* helpers use.
-static void do_rotation_reset() {
-    std::lock_guard<std::mutex> lk(G_mtx);
-    G.rotation_speed = 0.0f;
-    request_rotation_angle(0.0); // angle 0, stop instantly (no glide)
+static void do_rotation_reset(const LaserTargets& targets = std::nullopt) {
+    for_target_looks(targets, [](LookSlot& sl) {
+        sl.look.rotation_speed = 0.0f;
+        sl.request_angle(0.0); // angle 0, stop instantly (no glide)
+    });
 }
 
 // Applies one note-triggered (button) action. `isPress`/`isRelease`
@@ -2426,14 +2589,14 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         // both is safe.
         static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","staticwave"};
         std::string s = action.substr(6);
-        if (SHAPES.count(s)) { std::lock_guard<std::mutex> lk(G_mtx); G.shape=s; }
+        if (SHAPES.count(s)) for_all_looks([&](LookSlot& sl) { sl.look.shape = s; });
         return;
     }
     if (action.rfind("move:",0)==0) {
         // See shape:'s comment above - same alternating-LED pad behavior.
         static const std::set<std::string> MOVES{"none","circle","pan","tilt","tiltup","tiltdown","eight","random"};
         std::string m = action.substr(5);
-        if (MOVES.count(m)) { std::lock_guard<std::mutex> lk(G_mtx); G.move_mode=m; }
+        if (MOVES.count(m)) for_all_looks([&](LookSlot& sl) { sl.look.move_mode = m; });
         return;
     }
     if (action.rfind("color:",0)==0) {
@@ -2441,14 +2604,12 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         std::string c = action.substr(6);
         float cr,cg,cb;
         if (!named_color_rgb(c, cr, cg, cb)) return;
-        std::lock_guard<std::mutex> lk(G_mtx);
-        G.r=cr; G.g=cg; G.b=cb;
         // A plain color-select button is mutually exclusive with the
         // rainbow preset (matches the original mapping's "colors" exclusive
         // group, which included both) - picking a solid color should always
         // show that color immediately, not stay hidden behind a still-active
         // rainbow blend.
-        G.rainbow_amount = 0.0f;
+        for_all_looks([&](LookSlot& sl) { sl.look.r = cr; sl.look.g = cg; sl.look.b = cb; sl.look.rainbow_amount = 0.0f; });
         return;
     }
     if (action=="blackout_toggle") {
@@ -2522,7 +2683,7 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
     // full rainbow blend at a slow animation speed, one press away.
     if (action=="rainbow_preset_slowfull") {
         if (!isPress) return;
-        std::lock_guard<std::mutex> lk(G_mtx); G.rainbow_amount=1.0f; G.rainbow_speed=0.15f;
+        for_all_looks([](LookSlot& sl) { sl.look.rainbow_amount = 1.0f; sl.look.rainbow_speed = 0.15f; });
         return;
     }
     // Momentary movement freeze (motion/hold in the original mapping):
@@ -2546,9 +2707,8 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
     // Momentary mirror (matches the original BeamCommander's invert/x/hold):
     // flips the output horizontally while held, un-flips on release.
     if (action=="mirror_hold") {
-        std::lock_guard<std::mutex> lk(G_mtx);
-        if (isPress) G.mirror_x = true;
-        else if (isRelease) G.mirror_x = false;
+        if (isPress) for_all_looks([](LookSlot& sl) { sl.look.mirror_x = true; });
+        else if (isRelease) for_all_looks([](LookSlot& sl) { sl.look.mirror_x = false; });
         return;
     }
     if (action=="flash") {
@@ -2871,7 +3031,13 @@ static void sync_group_leds(const std::string& prefix, const std::function<int(c
 // scheme was tried and reverted (see git history) since it caused visible
 // blinking on this hardware.
 static void sync_shape_color_move_leds(int forceChannel, int forceNumber) {
-    LaserState snap; { std::lock_guard<std::mutex> lk(G_mtx); snap = G; }
+    LaserState snap;
+    {
+        const std::vector<int> order = laser_order();
+        std::lock_guard<std::mutex> lk(G_mtx);
+        sync_look_slots(order);
+        snap = G_looks.at(primary_look_id(order)).look; // the first laser's look
+    }
 
     sync_group_leds("shape:", [&](const std::string& action) {
         return (action.substr(6) == snap.shape) ? 127 : 0;
@@ -3059,12 +3225,28 @@ static void save_magic_to_disk(const std::string& body) {
     if (ec) std::cerr << "[magic-touch] could not save " << MAGIC_FILE << ": " << ec.message() << "\n";
 }
 
-#define APPLY_F(key, field) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) G.field=_v; }
-#define APPLY_S(key, field) { auto _v=json_str(req.body,key); if(!_v.empty()) G.field=_v; }
-#define APPLY_B(key, field) { if(req.body.find("\""+std::string(key)+"\"")!=std::string::npos) G.field=json_bool(req.body,key,G.field); }
-#define APPLY_CLAMP(key, field, lo, hi) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) G.field=std::clamp(_v,(float)(lo),(float)(hi)); }
+// Apply a body key to `T_` - G for global settings, a laser's look for look fields.
+#define APPLY_F(key, field) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) T_.field=_v; }
+#define APPLY_S(key, field) { auto _v=json_str(req.body,key); if(!_v.empty()) T_.field=_v; }
+#define APPLY_B(key, field) { if(req.body.find("\""+std::string(key)+"\"")!=std::string::npos) T_.field=json_bool(req.body,key,T_.field); }
+#define APPLY_CLAMP(key, field, lo, hi) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) T_.field=std::clamp(_v,(float)(lo),(float)(hi)); }
 
 // ── main ───────────────────────────────────────────────────────────────────────
+// The lasers a request targets: ?lasers=2,3 or a "lasers":[2,3] array in a
+// JSON body - the browser's laser selection. None = every look (see
+// look_targets()).
+static LaserTargets request_lasers(const httplib::Request& req, bool fromBody = true) {
+    std::vector<int> ids;
+    if (req.has_param("lasers")) {
+        std::stringstream ss(req.get_param_value("lasers"));
+        std::string tok;
+        while (std::getline(ss, tok, ',')) { try { if (!tok.empty()) ids.push_back(std::stoi(tok)); } catch (...) {} }
+        return ids;
+    }
+    if (fromBody && json_int_array(req.body, "lasers", ids)) return ids;
+    return std::nullopt;
+}
+
 int main(int argc, char* argv[]) {
     int http_port = 8000;
     for (int i=1;i<argc;++i) {
@@ -3087,7 +3269,8 @@ int main(int argc, char* argv[]) {
         // ones a cue uses (packaging/sync_default_data.sh).
         std::set<std::string> used;
         { std::lock_guard<std::mutex> lk(G_cues_mtx);
-          for (const auto& [num, c] : G_cues) if (!c.ilda_file.empty()) used.insert(c.ilda_file); }
+          for (const auto& [num, c] : G_cues)
+              c.for_each_look([&](const LaserState& l) { if (!l.ilda_file.empty()) used.insert(l.ilda_file); }); }
         for (const auto& f : used) ilda_clip(f);
     }
     load_lasers_from_disk();
@@ -3128,11 +3311,13 @@ int main(int argc, char* argv[]) {
     });
 
     // ── POST /api/state — bulk update ──────────────────────────────────────────
+    // Global settings go to G; look fields go to the look of every laser in
+    // `lasers` (the browser's selection), or of every laser without it.
     svr.Post("/api/state",[](const httplib::Request& req,httplib::Response& res){
+        const LaserTargets targets = request_lasers(req);
         { // scope the lock so it's released before state_to_json() re-locks G_mtx
         std::lock_guard<std::mutex> lk(G_mtx);
-        APPLY_S("shape",shape)  APPLY_S("move_mode",move_mode)
-        APPLY_F("radius",radius)  APPLY_CLAMP("radius",radius,0,1)
+        LaserState& T_ = G;
         APPLY_F("max_rate_kpps",max_rate_kpps)  APPLY_CLAMP("max_rate_kpps",max_rate_kpps,1,100)
         APPLY_F("output_latency_ms",output_latency_ms) APPLY_CLAMP("output_latency_ms",output_latency_ms,10,200)
         APPLY_F("dot_dwell_us",dot_dwell_us) APPLY_CLAMP("dot_dwell_us",dot_dwell_us,30,3000)
@@ -3145,31 +3330,36 @@ int main(int argc, char* argv[]) {
         // comment for the full footswitch/fader interaction.
         if (json_float(req.body,"intensity",-9999) != -9999) g_brightness_gate_open.store(true);
         APPLY_F("flash_release_ms",flash_release_ms) APPLY_CLAMP("flash_release_ms",flash_release_ms,0,2000)
-        APPLY_F("r",r) APPLY_CLAMP("r",r,0,1)
-        APPLY_F("g",g) APPLY_CLAMP("g",g,0,1)
-        APPLY_F("b",b) APPLY_CLAMP("b",b,0,1)
-        APPLY_F("shape_scale",shape_scale) APPLY_CLAMP("shape_scale",shape_scale,-1,1)
-        APPLY_F("pos_x",pos_x) APPLY_CLAMP("pos_x",pos_x,-1,1)
-        APPLY_F("pos_y",pos_y) APPLY_CLAMP("pos_y",pos_y,-1,1)
-        APPLY_F("rotation_speed",rotation_speed)
-        APPLY_B("mirror_x",mirror_x)
-        APPLY_F("move_speed",move_speed)
-        APPLY_F("move_size",move_size) APPLY_CLAMP("move_size",move_size,0,6)
-        APPLY_F("move_phase_degrees",move_phase_degrees) APPLY_CLAMP("move_phase_degrees",move_phase_degrees,0,360)
-        APPLY_F("wave_frequency",wave_frequency)
-        APPLY_F("wave_amplitude",wave_amplitude) APPLY_CLAMP("wave_amplitude",wave_amplitude,0,1)
-        APPLY_F("wave_speed",wave_speed)
-        APPLY_F("rainbow_amount",rainbow_amount) APPLY_CLAMP("rainbow_amount",rainbow_amount,0,1)
-        APPLY_F("rainbow_speed",rainbow_speed)
-        APPLY_F("rainbow_phase_degrees",rainbow_phase_degrees) APPLY_CLAMP("rainbow_phase_degrees",rainbow_phase_degrees,0,360)
-        APPLY_F("dot_amount",dot_amount) APPLY_CLAMP("dot_amount",dot_amount,0,1)
-        APPLY_F("flicker_hz",flicker_hz)
-        APPLY_F("flicker_on_ms",flicker_on_ms) APPLY_CLAMP("flicker_on_ms",flicker_on_ms,0,kFlickerOnMsMax)
-        APPLY_F("flicker_phase_degrees",flicker_phase_degrees) APPLY_CLAMP("flicker_phase_degrees",flicker_phase_degrees,0,360)
         APPLY_B("blackout",blackout)
-        APPLY_F("points",points)
-        APPLY_F("ilda_fps",ilda_fps) APPLY_CLAMP("ilda_fps",ilda_fps,1,120)
         } // lock released here
+        for_target_looks(targets, [&](LookSlot& sl) {
+            LaserState& T_ = sl.look;
+            APPLY_S("shape",shape)  APPLY_S("move_mode",move_mode)
+            APPLY_F("radius",radius)  APPLY_CLAMP("radius",radius,0,1)
+            APPLY_F("r",r) APPLY_CLAMP("r",r,0,1)
+            APPLY_F("g",g) APPLY_CLAMP("g",g,0,1)
+            APPLY_F("b",b) APPLY_CLAMP("b",b,0,1)
+            APPLY_F("shape_scale",shape_scale) APPLY_CLAMP("shape_scale",shape_scale,-1,1)
+            APPLY_F("pos_x",pos_x) APPLY_CLAMP("pos_x",pos_x,-1,1)
+            APPLY_F("pos_y",pos_y) APPLY_CLAMP("pos_y",pos_y,-1,1)
+            APPLY_F("rotation_speed",rotation_speed)
+            APPLY_B("mirror_x",mirror_x)
+            APPLY_F("move_speed",move_speed)
+            APPLY_F("move_size",move_size) APPLY_CLAMP("move_size",move_size,0,6)
+            APPLY_F("move_phase_degrees",move_phase_degrees) APPLY_CLAMP("move_phase_degrees",move_phase_degrees,0,360)
+            APPLY_F("wave_frequency",wave_frequency)
+            APPLY_F("wave_amplitude",wave_amplitude) APPLY_CLAMP("wave_amplitude",wave_amplitude,0,1)
+            APPLY_F("wave_speed",wave_speed)
+            APPLY_F("rainbow_amount",rainbow_amount) APPLY_CLAMP("rainbow_amount",rainbow_amount,0,1)
+            APPLY_F("rainbow_speed",rainbow_speed)
+            APPLY_F("rainbow_phase_degrees",rainbow_phase_degrees) APPLY_CLAMP("rainbow_phase_degrees",rainbow_phase_degrees,0,360)
+            APPLY_F("dot_amount",dot_amount) APPLY_CLAMP("dot_amount",dot_amount,0,1)
+            APPLY_F("flicker_hz",flicker_hz)
+            APPLY_F("flicker_on_ms",flicker_on_ms) APPLY_CLAMP("flicker_on_ms",flicker_on_ms,0,kFlickerOnMsMax)
+            APPLY_F("flicker_phase_degrees",flicker_phase_degrees) APPLY_CLAMP("flicker_phase_degrees",flicker_phase_degrees,0,360)
+            APPLY_F("points",points)
+            APPLY_F("ilda_fps",ilda_fps) APPLY_CLAMP("ilda_fps",ilda_fps,1,120)
+        });
         res.set_content(state_to_json(),"application/json");
     });
 
@@ -3178,7 +3368,7 @@ int main(int argc, char* argv[]) {
     svr.Post(R"(/laser/shape/([a-z]+))",[](const httplib::Request& req,httplib::Response& res){
         std::string s=req.matches[1];
         if(!SHAPES.count(s)){res.status=400;res.set_content("{\"error\":\"unknown shape\"}","application/json");return;}
-        {std::lock_guard<std::mutex> lk(G_mtx);G.shape=s;}
+        for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.shape = s; });
         res.set_content("{\"shape\":\""+s+"\"}","application/json");
     });
 
@@ -3194,35 +3384,33 @@ int main(int argc, char* argv[]) {
 
     // ── POST /laser/color/<r>/<g>/<b> ──────────────────────────────────────────
     svr.Post(R"(/laser/color/([\d.]+)/([\d.]+)/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
-        try{std::lock_guard<std::mutex> lk(G_mtx);
-            float rv=std::stof(std::string(req.matches[1]));
+        try{float rv=std::stof(std::string(req.matches[1]));
             float gv=std::stof(std::string(req.matches[2]));
             float bv=std::stof(std::string(req.matches[3]));
-            auto norm=[](float v){return v>1.0f?v/255.0f:v;};
-            G.r=std::clamp(norm(rv),0.0f,1.0f);
-            G.g=std::clamp(norm(gv),0.0f,1.0f);
-            G.b=std::clamp(norm(bv),0.0f,1.0f);}catch(...){}
+            auto norm=[](float v){return std::clamp(v>1.0f?v/255.0f:v,0.0f,1.0f);};
+            for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.r=norm(rv); sl.look.g=norm(gv); sl.look.b=norm(bv); });
+            }catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
 
     // ── POST /laser/position/<x>/<y> ───────────────────────────────────────────
     svr.Post(R"(/laser/position/(-?[\d.]+)/(-?[\d.]+))",[](const httplib::Request& req,httplib::Response& res){
-        try{std::lock_guard<std::mutex> lk(G_mtx);
-            G.pos_x=std::clamp(std::stof(std::string(req.matches[1])),-1.0f,1.0f);
-            G.pos_y=std::clamp(std::stof(std::string(req.matches[2])),-1.0f,1.0f);}catch(...){}
+        try{const float x=std::clamp(std::stof(std::string(req.matches[1])),-1.0f,1.0f);
+            const float y=std::clamp(std::stof(std::string(req.matches[2])),-1.0f,1.0f);
+            for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.pos_x=x; sl.look.pos_y=y; });}catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
 
     // ── POST /laser/rotation/speed/<val> ───────────────────────────────────────
     svr.Post(R"(/laser/rotation/speed/(-?[\d.]+))",[](const httplib::Request& req,httplib::Response& res){
-        try{std::lock_guard<std::mutex> lk(G_mtx);G.rotation_speed=std::stof(std::string(req.matches[1]));}catch(...){}
+        try{const float v=std::stof(std::string(req.matches[1])); for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.rotation_speed=v; });}catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
 
     // ── POST /rotation/reset — snap angle back to 0 and stop spinning ──────────
     // Shares do_rotation_reset with the MIDI "rotation_reset" note action.
-    svr.Post("/rotation/reset",[](const httplib::Request&,httplib::Response& res){
-        do_rotation_reset();
+    svr.Post("/rotation/reset",[](const httplib::Request& req,httplib::Response& res){
+        do_rotation_reset(request_lasers(req));
         res.set_content(state_to_json(),"application/json");
     });
 
@@ -3231,32 +3419,32 @@ int main(int argc, char* argv[]) {
     svr.Post(R"(/move/mode/([a-z]+))",[](const httplib::Request& req,httplib::Response& res){
         std::string m=req.matches[1];
         if(!MOVES.count(m)){res.status=400;res.set_content("{\"error\":\"unknown mode\"}","application/json");return;}
-        {std::lock_guard<std::mutex> lk(G_mtx);G.move_mode=m;}
+        for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.move_mode = m; });
         res.set_content("{\"move_mode\":\""+m+"\"}","application/json");
     });
 
     // ── POST /move/speed/<val>  /move/size/<val> ───────────────────────────────
     svr.Post(R"(/move/speed/(-?[\d.]+))",[](const httplib::Request& req,httplib::Response& res){
-        try{std::lock_guard<std::mutex> lk(G_mtx);G.move_speed=std::stof(std::string(req.matches[1]));}catch(...){}
+        try{const float v=std::stof(std::string(req.matches[1])); for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.move_speed=v; });}catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
     svr.Post(R"(/move/size/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
-        try{std::lock_guard<std::mutex> lk(G_mtx);G.move_size=std::clamp(std::stof(std::string(req.matches[1])),0.0f,6.0f);}catch(...){}
+        try{const float v=std::clamp(std::stof(std::string(req.matches[1])),0.0f,6.0f); for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.move_size=v; });}catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
 
     // ── POST /laser/rainbow/amount/<val>  /speed/<val> ─────────────────────────
     svr.Post(R"(/laser/rainbow/amount/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
-        try{std::lock_guard<std::mutex> lk(G_mtx);G.rainbow_amount=std::clamp(std::stof(std::string(req.matches[1])),0.0f,1.0f);}catch(...){}
+        try{const float v=std::clamp(std::stof(std::string(req.matches[1])),0.0f,1.0f); for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.rainbow_amount=v; });}catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
     // ── POST /laser/rainbow/phase/<deg> ─ hue offset per laser, 0..360 ────────
     svr.Post(R"(/laser/rainbow/phase/([\d.]+))",[](const httplib::Request& req,httplib::Response& res){
-        try{std::lock_guard<std::mutex> lk(G_mtx);G.rainbow_phase_degrees=std::clamp(std::stof(std::string(req.matches[1])),0.0f,360.0f);}catch(...){}
+        try{const float v=std::clamp(std::stof(std::string(req.matches[1])),0.0f,360.0f); for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.rainbow_phase_degrees=v; });}catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
     svr.Post(R"(/laser/rainbow/speed/(-?[\d.]+))",[](const httplib::Request& req,httplib::Response& res){
-        try{std::lock_guard<std::mutex> lk(G_mtx);G.rainbow_speed=std::stof(std::string(req.matches[1]));}catch(...){}
+        try{const float v=std::stof(std::string(req.matches[1])); for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.rainbow_speed=v; });}catch(...){}
         res.set_content(state_to_json(),"application/json");
     });
 
@@ -3271,7 +3459,8 @@ int main(int argc, char* argv[]) {
     // Used identically by the UI, REST, and the MIDI "mirror_hold" action
     // (a hold button flips while held, un-flips on release).
     svr.Post(R"(/mirror/x/([01]))",[](const httplib::Request& req,httplib::Response& res){
-        {std::lock_guard<std::mutex> lk(G_mtx);G.mirror_x=(req.matches[1]=="1");}
+        const bool on = req.matches[1]=="1";
+        for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.mirror_x = on; });
         res.set_content(state_to_json(),"application/json");
     });
 
@@ -3320,12 +3509,16 @@ int main(int argc, char* argv[]) {
     // list and each laser's arm state/zone calibration (G_lasers/
     // lasers.json) are entirely separate from LaserState and untouched by
     // a show reset.
-    svr.Post("/api/reset",[](const httplib::Request&,httplib::Response& res){
-        {
-            std::lock_guard<std::mutex> lk(G_mtx);
-            G = with_global_settings(LaserState{}, G, /*keepIntensity=*/false);
-            G_show_layers.clear(); // reset = back to a single default look
-        }
+    svr.Post("/api/reset",[](const httplib::Request& req,httplib::Response& res){
+        // The target lasers (all without `lasers`) go back to the default
+        // look, without layers; master brightness goes back to full too
+        // when every laser is reset.
+        const LaserTargets targets = request_lasers(req);
+        for_target_looks(targets, [](LookSlot& sl) {
+            set_look(sl, LaserState{});
+            sl.layers.clear(); // reset = back to a single default look
+        });
+        if (!targets) { std::lock_guard<std::mutex> lk(G_mtx); G.intensity = LaserState{}.intensity; }
         res.set_content(state_to_json(),"application/json");
     });
 
@@ -3506,7 +3699,7 @@ int main(int argc, char* argv[]) {
           bool first=true;
           for (auto& [num,s] : G_cues) {
               if(!first) ss<<","; first=false;
-              ss<<"\""<<num<<"\":"<<cue_state_to_json(s);
+              ss<<"\""<<num<<"\":"<<cue_to_json(s);
           } }
         ss<<"}";
         res.set_content(ss.str(),"application/json");
@@ -3516,7 +3709,7 @@ int main(int argc, char* argv[]) {
     svr.Post(R"(/api/cue/(\d+)/save)",[](const httplib::Request& req,httplib::Response& res){
         int n=std::stoi(std::string(req.matches[1]));
         if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
-        do_cue_save(n);
+        if(!do_cue_save(n, request_lasers(req))){res.status=400;res.set_content("{\"error\":\"no laser to save\"}","application/json");return;}
         res.set_content("{\"saved\":"+std::to_string(n)+"}","application/json");
     });
 
@@ -3548,7 +3741,7 @@ int main(int argc, char* argv[]) {
             if (r.status != 200) { ildaError(res, r.status, r.error); return; }
             file = r.file; name = r.name;
         }
-        ilda_cue_assign(n, file, name);
+        ilda_cue_assign(n, file, name, request_lasers(req, /*fromBody=*/false));
         res.set_content(state_to_json(),"application/json");
     });
 
@@ -3612,8 +3805,11 @@ int main(int argc, char* argv[]) {
         }
         {
             std::lock_guard<std::mutex> lk(G_mtx);
-            bool playing = G.shape == "ilda" && G.ilda_file == file;
-            for (const auto& L : G_show_layers) playing = playing || (L.s.shape == "ilda" && L.s.ilda_file == file);
+            bool playing = false;
+            for (const auto& [id, sl] : G_looks) {
+                playing = playing || (sl.look.shape == "ilda" && sl.look.ilda_file == file);
+                for (const auto& L : sl.layers) playing = playing || (L.s.shape == "ilda" && L.s.ilda_file == file);
+            }
             if (playing) { ildaError(res, 409, "currently playing"); return; }
         }
         std::error_code ec;
@@ -3655,7 +3851,7 @@ int main(int argc, char* argv[]) {
     svr.Post(R"(/api/cue/(\d+)/recall)",[](const httplib::Request& req,httplib::Response& res){
         int n=std::stoi(std::string(req.matches[1]));
         if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
-        if(!do_cue_recall(n)){res.status=404;res.set_content("{\"error\":\"empty cue\"}","application/json");return;}
+        if(!do_cue_recall(n, request_lasers(req))){res.status=404;res.set_content("{\"error\":\"empty cue\"}","application/json");return;}
         res.set_content(state_to_json(),"application/json");
     });
 
@@ -3667,7 +3863,7 @@ int main(int argc, char* argv[]) {
         int n=std::stoi(std::string(req.matches[1]));
         if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
         if(req.matches[2]=="1"){
-            if(!do_cue_momentary_press(n)){res.status=404;res.set_content("{\"error\":\"empty cue\"}","application/json");return;}
+            if(!do_cue_momentary_press(n, request_lasers(req))){res.status=404;res.set_content("{\"error\":\"empty cue\"}","application/json");return;}
         } else do_cue_momentary_release();
         res.set_content(state_to_json(),"application/json");
     });
@@ -3679,13 +3875,13 @@ int main(int argc, char* argv[]) {
         int n=std::stoi(std::string(req.matches[1]));
         const std::string m = req.matches[2];
         if(n<1||n>MAX_CUES){res.status=400;res.set_content("{\"error\":\"invalid cue number\"}","application/json");return;}
-        if(!do_cue_layer(n, m=="on" ? 1 : m=="off" ? 0 : 2)){res.status=404;res.set_content("{\"error\":\"empty cue\"}","application/json");return;}
+        if(!do_cue_layer(n, m=="on" ? 1 : m=="off" ? 0 : 2, request_lasers(req))){res.status=404;res.set_content("{\"error\":\"empty cue\"}","application/json");return;}
         res.set_content(state_to_json(),"application/json");
     });
 
     // ── POST /api/layers/clear — release all cue layers ─────────────────────────
-    svr.Post("/api/layers/clear",[](const httplib::Request&,httplib::Response& res){
-        do_layers_clear();
+    svr.Post("/api/layers/clear",[](const httplib::Request& req,httplib::Response& res){
+        do_layers_clear(request_lasers(req));
         res.set_content(state_to_json(),"application/json");
     });
 
