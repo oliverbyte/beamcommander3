@@ -45,7 +45,7 @@ endif()
 option(BEAMCOMMANDER_TESTS "Build the backend unit tests" OFF)
 if (BEAMCOMMANDER_TESTS)
   enable_testing()
-  foreach(test_name output_pipeline param_smoothing show_fx ilda_file)
+  foreach(test_name output_pipeline param_smoothing show_fx ilda_file laser_text)
     add_executable(${test_name}_tests tests/test_${test_name}.cpp)
     target_include_directories(${test_name}_tests PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}" "${LIBERA_DIR}/include")

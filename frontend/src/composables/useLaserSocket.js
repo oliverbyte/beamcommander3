@@ -222,6 +222,7 @@ export const LOOK_FIELDS = [
   'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed', 'move_size', 'move_phase_degrees',
   'wave_frequency', 'wave_amplitude', 'wave_speed', 'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees',
   'dot_amount', 'flicker_hz', 'flicker_on_ms', 'flicker_phase_degrees', 'layers',
+  'text', 'font', 'text_size', 'text_spacing', 'text_bold', 'text_italic', 'text_underline', 'frame_points',
 ]
 const LOOK_FIELD_SET = new Set(LOOK_FIELDS)
 // Shows the first targeted laser's look in the top-level fields.
@@ -232,7 +233,7 @@ function projectSelection() {
 }
 // Local echo of a look change on every targeted laser, so "mixed" marks and
 // the projection agree with the change before the daemon answers.
-function patchLocalLooks(partial, ids = null) {
+export function patchLocalLooks(partial, ids = null) {
   const lookPart = Object.fromEntries(Object.entries(partial).filter(([k]) => LOOK_FIELD_SET.has(k)))
   if (!Object.keys(lookPart).length || !laserState.looks) return
   for (const id of ids || targetLookIds()) if (laserState.looks[id]) Object.assign(laserState.looks[id], lookPart)
@@ -261,6 +262,12 @@ watch(() => [laserSelection.ids.join(','), lasers.map((l) => l.id).join(',')], p
 export const shapeCatalog = reactive({ dependent: [], shapes: [] })
 export async function fetchShapes() {
   Object.assign(shapeCatalog, await api('/shapes'))
+}
+// The text shape's fonts: [{id, label, bold, italic}] (GET /api/fonts) -
+// single-stroke Hershey fonts; bold/italic = whether the font has that style.
+export const textFonts = reactive([])
+export async function fetchFonts() {
+  textFonts.splice(0, textFonts.length, ...(await api('/fonts')))
 }
 function shapeUses(shape, key) {
   const info = shapeCatalog.shapes.find((s) => s.id === shape)
@@ -488,7 +495,7 @@ export async function recallCue(n) {
 // projector settings - scan rate, max rate, output latency, dot dwell/blanking -
 // are global, not part of cues.
 const CUE_STATE_FIELDS = [
-  'shape', 'ilda_file', 'radius', 'points', 'r', 'g', 'b', 'shape_scale',
+  'shape', 'ilda_file', 'text', 'font', 'text_size', 'text_spacing', 'text_bold', 'text_italic', 'text_underline', 'radius', 'points', 'r', 'g', 'b', 'shape_scale',
   'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed',
   'move_size', 'move_phase_degrees', 'wave_frequency', 'wave_amplitude', 'wave_speed',
   'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees',

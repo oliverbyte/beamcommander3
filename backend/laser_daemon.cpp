@@ -14,6 +14,7 @@
 #include "param_smoothing.h" // soft transitions of show parameters (unit-tested, see backend/tests/)
 #include "show_fx.h"         // flicker rate + on time (unit-tested, see backend/tests/)
 #include "test_patterns.h"   // official ILDA test patterns + ILDA file reader (unit-tested, see backend/tests/)
+#include "laser_text.h"      // text in single-stroke Hershey fonts (unit-tested, see backend/tests/)
 
 #include <atomic>
 #include <algorithm>
@@ -228,6 +229,17 @@ struct LaserState {
     std::string ilda_file;
     std::string ilda_name;
     float ilda_fps        = 30.0f;
+    // Text look (shape == "text", see make_text_frame() / laser_text.h):
+    // the text (UTF-8), its Hershey font (text_font_catalog() id), cap
+    // height in output units, extra letter spacing (in cap heights) and
+    // styles. Part of cues.
+    std::string text      = "TEXT";
+    std::string font      = "sans";
+    float text_size       = 0.3f;
+    float text_spacing    = 0.0f;
+    bool  text_bold       = false;
+    bool  text_italic     = false;
+    bool  text_underline  = false;
     float radius          = 0.7f;     // normalised 0..1
     int   points          = 300;
     float shape_scale     = 0.0f;     // -1..1 (0 = no extra scale)
@@ -473,6 +485,8 @@ struct LookSlot {
     bool   snap_speeds = false;    // speeds jump - a freeze must be a freeze (motion hold)
     bool   rotation_pending = false;
     double pending_angle = 0.0;    // start angle (radians), applied with the look's own rotation speed
+    // Points in this laser's last preview frame (the UI's frame rate hint).
+    std::size_t frame_points = 0;
     // Speeds to restore when motion hold is released.
     float  pre_motion_move_speed = 0.0f, pre_motion_rotation_speed = 0.0f, pre_motion_rainbow_speed = 0.0f;
 
@@ -795,8 +809,63 @@ static core::Frame make_ilda_frame(const LaserState& s, double movement_phase, c
     return frame;
 }
 
+// A text look: the text in its Hershey font and styles (laser_text.h), fitted
+// into the look's point budget, then the look's scale, rotation, position +
+// movement and mirror like a shape. Colored with the beam color - or, with
+// rainbow_amount > 0, a rainbow wave running across the text from left to
+// right (same hue math as make_frame(): starts at the beam color, more
+// amount = more bands, rainbow_speed animates it). Master brightness and a
+// held white flash apply; blackout, zone and masks follow later.
+static core::Frame make_text_frame(const LaserState& s, double movement_phase, double rainbow_cycles, const RenderPose& pose) {
+    core::Frame frame;
+    TextStyle st;
+    st.font = s.font;
+    st.bold = s.text_bold; st.italic = s.text_italic; st.underline = s.text_underline;
+    const float sf = s.shape_scale >= 0 ? (1.0f + s.shape_scale * 2.0f) : (1.0f + s.shape_scale * 0.7f);
+    st.size = std::max(0.01f, s.text_size * sf);
+    st.spacing = s.text_spacing;
+    frame.points = text_points(layout_text(s.text, st), (std::size_t)std::clamp(pose.maxPoints, 100, kFramePointBudget));
+
+    float minX = 1e9f, maxX = -1e9f;
+    for (const auto& p : frame.points) if (p.r > 0.0f) { minX = std::min(minX, p.x); maxX = std::max(maxX, p.x); }
+    const float width = std::max(1e-4f, maxX - minX);
+
+    constexpr float kRainbowFadeIn = 0.1f;
+    float rb_fade = std::clamp(s.rainbow_amount / kRainbowFadeIn, 0.0f, 1.0f);
+    rb_fade = rb_fade * rb_fade * (3.0f - 2.0f * rb_fade);
+    float beam_h, beam_s, beam_v;
+    rgb_to_hsv(std::clamp(s.r, 0.0f, 1.0f), std::clamp(s.g, 0.0f, 1.0f), std::clamp(s.b, 0.0f, 1.0f), beam_h, beam_s, beam_v);
+    const float rb_sat = beam_s + (1.0f - beam_s) * rb_fade;
+    const float rb_val = beam_v + (1.0f - beam_v) * rb_fade;
+    float rainbow_phase = (float)std::fmod(beam_h + rainbow_cycles, 1.0);
+    if (rainbow_phase < 0.0f) rainbow_phase += 1.0f;
+    const bool rainbow = s.rainbow_amount > 0.0f && !g_flash_active;
+
+    const Pt off = look_offset(s, movement_phase, pose);
+    const float mirror_sign = s.mirror_x ? -1.0f : 1.0f;
+    const float c = std::cos((float)pose.rotation), sn = std::sin((float)pose.rotation);
+    const float bri = std::clamp(s.intensity, 0.0f, 1.0f);
+    for (auto& p : frame.points) {
+        const bool lit = p.r > 0.0f;
+        const float xNorm = (p.x - minX) / width;
+        const float px = mirror_sign * (p.x * c - p.y * sn + off.x);
+        const float py = p.x * sn + p.y * c + off.y;
+        p.x = px; p.y = py;
+        if (!lit || std::fabs(px) > 1.0f || std::fabs(py) > 1.0f) { p.r = p.g = p.b = 0.0f; continue; }
+        float fr = s.r, fg = s.g, fb = s.b;
+        if (rainbow) {
+            float hue = std::fmod(rainbow_phase - xNorm * s.rainbow_amount * 24.0f, 1.0f);
+            if (hue < 0.0f) hue += 1.0f;
+            hsv_to_rgb(hue, rb_sat, rb_val, fr, fg, fb);
+        }
+        p.r = fr * bri; p.g = fg * bri; p.b = fb * bri;
+    }
+    return frame;
+}
+
 static core::Frame make_frame(const LaserState& s, double movement_phase, double rainbow_cycles, const RenderPose& pose) {
     if (s.shape == "ilda") return make_ilda_frame(s, movement_phase, pose);
+    if (s.shape == "text") return make_text_frame(s, movement_phase, rainbow_cycles, pose);
     auto base = gen_base_shape(s, pose);
 
     // Rotation - always applied at the current phase, even when
@@ -1118,6 +1187,14 @@ static void look_fields_json(std::ostringstream& ss, const LookSlot& sl) {
        << "\"ilda_file\":\""   << L.ilda_file     << "\","
        << "\"ilda_name\":\""   << L.ilda_name     << "\","
        << "\"ilda_fps\":"      << L.ilda_fps       << ","
+       << "\"text\":"          << json_escape(L.text) << ","
+       << "\"font\":\""        << L.font           << "\","
+       << "\"text_size\":"     << L.text_size      << ","
+       << "\"text_spacing\":"  << L.text_spacing   << ","
+       << "\"text_bold\":"     << (L.text_bold?"true":"false") << ","
+       << "\"text_italic\":"   << (L.text_italic?"true":"false") << ","
+       << "\"text_underline\":" << (L.text_underline?"true":"false") << ","
+       << "\"frame_points\":"  << sl.frame_points   << ","
        << "\"radius\":"        << L.radius         << ","
        << "\"points\":"        << L.points         << ","
        << "\"r\":"             << L.r              << ","
@@ -1633,6 +1710,7 @@ static void laser_thread() {
             std::vector<std::pair<int, core::Frame>> previewFrames;
             std::vector<PreviewFlicker> flickers;
             std::vector<int> testPatternLasers;
+            std::vector<std::pair<int, std::size_t>> previewPoints; // laser id -> points in its look's frame
             previewFrames.reserve(lasers_snapshot.size());
             for (std::size_t li = 0; li < lasers_snapshot.size(); ++li) {
                 const auto& l = lasers_snapshot[li];
@@ -1645,6 +1723,7 @@ static void laser_thread() {
                     pf.points = testPoints; previewAllowed = testPatternRunnable;
                     testPatternLasers.push_back(l.id);
                 }
+                previewPoints.emplace_back(l.id, frameFor(l.id, li).points.size());
                 HardwareOutputParams pp = hardware_params(&l, snap, previewAllowed);
                 pp.blackout = false; // preview ignores blackout (see above)
                 finalize_hardware_frame(pf.points, pp);
@@ -1656,6 +1735,11 @@ static void laser_thread() {
                 mainPreview = frameFor(kVirtualLook, 0);
                 HardwareOutputParams virt; virt.blackout = false; virt.outputAllowed = true; virt.gateLevel = g_gate_level;
                 finalize_hardware_frame(mainPreview.points, virt);
+            }
+            if (order.empty()) previewPoints.emplace_back(kVirtualLook, frameFor(kVirtualLook, 0).points.size());
+            {
+                std::lock_guard<std::mutex> lk(G_mtx);
+                for (const auto& [id, n] : previewPoints) { auto it = G_looks.find(id); if (it != G_looks.end()) it->second.frame_points = n; }
             }
             ws_broadcast(frame_to_ws_json(mainPreview, previewFrames, G_time,
                                           order.empty() ? mainFlicker.flicker_hz : 0.0f,
@@ -1806,8 +1890,8 @@ static void load_lasers_from_disk() {
             l.zone_scale_y  = json_float(obj, "zone_scale_y", 1.0f);
             l.mirror_x      = json_bool(obj, "mirror_x", false);
             l.mirror_y      = json_bool(obj, "mirror_y", false);
-            const bool hasPreviewPosition = obj.find("\"preview_x\"") != std::string::npos
-                && obj.find("\"preview_y\"") != std::string::npos;
+            const bool hasPreviewPosition = json_has(obj, "preview_x")
+                && json_has(obj, "preview_y");
             l.preview_x     = json_float(obj, "preview_x", -1.0f);
             l.preview_y     = json_float(obj, "preview_y", -1.0f);
             if (l.id > 0) {
@@ -1917,6 +2001,13 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"ilda_file\":\""   << s.ilda_file     << "\","
        << "\"ilda_name\":\""   << s.ilda_name     << "\","
        << "\"ilda_fps\":"      << s.ilda_fps      << ","
+       << "\"text\":"          << json_escape(s.text) << ","
+       << "\"font\":\""        << s.font          << "\","
+       << "\"text_size\":"     << s.text_size     << ","
+       << "\"text_spacing\":"  << s.text_spacing  << ","
+       << "\"text_bold\":"     << (s.text_bold?"true":"false") << ","
+       << "\"text_italic\":"   << (s.text_italic?"true":"false") << ","
+       << "\"text_underline\":" << (s.text_underline?"true":"false") << ","
        << "\"radius\":"        << s.radius        << ","
        << "\"points\":"        << s.points        << ","
        << "\"r\":"             << s.r             << ","
@@ -1955,6 +2046,13 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.ilda_file       = json_str(obj,"ilda_file");
     if (!ilda_valid_storage_name(s.ilda_file)) s.ilda_file.clear();
     if (auto nm = json_str(obj,"ilda_name"); !nm.empty()) s.ilda_name = ilda_display_name(nm);
+    if (std::string t; json_string(obj,"text",t)) s.text = t.substr(0, 4 * kMaxTextChars);
+    if (auto f = json_str(obj,"font"); find_text_font(f)) s.font = f;
+    s.text_size       = std::clamp(json_float(obj,"text_size",s.text_size),0.02f,2.0f);
+    s.text_spacing    = std::clamp(json_float(obj,"text_spacing",s.text_spacing),-0.3f,2.0f);
+    s.text_bold       = json_bool(obj,"text_bold",s.text_bold);
+    s.text_italic     = json_bool(obj,"text_italic",s.text_italic);
+    s.text_underline  = json_bool(obj,"text_underline",s.text_underline);
     s.ilda_fps        = std::clamp(json_float(obj,"ilda_fps",s.ilda_fps),1.0f,120.0f);
     s.radius          = json_float(obj,"radius",s.radius);
     s.points          = json_int(obj,"points",s.points);
@@ -3228,7 +3326,7 @@ static void save_magic_to_disk(const std::string& body) {
 // Apply a body key to `T_` - G for global settings, a laser's look for look fields.
 #define APPLY_F(key, field) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) T_.field=_v; }
 #define APPLY_S(key, field) { auto _v=json_str(req.body,key); if(!_v.empty()) T_.field=_v; }
-#define APPLY_B(key, field) { if(req.body.find("\""+std::string(key)+"\"")!=std::string::npos) T_.field=json_bool(req.body,key,T_.field); }
+#define APPLY_B(key, field) { if(json_has(req.body,key)) T_.field=json_bool(req.body,key,T_.field); }
 #define APPLY_CLAMP(key, field, lo, hi) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) T_.field=std::clamp(_v,(float)(lo),(float)(hi)); }
 
 // ── main ───────────────────────────────────────────────────────────────────────
@@ -3244,6 +3342,7 @@ struct ShapeInfo { std::string id, label; bool selectable; std::vector<std::stri
 static const std::vector<std::string> kShapeDependentParams = {
     "radius", "points", "r", "g", "b", "rainbow_amount", "rainbow_speed", "rainbow_phase_degrees", "dot_amount",
     "wave_frequency", "wave_amplitude", "wave_speed", "ilda_fps",
+    "text", "font", "text_size", "text_spacing", "text_bold", "text_italic", "text_underline",
 };
 static const std::vector<ShapeInfo>& shape_catalog() {
     static const std::vector<ShapeInfo> c = [] {
@@ -3257,6 +3356,8 @@ static const std::vector<ShapeInfo>& shape_catalog() {
             {"square", "Square", true, outline},
             {"wave", "Wave", true, with({"wave_frequency", "wave_amplitude", "wave_speed"})},
             {"staticwave", "Static wave", true, with({"wave_frequency", "wave_amplitude"})},
+            {"text", "Text", true, {"r", "g", "b", "rainbow_amount", "rainbow_speed", "rainbow_phase_degrees",
+                                    "text", "font", "text_size", "text_spacing", "text_bold", "text_italic", "text_underline"}},
             {"ilda", "ILDA file", false, {"ilda_fps"}}, // the file's own colors, points and size
         };
     }();
@@ -3410,6 +3511,11 @@ int main(int argc, char* argv[]) {
             APPLY_F("flicker_phase_degrees",flicker_phase_degrees) APPLY_CLAMP("flicker_phase_degrees",flicker_phase_degrees,0,360)
             APPLY_F("points",points)
             APPLY_F("ilda_fps",ilda_fps) APPLY_CLAMP("ilda_fps",ilda_fps,1,120)
+            if (std::string t; json_string(req.body,"text",t)) T_.text = t.substr(0, 4 * kMaxTextChars);
+            if (auto f = json_str(req.body,"font"); find_text_font(f)) T_.font = f;
+            APPLY_F("text_size",text_size) APPLY_CLAMP("text_size",text_size,0.02,2)
+            APPLY_F("text_spacing",text_spacing) APPLY_CLAMP("text_spacing",text_spacing,-0.3,2)
+            APPLY_B("text_bold",text_bold) APPLY_B("text_italic",text_italic) APPLY_B("text_underline",text_underline)
         });
         res.set_content(state_to_json(),"application/json");
     });
@@ -3419,8 +3525,20 @@ int main(int argc, char* argv[]) {
         res.set_content(shapes_json(),"application/json");
     });
 
+    // ── GET /api/fonts — the text shape's fonts and the styles each has ────────
+    // [{"id","label","bold":bool,"italic":bool}] (laser_text.h).
+    svr.Get("/api/fonts",[](const httplib::Request&,httplib::Response& res){
+        std::ostringstream ss; ss << "[";
+        const auto& c = text_font_catalog();
+        for (std::size_t i = 0; i < c.size(); ++i)
+            ss << (i ? "," : "") << "{\"id\":\"" << c[i].id << "\",\"label\":\"" << c[i].label << "\",\"bold\":"
+               << (text_font_has_bold(c[i]) ? "true" : "false") << ",\"italic\":" << (text_font_has_italic(c[i]) ? "true" : "false") << "}";
+        ss << "]";
+        res.set_content(ss.str(),"application/json");
+    });
+
     // ── POST /laser/shape/<shape> ───────────────────────────────────────────────
-    static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","staticwave"};
+    static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","staticwave","text"};
     svr.Post(R"(/laser/shape/([a-z]+))",[](const httplib::Request& req,httplib::Response& res){
         std::string s=req.matches[1];
         if(!SHAPES.count(s)){res.status=400;res.set_content("{\"error\":\"unknown shape\"}","application/json");return;}
@@ -3697,10 +3815,10 @@ int main(int argc, char* argv[]) {
           for (auto& l : G_lasers) {
               if (l.id != id) continue;
               auto nm = json_str(req.body,"name"); if (!nm.empty()) l.name = nm;
-              if (req.body.find("\"ip\"") != std::string::npos) l.ip = json_str(req.body,"ip");
-              if (req.body.find("\"armed\"") != std::string::npos) l.armed = json_bool(req.body,"armed",l.armed);
-              if (req.body.find("\"mirror_x\"") != std::string::npos) l.mirror_x = json_bool(req.body,"mirror_x",l.mirror_x);
-              if (req.body.find("\"mirror_y\"") != std::string::npos) l.mirror_y = json_bool(req.body,"mirror_y",l.mirror_y);
+              if (json_has(req.body,"ip")) l.ip = json_str(req.body,"ip");
+              if (json_has(req.body,"armed")) l.armed = json_bool(req.body,"armed",l.armed);
+              if (json_has(req.body,"mirror_x")) l.mirror_x = json_bool(req.body,"mirror_x",l.mirror_x);
+              if (json_has(req.body,"mirror_y")) l.mirror_y = json_bool(req.body,"mirror_y",l.mirror_y);
               l.zone_x       = json_float(req.body,"zone_x",l.zone_x);
               l.zone_y       = json_float(req.body,"zone_y",l.zone_y);
               l.zone_scale_x = std::clamp(json_float(req.body,"zone_scale_x",l.zone_scale_x),0.1f,2.0f);

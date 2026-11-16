@@ -116,6 +116,36 @@
               </div>
             </div>
           </section>
+          <section v-if="looksUsing('text').length" class="control-section text-section">
+            <div class="section-heading"><div><h2>Text{{ optionSuffix('text') }}</h2><p>Single-stroke Hershey fonts. Size, rotation, position, color and rainbow work like for shapes.</p></div></div>
+            <div class="text-row">
+              <input
+                class="text-input" type="text" maxlength="120" spellcheck="false" aria-label="Laser text"
+                :value="textDraft" @focus="textFocused = true" @blur="textFocused = false"
+                @input="textDraft = $event.target.value; setTextOption('text', textDraft)"
+              />
+              <select class="font-select" aria-label="Font" :value="optionValue('font')" @change="setTextOption('font', $event.target.value)">
+                <option v-for="f in textFonts" :key="f.id" :value="f.id">{{ f.label }}</option>
+              </select>
+            </div>
+            <div class="text-row">
+              <button
+                v-for="st in TEXT_STYLES" :key="st.key"
+                class="style-button" :class="[st.cls, { selected: optionValue(st.key) }]"
+                :disabled="!fontHasStyle(st.key)"
+                :title="fontHasStyle(st.key) ? st.label : `${currentFontLabel} has no ${st.label.toLowerCase()}`"
+                :aria-pressed="!!optionValue(st.key)"
+                @click="setTextOption(st.key, !optionValue(st.key))"
+              >{{ st.short }}</button>
+              <span class="text-hint" :class="{ warn: textFps > 0 && textFps < 25 }">{{ textHint }}</span>
+            </div>
+            <div class="range-grid">
+              <div v-for="control in TEXT_CONTROLS" :key="control.key" class="range-control">
+                <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isOptionMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(optionValue(control.key), control) }}</output></label>
+                <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="optionValue(control.key)" @input="setOption(control.key, $event.target.value)" />
+              </div>
+            </div>
+          </section>
           <section v-if="looksUsing('ilda_fps').length" class="control-section">
             <div class="section-heading"><div><h2>ILDA file{{ optionSuffix('ilda_fps') }}</h2><p>{{ ildaNames }} - its own colors and points; dropped onto a cue in Cues.</p></div></div>
             <div class="range-grid">
@@ -263,7 +293,7 @@ import LaserSelectionBar from './LaserSelectionBar.vue'
 import { MOVE_ICONS, SHAPE_ICONS } from './magicIcons.js'
 import {
   flashPress, flashRelease, isLookMixed, isParamUnused, laserState, lasers, looksUsing, lookValues, markLocalChange,
-  optionTargets, optionValue, resetState, setBrightnessGate, shapeCatalog, targetLookIds, updateState,
+  optionTargets, optionValue, patchLocalLooks, resetState, setBrightnessGate, shapeCatalog, targetLookIds, textFonts, updateState,
 } from '../composables/useLaserSocket.js'
 
 const props = defineProps({
@@ -304,7 +334,7 @@ const COLOR_PRESETS = [
   { name: 'Mint green', color: '#30e878' }, { name: 'Cyan', color: '#37e5e5' }, { name: 'Sky', color: '#42a5ff' },
   { name: 'Electric blue', color: '#4666ff' }, { name: 'Violet', color: '#9e63ff' }, { name: 'Magenta', color: '#f34bd7' },
 ]
-const SHAPES = ['circle', 'line', 'triangle', 'square', 'wave', 'staticwave']
+const SHAPES = ['circle', 'line', 'triangle', 'square', 'wave', 'staticwave', 'text']
 const MOVES = ['none', 'circle', 'pan', 'tilt', 'tiltup', 'tiltdown', 'eight', 'random']
 const COLOR_CONTROLS = [
   { label: 'Rainbow amount', key: 'rainbow_amount', min: 0, max: 1, step: 0.01, decimals: 2 },
@@ -330,6 +360,15 @@ const TRANSFORM_CONTROLS = [
   { label: 'Position X', key: 'pos_x', min: -1, max: 1, step: 0.01, decimals: 2 },
   { label: 'Position Y', key: 'pos_y', min: -1, max: 1, step: 0.01, decimals: 2 },
   { label: 'Rotation', key: 'rotation_speed', min: -4, max: 4, step: 0.1, decimals: 1, suffix: ' rot/s' },
+]
+const TEXT_CONTROLS = [
+  { label: 'Font size', key: 'text_size', min: 0.05, max: 1, step: 0.01, decimals: 2 },
+  { label: 'Letter spacing', key: 'text_spacing', min: -0.2, max: 1, step: 0.01, decimals: 2 },
+]
+const TEXT_STYLES = [
+  { key: 'text_bold', label: 'Bold', short: 'B', cls: 'bold' },
+  { key: 'text_italic', label: 'Italic', short: 'I', cls: 'italic' },
+  { key: 'text_underline', label: 'Underline', short: 'U', cls: 'underline' },
 ]
 const ILDA_CONTROLS = [
   { label: 'Frames per second', key: 'ilda_fps', min: 1, max: 120, step: 1, decimals: 0, suffix: ' fps' },
@@ -393,6 +432,7 @@ function flushPending() {
 function queueState(partial, targets = null) {
   markLocalChange()
   if (!targets) Object.assign(laserState, partial)
+  patchLocalLooks(partial, targets) // instant feedback: styles, mixed marks, option values
   const key = targets ? targets.join(',') : ''
   const batch = pendingState.get(key) || { lasers: targets, partial: {} }
   Object.assign(batch.partial, partial)
@@ -409,11 +449,36 @@ function setValues(partial) { queueState(partial) }
 function setNumeric(key, value) { queueState({ [key]: Number(value) }) }
 // Shape options only change the selected lasers whose shape uses them.
 function setOption(key, value) {
-  const targets = optionTargets(key)
-  const partial = { [key]: Number(value) }
-  if (targets) for (const id of targets) Object.assign(laserState.looks?.[id] || {}, partial)
-  queueState(partial, targets)
+  queueState({ [key]: Number(value) }, optionTargets(key))
 }
+// Text options: strings and on/off styles, only on the lasers showing text.
+function setTextOption(key, value) {
+  queueState({ [key]: value }, optionTargets(key))
+}
+// The text field keeps what's being typed: while it has focus, answers from
+// the daemon (possibly for an earlier keystroke) don't overwrite it.
+const textDraft = ref('')
+const textFocused = ref(false)
+watch(() => optionValue('text'), (value) => { if (!textFocused.value) textDraft.value = value ?? '' }, { immediate: true })
+const currentFont = computed(() => textFonts.find((f) => f.id === optionValue('font')))
+const currentFontLabel = computed(() => currentFont.value?.label || 'This font')
+function fontHasStyle(key) {
+  if (key === 'text_bold') return currentFont.value ? currentFont.value.bold : true
+  if (key === 'text_italic') return currentFont.value ? currentFont.value.italic : true
+  return true
+}
+// Frame rate the text can be drawn at: its frame's points at the scan rate.
+const textFps = computed(() => {
+  const id = looksUsing('text')[0]
+  const points = laserState.looks?.[id]?.frame_points || 0
+  return points > 0 ? (laserState.rate_kpps * 1000) / points : 0
+})
+const textHint = computed(() => {
+  const chars = [...(optionValue('text') || '')].length
+  return textFps.value > 0
+    ? `${chars} characters · ~${Math.round(textFps.value)} fps at ${laserState.rate_kpps.toFixed(0)} kpps${textFps.value < 25 ? ' - flickers, use shorter text' : ''}`
+    : `${chars} characters`
+})
 function isOptionMixed(key) {
   const values = looksUsing(key).map((id) => laserState.looks?.[id]?.[key])
   return values.some((v) => v !== values[0])
@@ -559,6 +624,28 @@ h1 { margin: 0; font-size: 23px; line-height: 1.2; }
 .choice-button.selected { color: #eafff3; background: rgba(101,230,165,.13); border-color: var(--mt-accent); }
 /* Used by some, but not the first, of the selected lasers. */
 .choice-button.partial { border-style: dashed; border-color: rgba(101,230,165,.55); color: #d8f5e6; }
+.text-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+.text-input {
+  flex: 1 1 260px; min-width: 0; min-height: 44px; padding: 8px 12px; box-sizing: border-box;
+  color: var(--mt-text); background: rgba(0,0,0,.25); border: 1px solid var(--mt-line); border-radius: 7px;
+  font: inherit; font-size: 18px; letter-spacing: .02em;
+}
+.text-input:focus { outline: none; border-color: var(--mt-accent); }
+.font-select {
+  flex: 0 0 auto; min-height: 44px; padding: 0 10px; color: var(--mt-text); background: #0c1116;
+  border: 1px solid var(--mt-line); border-radius: 7px; font: inherit; font-size: 14px;
+}
+.style-button {
+  width: 44px; height: 40px; color: #c5d2ce; background: rgba(255,255,255,.035); border: 1px solid var(--mt-line);
+  border-radius: 7px; font: inherit; font-size: 16px; cursor: pointer; touch-action: manipulation;
+}
+.style-button.bold { font-weight: 800; }
+.style-button.italic { font-style: italic; font-family: Georgia, serif; }
+.style-button.underline { text-decoration: underline; }
+.style-button.selected { color: #eafff3; background: rgba(101,230,165,.13); border-color: var(--mt-accent); }
+.style-button:disabled { opacity: .3; cursor: default; }
+.text-hint { margin-left: 6px; color: var(--mt-muted); font-size: 12px; }
+.text-hint.warn { color: #ff8080; }
 .mixed-badge { display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 4px; font-size: 10px; letter-spacing: .04em; color: #0c1116; background: #f2c14e; vertical-align: 1px; }
 .color-page { grid-template-columns: minmax(0, 1.3fr) minmax(240px, .7fr); }
 .color-page .palette-section { grid-row: span 2; }

@@ -20,6 +20,9 @@
             <path v-for="(seg, i) in ildaPaths" :key="i" :d="seg.d" :stroke="seg.color"
               fill="none" stroke-width="0.8" stroke-linejoin="round" stroke-linecap="round" />
           </g>
+          <text v-else-if="cue.shape === 'text'" class="cue-text" x="12" y="12.5" text-anchor="middle" dominant-baseline="middle"
+            :font-size="textFontSize" :fill="stroke" :font-weight="cue.text_bold ? 700 : 400" :font-style="cue.text_italic ? 'italic' : 'normal'"
+            :text-decoration="cue.text_underline ? 'underline' : 'none'" :style="shapeStyle()">{{ cue.text }}</text>
           <circle v-else-if="cue.shape === 'circle'" cx="12" cy="12" r="8"
             fill="none" :stroke="stroke" stroke-width="2" :stroke-dasharray="dashArray" :style="shapeStyle()" />
           <line v-else-if="cue.shape === 'line'" x1="3" y1="12" x2="21" y2="12"
@@ -92,6 +95,9 @@ const ildaScaleStyle = computed(() => {
   const sf = ss >= 0 ? 1 + ss * 2 : 1 + ss * 0.7
   return sf === 1 ? {} : { transform: `scale(${sf})`, transformOrigin: '12px 12px' }
 })
+
+// Text cues show their text, sized to fit the slot.
+const textFontSize = computed(() => Math.max(2.5, Math.min(9, 34 / Math.max(1, [...(props.cue.text || '')].length))))
 
 const stroke = computed(() => {
   const c = props.cue
