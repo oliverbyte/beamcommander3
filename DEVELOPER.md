@@ -29,6 +29,7 @@ frontend/
   src/components/showFx.js          Preview flicker, same formula as backend/show_fx.h (+ showFx.test.js)
   src/composables/useLaserSocket.js REST + WebSocket client, shared reactive state
 start.sh             Builds backend if needed, runs both processes, cleans up on Ctrl-C
+CLAUDE.md            Instructions for Claude Code (pre-push routine: docs, website, data sync, tests)
 .githooks/pre-push   Runs all unit tests before every push (git config core.hooksPath .githooks)
 ```
 

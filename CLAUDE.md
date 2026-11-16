@@ -1,0 +1,39 @@
+# BeamCommander3 - instructions for Claude
+
+Project overview, build steps and architecture: [DEVELOPER.md](DEVELOPER.md).
+User-facing docs and the REST API: [README.md](README.md).
+
+## Before every push to `main`
+
+Every push to `main` publishes a release (`.github/workflows/release.yml`).
+Do all of this automatically before pushing - don't wait to be asked:
+
+1. **Update the docs and the website** for everything the push contains:
+   `README.md` (features, usage, REST API, data files and backup/restore
+   steps), `DEVELOPER.md` (layout, architecture, packaging) and
+   `website/index.html` (feature cards, meta description). Commit them with
+   the push.
+2. **Ship the maintainer's user data as first-run defaults:** run
+   `packaging/sync_default_data.sh` and commit what it changed in
+   `backend/`: `cues.json`, `magic_touch.json`, `lasers.json`,
+   `settings.json` and `backend/ilda/` (the ILDA files the cues play). Never
+   sync `midi_map.json` - the app never writes it; the repo copy is the
+   source of truth.
+3. **Tests run in the pre-push hook** (`.githooks/pre-push`, activate once
+   per clone with `git config core.hooksPath .githooks`): backend unit tests
+   (`backend/tests/run_tests.sh`) and frontend tests (`npm test`). The
+   backend tests need libera-laser's headers at
+   `${LIBERA_DIR:-/tmp/libera-laser}/include`; macOS purges `/tmp`, so if
+   they fail with "`libera/core/LaserPoint.hpp` file not found", shallow-clone
+   https://github.com/sebleedelisle/libera-laser and push with
+   `LIBERA_DIR=<path> git push`.
+
+## Working on the code
+
+- Hardware output safety (blackout/arm gate, zone, safety masks, DAC point
+  budget) lives in `backend/output_pipeline.h` and is unit-tested; keep new
+  output paths going through `finalize_hardware_frame()`.
+- Don't run a test daemon against the real user data directory or the
+  maintainer's lasers: start it with its own `HOME` (macOS) and a free
+  `--port`, and stop it by PID afterwards (its command line is often just
+  `./laser_daemon`, so `pkill -f <path>` misses it).
