@@ -12,6 +12,9 @@ backend/
   test_patterns.h    Official ILDA 12K/30K test patterns (played from ILDA's files)
   test_patterns/     The original ILDA files (TEST_12K.ILD, TEST_30K.ILD)
   ilda/              ILDA files the shipped cues play (synced, see "ILDA files on cues")
+  laser_text.h       Text shape: Hershey font parser, layout, laser points
+  fonts/hershey/     The original Hershey .jhf fonts (+ LICENSE-HERSHEY.txt, embed.sh)
+  hershey_font_data.h  Generated: those fonts embedded byte for byte
   ilda_test_pattern_data.h  Generated: those files embedded byte for byte
   json_lite.h        Tiny JSON field readers shared by the daemon and the tests
   tests/             Backend unit tests, run before every push (.githooks/pre-push)
@@ -200,6 +203,46 @@ then the normal `finalize_hardware_frame()` (blackout/arm gate, footswitch,
 mirror, zone, masks); flicker and layers are skipped. The WS preview gets
 `tp: {laserId: kpps}` so it replays those lasers at the pattern's rate
 without flicker.
+
+### Per-laser looks and the laser selection
+
+Every configured laser has its own `LookSlot` (`laser_daemon.cpp`): its
+complete look (`LaserState` look fields), its cue layers and its own
+animation state (glides, movement/rotation/wave/rainbow phases, ILDA time,
+smoothed position and wave knobs), integrated by `animate_look()` in
+`laser_thread()`. Look 0 is the preview's virtual laser while no laser is
+configured; a new laser starts as a copy of the first laser's look. `G`
+keeps only the global settings (`with_global_settings()`): blackout, master
+brightness, flash release, Beam settings. Flash is applied when drawing
+(`look_render_input()`), not by rewriting a look's color.
+
+REST look changes and cue actions take the target lasers as `lasers`
+(`request_lasers()`; none = every look, so MIDI and scripts drive all lasers
+as before). Cues (`CueData`) store the looks of the lasers they were saved on
+plus a main look; recalling onto a laser uses its own saved look or the main
+look. Older cues (one look) load as main look.
+
+The selection lives only in the browser (`laserSelection` in
+`useLaserSocket.js`, localStorage) - the daemon never knows it. The client
+projects the first selected laser's look into the top-level look fields
+(`projectSelection()`), so every control works unchanged; `isLookMixed()`,
+`lookValues()`, `looksUsing()`/`isParamUnused()` (with `GET /api/shapes`,
+the daemon's `shape_catalog()` - a new shape only needs a row there) drive
+the mixed marks, greyed-out controls and shape options.
+
+### Text shape
+
+`laser_text.h`: Hershey `.jhf` parser, font catalog (`text_font_catalog()`:
+7 fonts; real bold/italic faces where Hershey has them, otherwise slanted
+italic), `layout_text()` (cap-height size, letter spacing, underline,
+umlauts as letter + dots, centered) and `text_points()` (blanked
+interpolated travel between strokes, settle/dwell, lit spacing grown to fit
+the point budget - never above it). `make_text_frame()` adds color/rainbow
+(across the text width), scale, rotation, position, movement and mirror.
+The fonts in `backend/fonts/hershey/` are unmodified and embedded via
+`fonts/hershey/embed.sh` (`hershey_font_data.h`, checked by
+`tests/test_laser_text.cpp`); their use requires the acknowledgement in
+`LICENSE-HERSHEY.txt`, which ships with the source.
 
 ### ILDA files on cues
 

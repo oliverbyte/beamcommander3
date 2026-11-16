@@ -281,6 +281,28 @@ for how the packaged macOS/Windows builds are put together.
    their scanners settle. **Output latency** (Beam) sets how
    far ahead frames are sent to the lasers — lower reacts faster, too low
    can cause brief gaps on a slow network.
+   **Every laser has its own look.** With more than one laser, the
+   **Applies to** bar next to the laser status (Master, Magic Touch, Cues,
+   Color, Shapes, Move) chooses which lasers your changes go to: **All**,
+   or any set of lasers (tap to add/remove). Only those lasers change - the
+   others keep playing their look. The controls show the first selected
+   laser's values; a yellow **mixed** mark means the selected lasers differ
+   (moving the control sets all of them), a dashed shape/movement button
+   means only some of them use it. The selection belongs to this browser
+   only, so operators on different devices don't change each other's.
+   Controls the selected lasers' shapes don't use are greyed out (e.g. color
+   and dots for ILDA files), and shape options (Wave, Text, ILDA file) only
+   appear for shapes in the selection - labelled with their lasers if only
+   some use them, and changing only those.
+   **Text**: pick the **Text** shape, type your text, choose one of 7
+   single-stroke laser fonts (Sans, Roman, Times, Script, Gothic English,
+   Gothic German, Cursive), **B**/**I**/**U** (bold and italic where the font
+   has them), font size and letter spacing. Color, rainbow (a color wave
+   running across the text), rotation, position and movement work like for
+   shapes. German umlauts work; the hint under the text shows how many frames
+   per second the text can be drawn at - below 25 it flickers, so use shorter
+   text, a smaller size or a higher scan rate. To put text on one laser only,
+   select just that laser first.
 4. **Flash / Blackout**: the ⚡ Flash button punches the beam to full white
    brightness while held, then returns to whatever it was showing before.
    Blackout forces the real laser dark (the on-screen preview keeps
@@ -466,11 +488,20 @@ disarming still act immediately.
 
 All parameter changes take effect on the next frame — nothing restarts.
 
+**Per-laser looks:** every laser has its own look. Look changes and cue
+actions accept the target lasers as `lasers` - a query parameter
+(`?lasers=2,3`) or, in a JSON body, `"lasers":[2,3]` (laser ids from
+`GET /api/lasers`). Without it they go to every laser, as before. Global
+settings (master brightness, blackout, flash, Beam settings, test pattern)
+always apply to all lasers.
+
 | Endpoint | Description |
 |----------|-------------|
-| `GET /api/state` | Full current state as JSON |
-| `POST /api/state` | Bulk update (send any subset of fields as JSON) |
-| `POST /api/reset` | Reset all show parameters to defaults (keeps the current connection) |
+| `GET /api/state` | Full current state as JSON: the global settings, the first laser's look at the top level, and every laser's own look under `looks` (laser id -> look incl. its `layers` and `frame_points`; `"0"` = the preview's virtual laser while no laser is configured) |
+| `POST /api/state` | Bulk update (send any subset of fields as JSON); look fields go to `lasers` (all without it). Text look fields: `text`, `font` (see `/api/fonts`), `text_size` (cap height, 0.02-2), `text_spacing` (-0.3-2), `text_bold`, `text_italic`, `text_underline`; `"shape":"text"` |
+| `POST /api/reset` | Reset the looks of `lasers` (all without it: also master brightness) to defaults, without layers |
+| `GET /api/shapes` | Shapes and the shape-dependent parameters each uses: `{"dependent":[...],"shapes":[{"id","label","selectable","params":[...]}]}` - the UI greys out the others |
+| `GET /api/fonts` | Fonts of the text shape: `[{"id","label","bold","italic"}]` (`bold`/`italic` = the font has that style) |
 | `POST /laser/shape/<shape>` | `circle`, `line`, `triangle`, `square`, `wave`, `staticwave` |
 | `POST /laser/brightness/<0-1>` | Master brightness |
 | `POST /laser/color/<r>/<g>/<b>` | Beam color, each channel 0..1 |
@@ -497,7 +528,7 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `GET /api/test-patterns` | The available official ILDA test patterns: `[{"id":"ilda_12k","label":"ILDA 12K","kpps":12}, {"id":"ilda_30k",...}]` |
 | `POST /api/test-pattern` | `{"pattern":"off"\|"ilda_12k"\|"ilda_30k","size":0.05..1}` (either key optional): every armed laser outputs that pattern instead of the show, at exactly its point rate: switching a pattern on sets `rate_kpps` to it, `"off"` restores the previous `rate_kpps`. 400 for an unknown pattern or one faster than `max_rate_kpps`. `GET /api/state` reports `test_pattern` and `test_pattern_size` (runtime only, never saved) |
 | `GET /api/cues` | List all populated cue slots (1-128) |
-| `POST /api/cue/<n>/save` | Snapshot current show params into slot `n` |
+| `POST /api/cue/<n>/save` | Save the looks of `lasers` (all without it) into slot `n`. Recalling a cue (also momentary, as a layer, or an ILDA drop) onto `lasers` gives each its own saved look, or the cue's main look (the first saved laser) if the cue has none for it - so a cue saved on one laser can be put onto any other |
 | `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the global `flash_release_ms` setting - see below). The look starts exactly at the rotation angle it was saved at, with its own rotation speed - a previously spinning look doesn't turn it further |
 | `POST /api/cue/<n>/momentary/<1\|0>` | Hold-to-preview cue: `1` = remember the current look and rotation angle, recall cue `n`; `0` = put both back (same as the MIDI `cue_momentary:<n>` action) |
 | `POST /api/cue/<n>/layer/<on\|off\|toggle>` | Layer playback: play cue `n` *on top of* the current look instead of replacing it (up to 8 layers, the oldest is dropped; runtime only). `GET /api/state` lists active layers as `layers` |
@@ -669,6 +700,18 @@ whatever was showing before — matches the original APC40 grid buttons),
 `cue_layer:<n>` (each press toggles cue `n` as a layer on top of the current
 look), `cue_layer_flash:<n>` (layer only while held), `layers_clear`
 (release all layers).
+
+## Credits
+
+- **Hershey fonts** (laser text): The Hershey Fonts were originally created
+  by Dr. A. V. Hershey while working at the U. S. National Bureau of
+  Standards. The format of the Font data in this distribution was originally
+  created by James Hurt, Cognition, Inc., 900 Technology Park Drive,
+  Billerica, MA 01821. See
+  [backend/fonts/hershey/LICENSE-HERSHEY.txt](backend/fonts/hershey/LICENSE-HERSHEY.txt)
+  (also shipped with every release).
+- **ILDA test patterns and file format**: International Laser Display
+  Association, [ilda.com](https://www.ilda.com/technical.htm).
 
 ## Supported hardware
 
