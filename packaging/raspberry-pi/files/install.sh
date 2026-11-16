@@ -16,6 +16,8 @@ install -m 755 "$SRC/laser_daemon" "$SRC/beamcommander3-health.sh" "$APP/"
 cp -r "$SRC/frontend_dist" "$APP/"
 # Seeds, copied into the data dir by the daemon if missing there.
 cp "$SRC/cues.json" "$SRC/magic_touch.json" "$SRC/midi_map.json" "$APP/"
+# ILDA files the cues play - the daemon copies missing ones into the data dir.
+cp -r "$SRC/ilda" "$APP/" 2>/dev/null || true
 
 install -d "$DATA"
 for f in "$SRC"/data/*.json; do

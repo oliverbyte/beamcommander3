@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BeamCommander3 — Laser Show Control for Laser Operators</title>
-  <meta name="description" content="BeamCommander3 is a free, open-source laser show controller: live multi-laser preview, phase-offset movement, 128 cues, per-laser zoning, and MIDI control from a web page. Runs on macOS, Windows and as a standalone Raspberry Pi box.">
+  <meta name="description" content="BeamCommander3 is a free, open-source laser show controller: live multi-laser preview, phase-offset movement, 128 cues, ILDA file playback, official ILDA test patterns, per-laser zoning, and MIDI control from a web page. Runs on macOS, Windows and as a standalone Raspberry Pi box.">
   <meta property="og:title" content="BeamCommander3 — Laser Show Control for Laser Operators">
   <meta property="og:description" content="Run a real laser show from any browser: movable per-laser previews, ordered phase-offset movement, 128 saved cues, zoning, and MIDI/foot pedal control. Free & open source.">
   <meta property="og:image" content="img/screenshot-background.png">
@@ -114,6 +114,11 @@
           <p>Save and recall looks in a resizable 16x8 grid. Cue icons preview shape, color, and motion; the cue matching the current show is outlined in bright green. Cues can also play as layers on top of the current look, up to eight at once.</p>
         </div>
         <div class="feature-card">
+          <span class="icon">📂</span>
+          <h3>ILDA Files on Cues</h3>
+          <p>Drag an ILDA show file (.ild) onto a cue slot: it is stored there, plays right away and the slot shows a thumbnail of it. Recall it with a click like any cue. Animations loop, the file&rsquo;s own colors are kept, and position, size, rotation, movement, brightness, flash and flicker work just like for shapes. Files are shared over the REST API too &mdash; list, upload, download and delete.</p>
+        </div>
+        <div class="feature-card">
           <span class="icon">🎛️</span>
           <h3>Magic Touch</h3>
           <p>Build your own control surface from faders, knobs, pads and X/Y pads: drag, resize and snap elements into place, assign any function, invert values or use a logarithmic curve, play cues Solo (replacing the look) or as a Layer on top of it, as a toggle or a Flash only while held, and double-tap to reset (on a rotation knob: back to the start angle). The layout is shared by every connected device, and it comes with a ready-made live layout and example cues.</p>
@@ -132,6 +137,11 @@
           <span class="icon">🛡️</span>
           <h3>Safety Masks</h3>
           <p>Draw any number of red masks per laser over areas that must get less or no light, such as the audience, balconies or cameras. Move, resize and crop them by touch and set per mask how much the output is reduced, up to fully dark. While lining them up, the laser can draw each mask's border in red so you see exactly what is masked in the room.</p>
+        </div>
+        <div class="feature-card">
+          <span class="icon">🎯</span>
+          <h3>ILDA Test Patterns</h3>
+          <p>Tune your scanners with the official ILDA Standard Test Pattern in its 12K and 30K versions, played from ILDA&rsquo;s own files. One click in the Lasers view shows it on every armed laser at exactly the point rate the standard requires; the scan rate switches back when you turn it off. Size it down for tuning; blackout, zones and safety masks still apply.</p>
         </div>
         <div class="feature-card">
           <span class="icon">✨</span>

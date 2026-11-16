@@ -16,7 +16,11 @@
     <g :style="posStyle">
       <g class="cue-move-group" :style="moveStyle">
         <g class="cue-spin-group" :style="rotateStyle">
-          <circle v-if="cue.shape === 'circle'" cx="12" cy="12" r="8"
+          <g v-if="cue.shape === 'ilda'" class="cue-ilda" :style="ildaScaleStyle">
+            <path v-for="(seg, i) in ildaPaths" :key="i" :d="seg.d" :stroke="seg.color"
+              fill="none" stroke-width="0.8" stroke-linejoin="round" stroke-linecap="round" />
+          </g>
+          <circle v-else-if="cue.shape === 'circle'" cx="12" cy="12" r="8"
             fill="none" :stroke="stroke" stroke-width="2" :stroke-dasharray="dashArray" :style="shapeStyle()" />
           <line v-else-if="cue.shape === 'line'" x1="3" y1="12" x2="21" y2="12"
             :stroke="stroke" stroke-width="2" :stroke-dasharray="dashArray" :style="shapeStyle()" />
@@ -39,15 +43,55 @@ let instanceCounter = 0
 </script>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { fetchIldaPreview } from '../composables/useLaserSocket.js'
 
-// Animated icon for a saved cue (the full saved state object): shape, beam color, rainbow, dotted stroke,
+// Animated icon for a saved cue (the full saved state object): shape (or an ILDA file's first frame), beam color, rainbow, dotted stroke,
 // position offset, rotation, movement mode and wave travel. Dot positions are deliberately not animated
 // unless rotation/move/low scan rate say so - a steady dotted cue looks steady on real hardware too.
 const props = defineProps({ cue: { type: Object, required: true } })
 const gradientId = `cue-rainbow-${++instanceCounter}`
 
 const MOVE_ANIM = { pan: 'cue-move-pan', tilt: 'cue-move-tilt', tiltup: 'cue-move-tiltup', tiltdown: 'cue-move-tiltdown', circle: 'cue-move-circle', eight: 'cue-move-eight', random: 'cue-move-random' }
+
+// ILDA cues: the file's first frame (GET /api/ilda/<file>/preview), drawn the
+// way the scanner traces it - every segment into a lit point in that point's
+// color, blanked jumps left out. Consecutive segments of one color share a path.
+const ildaPaths = ref([])
+watch(() => (props.cue.shape === 'ilda' ? props.cue.ilda_file : ''), async (file) => {
+  ildaPaths.value = []
+  if (!file) return
+  try {
+    const { points } = await fetchIldaPreview(file)
+    if (file === props.cue.ilda_file) ildaPaths.value = ildaSegments(points)
+  } catch (_) { /* unknown file: empty thumbnail */ }
+}, { immediate: true })
+
+function ildaSegments(points) {
+  const out = []
+  const sx = (x) => (12 + x * 10).toFixed(2)
+  const sy = (y) => (12 - y * 10).toFixed(2)
+  let cur = null
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i]
+    const b = points[(i + 1) % points.length]
+    const lit = b[2] + b[3] + b[4] > 0
+    if (!lit) { cur = null; continue }
+    const color = `rgb(${b[2]},${b[3]},${b[4]})`
+    if (!cur || cur.color !== color) {
+      cur = { color, d: `M${sx(a[0])},${sy(a[1])}` }
+      out.push(cur)
+    }
+    cur.d += `L${sx(b[0])},${sy(b[1])}`
+  }
+  return out
+}
+// shape_scale maps to the same size factor the daemon uses (make_ilda_frame()).
+const ildaScaleStyle = computed(() => {
+  const ss = props.cue.shape_scale || 0
+  const sf = ss >= 0 ? 1 + ss * 2 : 1 + ss * 0.7
+  return sf === 1 ? {} : { transform: `scale(${sf})`, transformOrigin: '12px 12px' }
+})
 
 const stroke = computed(() => {
   const c = props.cue

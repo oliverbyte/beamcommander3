@@ -2,8 +2,10 @@
 
 A laser show controller you run on your own laptop: it drives a real laser
 projector and gives you a live web page to control shapes, colors, movement,
-color effects, and "cues" (saved looks you can jump back to instantly) —
-with dedicated views and touch-friendly faders and buttons. An optional USB
+color effects, and "cues" (saved looks you can jump back to instantly, including
+ILDA show files dropped straight onto a cue) — with dedicated views and
+touch-friendly faders and buttons. The official ILDA test patterns help you
+tune your scanners. An optional USB
 MIDI controller or foot pedal adds hands-on control too.
 
 You don't need to know how to code to use it — see
@@ -147,6 +149,7 @@ Your settings are plain JSON files in one folder, separate from the app:
 | File | Contents |
 |---|---|
 | `cues.json` | your cues |
+| `ilda/` (folder) | the ILDA files your cues play |
 | `magic_touch.json` | your Magic Touch layout |
 | `lasers.json` | your lasers: IP, armed, zones, masks |
 | `settings.json` | Beam settings (scan rate, output latency, dot timing) |
@@ -179,8 +182,8 @@ change):
   whole `BeamCommander3` settings folder somewhere safe (another folder, a USB
   stick).
 - **Load (restore), after updating or on another computer:** quit
-  BeamCommander3, copy the saved `.json` files into the settings folder
-  (replace the existing ones), start BeamCommander3 again.
+  BeamCommander3, copy the saved `.json` files and the `ilda` folder into the
+  settings folder (replace the existing ones), start BeamCommander3 again.
 - **Use a new version's defaults for one file:** quit, delete that file
   (e.g. `cues.json`), start again - it's recreated from the built-in defaults.
 
@@ -205,7 +208,7 @@ Load - from the same folder, after the new card has booted once:
 
 ```sh
 scp -r BeamCommander3 bc3@10.10.10.40:/tmp/
-ssh -t bc3@10.10.10.40 "sudo systemctl stop beamcommander3 && sudo cp /tmp/BeamCommander3/*.json /var/lib/beamcommander3/BeamCommander3/ && sudo chown -R beamcommander: /var/lib/beamcommander3 && sudo systemctl start beamcommander3"
+ssh -t bc3@10.10.10.40 "sudo systemctl stop beamcommander3 && sudo cp /tmp/BeamCommander3/*.json /var/lib/beamcommander3/BeamCommander3/ && { [ ! -d /tmp/BeamCommander3/ilda ] || sudo cp -r /tmp/BeamCommander3/ilda /var/lib/beamcommander3/BeamCommander3/; } && sudo chown -R beamcommander: /var/lib/beamcommander3 && sudo systemctl start beamcommander3"
 ```
 
 If the Pi was set up from scratch, `ssh` first asks to confirm the Pi's new
@@ -293,6 +296,13 @@ for how the packaged macOS/Windows builds are put together.
    active cue is outlined in bright green.
    Right-click a slot to clear it, or use "Move" to relocate a saved cue
    to a different slot.
+   **ILDA files**: drag an `.ild` file from your computer onto a slot - it's
+   stored there (replacing the slot) and plays right away; the slot then
+   shows a thumbnail of the file, and clicking it recalls it like any cue.
+   Animations loop at 30 frames per second. Position, size (shape scale),
+   rotation, movement, mirror, master brightness, flash and flicker apply
+   like for shapes - change them and **Save** into the slot to keep them;
+   the file's own colors are used (the beam color/rainbow don't apply).
 6. **Magic Touch**: build your own control surface. A fresh install ships with a
    ready-made "Live" layout (master fader, white flash and footswitch-style master
    brightness flash, blackout and output gate, color/shape/move pads with icons,
@@ -493,6 +503,12 @@ All parameter changes take effect on the next frame — nothing restarts.
 | `POST /api/cue/<n>/layer/<on\|off\|toggle>` | Layer playback: play cue `n` *on top of* the current look instead of replacing it (up to 8 layers, the oldest is dropped; runtime only). `GET /api/state` lists active layers as `layers` |
 | `POST /api/layers/clear` | Release all cue layers (`/api/reset` does too) |
 | `POST /api/cue/<n>/clear` | Delete slot `n` |
+| `POST /api/cue/<n>/ilda?name=<file name>` | Body: a raw ILDA file (`.ild`, any ILDA format, max 64 MB) - what the Cues view sends when a file is dropped on a slot. Stores it (see `POST /api/ilda`), makes slot `n` an ILDA look playing it (`shape` = `"ilda"`, replacing the slot) and recalls it; returns the state. 400 if it isn't a valid ILDA file. With `Content-Type: application/json` and `{"file":"<stored>.ild","name":"..."}` (`name` optional) it uses an already stored file instead (404 if unknown). The look's `ilda_file`/`ilda_name`/`ilda_fps` (1-120, default 30, settable via `/api/state`) are saved in cues |
+| `GET /api/ilda` | All stored ILDA files: `[{"file":"<16 hex>.ild","name","frames","bytes","cues":[n,...]}, ...]` (`cues` = slots playing it) |
+| `POST /api/ilda?name=<file name>` | Body: a raw ILDA file. Stores it without touching any cue: `{"file","name","frames"}`. Files are named by content, so the same file is only stored once. 400 if invalid |
+| `GET /api/ilda/<file>` | Download a stored file (original name in `Content-Disposition`) |
+| `DELETE /api/ilda/<file>` | Delete a stored file. 409 while a cue, the current look or a cue layer still plays it |
+| `GET /api/ilda/<file>/preview` | Thumbnail data of a stored ILDA file: `{"frames":N,"points":[[x,y,r,g,b],...]}` (its fullest frame, at most 600 points, colors 0-255) |
 | `POST /api/cue/<from>/move/<to>` | Move slot `from`'s cue into slot `to` (overwriting it), clearing `from`. 404 if `from` is empty or `from == to` |
 | `GET /api/magic-touch[?rev=<n>]` | Shared Magic Touch layout: `{"rev":<n>,"layout":{...}\|null}`; with `?rev=` matching the current revision only `{"rev":<n>}` is returned (cheap polling) |
 | `POST /api/magic-touch` | Replace the shared Magic Touch layout (JSON object, ≤ 4 MB); returns the new `{"rev":<n>}`. Persisted in `magic_touch.json` |

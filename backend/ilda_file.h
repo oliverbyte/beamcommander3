@@ -19,7 +19,9 @@
 
 #include "libera/core/LaserPoint.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -133,4 +135,76 @@ inline bool parse_ilda(const std::uint8_t* data, std::size_t size, std::vector<I
         }
         off += records * recSize;
     }
+}
+
+// ── Playback helpers (ILDA files on cues, see laser_daemon.cpp) ─────────────
+
+// Storage name for an uploaded file: FNV-1a 64 of its bytes as 16 hex
+// digits + ".ild". The same file always gets the same name (no duplicates),
+// and the name can never contain a path.
+inline std::string ilda_storage_name(const std::uint8_t* data, std::size_t size) {
+    std::uint64_t h = 1469598103934665603ULL;
+    for (std::size_t i = 0; i < size; ++i) { h ^= data[i]; h *= 1099511628211ULL; }
+    static const char* hex = "0123456789abcdef";
+    std::string s(16, '0');
+    for (int i = 15; i >= 0; --i) { s[i] = hex[h & 0xf]; h >>= 4; }
+    return s + ".ild";
+}
+
+// Only names ilda_storage_name() produces are accepted when loading a file
+// (cues.json and the API can name one) - so nothing outside the ILDA folder
+// can ever be read.
+inline bool ilda_valid_storage_name(const std::string& name) {
+    if (name.size() != 20 || name.compare(16, 4, ".ild") != 0) return false;
+    for (int i = 0; i < 16; ++i) {
+        const char c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+// The original file name for display: path stripped, characters outside
+// [A-Za-z0-9 ._()-] replaced by '_' (keeps it safe in our simple JSON
+// files), at most 60 characters, "ILDA" if nothing is left.
+inline std::string ilda_display_name(const std::string& fileName) {
+    const auto slash = fileName.find_last_of("/\\");
+    const std::string base = slash == std::string::npos ? fileName : fileName.substr(slash + 1);
+    std::string out;
+    for (char c : base) {
+        if (out.size() >= 60) break;
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                        c == ' ' || c == '.' || c == '_' || c == '(' || c == ')' || c == '-';
+        out.push_back(ok ? c : '_');
+    }
+    return out.empty() ? "ILDA" : out;
+}
+
+// Which frame of an animation plays `seconds` after the cue started, at
+// `fps` frames per second (ILDA files carry no timing). Loops.
+inline std::size_t ilda_frame_index(double seconds, float fps, std::size_t frameCount) {
+    if (frameCount <= 1 || !(seconds > 0.0) || !(fps > 0.0f)) return 0;
+    const double f = std::floor(seconds * (double)fps);
+    return (std::size_t)std::fmod(f, (double)frameCount);
+}
+
+// Fits a frame into `maxPoints` (the DAC buffer budget) by keeping evenly
+// spaced points. A kept point is blanked if any point it stands in for was
+// blanked, so a blanked jump can never turn into a lit line. Frames that
+// already fit are returned unchanged - ILDA points are scanner samples and
+// shouldn't be touched (spec 2.4).
+inline std::vector<libera::core::LaserPoint> ilda_fit_points(const std::vector<libera::core::LaserPoint>& in,
+                                                             std::size_t maxPoints) {
+    if (in.size() <= maxPoints || maxPoints == 0) return maxPoints == 0 ? std::vector<libera::core::LaserPoint>{} : in;
+    std::vector<libera::core::LaserPoint> out;
+    out.reserve(maxPoints);
+    const double step = (double)in.size() / (double)maxPoints;
+    for (std::size_t k = 0; k < maxPoints; ++k) {
+        const std::size_t a = (std::size_t)(k * step);
+        const std::size_t b = std::min(in.size(), (std::size_t)((k + 1) * step));
+        libera::core::LaserPoint p = in[a];
+        for (std::size_t i = a; i < b; ++i)
+            if (in[i].r == 0.0f && in[i].g == 0.0f && in[i].b == 0.0f) { p.r = p.g = p.b = 0.0f; break; }
+        out.push_back(p);
+    }
+    return out;
 }

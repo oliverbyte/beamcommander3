@@ -28,6 +28,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -131,6 +132,67 @@ static std::string resolve_data_file(const std::string& filename) {
     return target;
 }
 
+// ── ILDA files on cues ─────────────────────────────────────────────────────────
+// Files dropped onto a cue slot (POST /api/cue/<n>/ilda) are stored in the
+// user data dir's ilda/ folder under a content-hash name (ilda_file.h), and
+// cues refer to them by that name. Shipped like the other user data: the
+// release copies backend/ilda/ next to the binary (or into Resources/), and
+// seed_ilda_files() copies any missing file into the data dir at startup.
+// Parsed files are cached (shared, read-only) - the laser thread only ever
+// reads from disk the first time a file is drawn.
+static std::string ilda_dir() {
+    std::string dir = app_data_dir() + "/ilda";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return dir;
+}
+using IldaClip = std::shared_ptr<const std::vector<IldaFrame>>;
+static std::mutex                     G_ilda_mtx;
+static std::map<std::string, IldaClip> G_ilda_cache; // storage name -> frames (nullptr = unreadable)
+
+static void ilda_cache_put(const std::string& name, std::vector<IldaFrame> frames) {
+    auto clip = std::make_shared<const std::vector<IldaFrame>>(std::move(frames));
+    std::lock_guard<std::mutex> lk(G_ilda_mtx);
+    G_ilda_cache[name] = std::move(clip);
+}
+static IldaClip ilda_clip(const std::string& name) {
+    if (!ilda_valid_storage_name(name)) return nullptr;
+    {
+        std::lock_guard<std::mutex> lk(G_ilda_mtx);
+        auto it = G_ilda_cache.find(name);
+        if (it != G_ilda_cache.end()) return it->second;
+    }
+    std::ifstream f(ilda_dir() + "/" + name, std::ios::binary);
+    const std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    std::vector<IldaFrame> frames;
+    if (data.empty() || !parse_ilda(data.data(), data.size(), frames) || frames.empty()) {
+        std::cout << "[ilda] cannot read " << name << " - cue shows nothing\n" << std::flush;
+        std::lock_guard<std::mutex> lk(G_ilda_mtx);
+        G_ilda_cache[name] = nullptr; // don't retry every frame
+        return nullptr;
+    }
+    ilda_cache_put(name, std::move(frames));
+    std::lock_guard<std::mutex> lk(G_ilda_mtx);
+    return G_ilda_cache[name];
+}
+// First-run/new-release seeds: shipped ILDA files that aren't in the data
+// dir yet (names are content hashes, so an existing file is never changed).
+static void seed_ilda_files() {
+    namespace fs = std::filesystem;
+    const std::string dest = ilda_dir();
+    for (const std::string& src : {exe_dir() + "/ilda", exe_dir() + "/../Resources/ilda"}) {
+        std::error_code ec;
+        if (!fs::is_directory(src, ec)) continue;
+        for (const auto& e : fs::directory_iterator(src, ec)) {
+            const std::string name = e.path().filename().string();
+            if (!ilda_valid_storage_name(name) || fs::exists(dest + "/" + name)) continue;
+            std::error_code cec;
+            fs::copy_file(e.path(), dest + "/" + name, cec);
+            if (!cec) std::cout << "[data] seeded ilda/" << name << "\n";
+        }
+    }
+}
+
 // ── Laser state — full BeamCommander feature set ───────────────────────────────
 struct LaserState {
     // Controller
@@ -158,6 +220,13 @@ struct LaserState {
 
     // Shape
     std::string shape     = "circle";
+    // ILDA file look (shape == "ilda", see make_ilda_frame()): the file in
+    // the user data dir's ilda/ folder (content-hash storage name, see
+    // ilda_storage_name()), its original name for display, and the
+    // animation speed (ILDA files carry no timing). Part of cues.
+    std::string ilda_file;
+    std::string ilda_name;
+    float ilda_fps        = 30.0f;
     float radius          = 0.7f;     // normalised 0..1
     int   points          = 300;
     float shape_scale     = 0.0f;     // -1..1 (0 = no extra scale)
@@ -260,6 +329,7 @@ struct ShowLayer {
     int        cue = 0;
     LaserState s;
     double     move_phase = 0.0, rotation_phase = 0.0, wave_phase = 0.0, rainbow_phase = 0.0;
+    double     ilda_time = 0.0; // seconds since the layer started (ILDA animation)
 };
 static constexpr std::size_t MAX_SHOW_LAYERS = 8;
 static std::vector<ShowLayer> G_show_layers;
@@ -378,6 +448,7 @@ static std::atomic<double> G_rotation_phase{0.0}; // radians
 // Motion hold also freezes cue layers (see do_motion_hold_press()).
 static std::atomic<bool>   G_motion_frozen{false};
 static double             G_wave_phase     = 0.0; // radians
+static double             G_ilda_time      = 0.0; // seconds since the main look started (ILDA animation; reset by cue recall)
 static double             G_rainbow_phase  = 0.0; // cycles, *unwrapped* (0 = rainbow just switched on) - see laser_thread()
 // Bumped by motion hold / rotation reset: laser_thread() then applies the
 // new speeds immediately instead of gliding (see ShowParamSmoother) - a
@@ -510,6 +581,7 @@ struct RenderPose {
     float  pos_x = 0.0f, pos_y = 0.0f;
     float  wave_frequency = 1.0f, wave_amplitude = 0.45f;
     double wave_phase = 0.0;         // radians
+    double ilda_time = 0.0;          // seconds since the look started (ILDA animation)
     int    maxPoints = 3000;
 };
 static constexpr int kFramePointBudget = 3000; // safely under the DAC's 4095-point buffer
@@ -620,7 +692,63 @@ static void hsv_to_rgb(float h, float s, float v, float& r, float& g, float& b) 
     }
 }
 
+// Where a look sits: its (smoothed) position plus the movement offset.
+// Uses the smoothed position (see G_pos_x_smooth above), not the raw target
+// s.pos_x/s.pos_y directly, so manual moves - especially MIDI, whose 7-bit
+// knobs would otherwise visibly step - glide instead of jumping. Switching
+// the movement pattern crossfades from the old one (blend driven by
+// ShowParamSmoother) instead of jumping to a new position.
+static Pt look_offset(const LaserState& s, double movement_phase, const RenderPose& pose) {
+    Pt mv = calc_movement(s.move_mode, s.move_size, movement_phase);
+    if (s.move_blend < 1.0f && s.move_mode_from != s.move_mode) {
+        const Pt from = calc_movement(s.move_mode_from, s.move_size, movement_phase);
+        const float w = std::clamp(s.move_blend, 0.0f, 1.0f);
+        mv.x = from.x + (mv.x - from.x) * w;
+        mv.y = from.y + (mv.y - from.y) * w;
+    }
+    return {pose.pos_x + mv.x, pose.pos_y + mv.y};
+}
+
+// An ILDA file look: the file's frame for this moment (animations loop at
+// ilda_fps), its points and colors exactly as in the file, then the look's
+// scale (shape_scale, 0 = the file's own size), rotation, position +
+// movement, mirror, master brightness and a held white flash - like a
+// shape. Not applied: the shape's color, radius, point count, dots, rainbow
+// and wave. Flicker, blackout, zone and masks follow later, as for shapes.
+// Only a frame bigger than the look's point budget is thinned
+// (ilda_fit_points()); a missing/unreadable file draws a single dark point.
+static core::Frame make_ilda_frame(const LaserState& s, double movement_phase, const RenderPose& pose) {
+    core::Frame frame;
+    const IldaClip clip = ilda_clip(s.ilda_file);
+    if (clip && !clip->empty()) {
+        const auto& src = (*clip)[ilda_frame_index(pose.ilda_time, s.ilda_fps, clip->size())].points;
+        frame.points = ilda_fit_points(src, (std::size_t)std::clamp(pose.maxPoints, 100, kFramePointBudget));
+    }
+    if (frame.points.empty()) {
+        frame.points.push_back(core::LaserPoint{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f});
+        return frame;
+    }
+    const float sf = s.shape_scale >= 0 ? (1.0f + s.shape_scale * 2.0f) : (1.0f + s.shape_scale * 0.7f);
+    const Pt off = look_offset(s, movement_phase, pose);
+    const float mirror_sign = s.mirror_x ? -1.0f : 1.0f;
+    const float c = std::cos((float)pose.rotation), sn = std::sin((float)pose.rotation);
+    const float bri = std::clamp(s.intensity, 0.0f, 1.0f);
+    for (auto& p : frame.points) {
+        const float x = p.x * sf, y = p.y * sf;
+        const float px = mirror_sign * (x * c - y * sn + off.x);
+        const float py = x * sn + y * c + off.y;
+        p.x = px; p.y = py;
+        const bool lit = p.r > 0.0f || p.g > 0.0f || p.b > 0.0f;
+        // Same screen-edge rule as shapes (see make_frame()): blank, never clamp.
+        if (!lit || std::fabs(px) > 1.0f || std::fabs(py) > 1.0f) { p.r = p.g = p.b = 0.0f; continue; }
+        if (g_flash_active) { p.r = 1.0f; p.g = 1.0f; p.b = 1.0f; }
+        p.r *= bri; p.g *= bri; p.b *= bri;
+    }
+    return frame;
+}
+
 static core::Frame make_frame(const LaserState& s, double movement_phase, double rainbow_cycles, const RenderPose& pose) {
+    if (s.shape == "ilda") return make_ilda_frame(s, movement_phase, pose);
     auto base = gen_base_shape(s, pose);
 
     // Rotation - always applied at the current phase, even when
@@ -634,21 +762,10 @@ static core::Frame make_frame(const LaserState& s, double movement_phase, double
     // so applying it unconditionally is always safe.
     rotate_pts(base, (float)pose.rotation);
 
-    // Position + movement. Uses the smoothed position (see G_pos_x_smooth
-    // above), not the raw target s.pos_x/s.pos_y directly, so manual moves
-    // - especially MIDI, whose 7-bit knobs would otherwise visibly step -
-    // glide instead of jumping.
-    Pt mv = calc_movement(s.move_mode, s.move_size, movement_phase);
-    // Switching the movement pattern crossfades from the old one (blend
-    // driven by ShowParamSmoother) instead of jumping to a new position.
-    if (s.move_blend < 1.0f && s.move_mode_from != s.move_mode) {
-        const Pt from = calc_movement(s.move_mode_from, s.move_size, movement_phase);
-        const float w = std::clamp(s.move_blend, 0.0f, 1.0f);
-        mv.x = from.x + (mv.x - from.x) * w;
-        mv.y = from.y + (mv.y - from.y) * w;
-    }
-    float ox = pose.pos_x + mv.x;
-    float oy = pose.pos_y + mv.y;
+    // Position + movement (see look_offset()).
+    const Pt off = look_offset(s, movement_phase, pose);
+    float ox = off.x;
+    float oy = off.y;
 
     // Mirror is applied last (matches the original app's transform order:
     // scale/rotate/translate, *then* mirror), so it flips the fully
@@ -945,6 +1062,9 @@ static std::string state_to_json() {
     std::ostringstream ss; ss << std::fixed << std::setprecision(4);
     ss << "{"
        << "\"shape\":\""       << G.shape         << "\","
+       << "\"ilda_file\":\""   << G.ilda_file     << "\","
+       << "\"ilda_name\":\""   << G.ilda_name     << "\","
+       << "\"ilda_fps\":"      << G.ilda_fps       << ","
        << "\"radius\":"        << G.radius         << ","
        << "\"points\":"        << G.points         << ","
        << "\"rate_kpps\":"     << G.rate_kpps      << ","
@@ -1007,6 +1127,7 @@ static RenderPose base_pose(int maxPoints) {
     p.pos_x = G_pos_x_smooth; p.pos_y = G_pos_y_smooth;
     p.wave_frequency = G_wave_frequency_smooth; p.wave_amplitude = G_wave_amplitude_smooth;
     p.wave_phase = G_wave_phase;
+    p.ilda_time = G_ilda_time;
     p.maxPoints = maxPoints;
     return p;
 }
@@ -1016,6 +1137,7 @@ static RenderPose layer_pose(const ShowLayer& L, int maxPoints) {
     p.pos_x = L.s.pos_x; p.pos_y = L.s.pos_y;
     p.wave_frequency = L.s.wave_frequency; p.wave_amplitude = L.s.wave_amplitude;
     p.wave_phase = L.wave_phase;
+    p.ilda_time = L.ilda_time;
     p.maxPoints = maxPoints;
     return p;
 }
@@ -1160,6 +1282,7 @@ static void laser_thread() {
                 G_wave_frequency_smooth = G.wave_frequency;
                 G_wave_amplitude_smooth = G.wave_amplitude;
                 G_wave_speed_smooth     = G.wave_speed;
+                G_ilda_time = 0.0; // an ILDA cue starts at its first frame
             }
             // Output latency (how far ahead libera queues frames).
             if (G.output_latency_ms != appliedLatencyMs) {
@@ -1201,6 +1324,9 @@ static void laser_thread() {
             // needs to know how far the hue has travelled since switch-on.
             G_rainbow_phase  = smooth.rainbow_amount > 0.0f
                 ? G_rainbow_phase + smooth.rainbow_speed * dt : 0.0;
+            // ILDA animations play on regardless of motion hold.
+            G_ilda_time += dt;
+            for (auto& L : G_show_layers) L.ilda_time += dt;
             // Cue layers run their own animation (frozen by motion hold).
             if (!G_motion_frozen.load()) {
                 for (auto& L : G_show_layers) {
@@ -1705,6 +1831,9 @@ static std::string cue_state_to_json(const LaserState& s) {
     std::ostringstream ss; ss << std::fixed << std::setprecision(4);
     ss << "{"
        << "\"shape\":\""       << s.shape         << "\","
+       << "\"ilda_file\":\""   << s.ilda_file     << "\","
+       << "\"ilda_name\":\""   << s.ilda_name     << "\","
+       << "\"ilda_fps\":"      << s.ilda_fps      << ","
        << "\"radius\":"        << s.radius        << ","
        << "\"points\":"        << s.points        << ","
        << "\"r\":"             << s.r             << ","
@@ -1740,6 +1869,10 @@ static std::string cue_state_to_json(const LaserState& s) {
 static LaserState cue_state_from_json(const std::string& obj) {
     LaserState s{};
     auto str = json_str(obj,"shape");     if(!str.empty()) s.shape = str;
+    s.ilda_file       = json_str(obj,"ilda_file");
+    if (!ilda_valid_storage_name(s.ilda_file)) s.ilda_file.clear();
+    if (auto nm = json_str(obj,"ilda_name"); !nm.empty()) s.ilda_name = ilda_display_name(nm);
+    s.ilda_fps        = std::clamp(json_float(obj,"ilda_fps",s.ilda_fps),1.0f,120.0f);
     s.radius          = json_float(obj,"radius",s.radius);
     s.points          = json_int(obj,"points",s.points);
     s.r               = json_float(obj,"r",s.r);
@@ -1881,6 +2014,80 @@ static bool do_cue_layer(int n, int mode) {
 static void do_layers_clear() {
     std::lock_guard<std::mutex> lk(G_mtx);
     G_show_layers.clear();
+}
+
+// ── ILDA file store (REST: /api/ilda..., /api/cue/<n>/ilda) ──────────────────
+// Files live in ilda_dir() under their content-hash name (see ilda_clip());
+// the original file name of the last upload sits next to it in
+// "<hash>.name" (display only - cues keep their own copy in ilda_name).
+static constexpr std::size_t kMaxIldaBytes = 64u * 1024u * 1024u;
+
+static std::string ilda_stored_name(const std::string& file) {
+    std::ifstream f(ilda_dir() + "/" + file.substr(0, 16) + ".name");
+    std::string name; std::getline(f, name);
+    return name.empty() ? std::string() : ilda_display_name(name);
+}
+
+struct IldaStoreResult {
+    int status = 200;          // HTTP status, 200 = stored
+    std::string error;         // set when status != 200
+    std::string file, name;    // storage name, display name
+    std::size_t frames = 0;
+};
+// Checks an uploaded file (must parse as ILDA with at least one frame),
+// stores it (once - the same bytes always get the same name) and caches it.
+static IldaStoreResult ilda_store_upload(const std::string& body, const std::string& originalName) {
+    IldaStoreResult r;
+    if (body.empty() || body.size() > kMaxIldaBytes) { r.status = 400; r.error = "empty or too large file (max 64 MB)"; return r; }
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(body.data());
+    std::vector<IldaFrame> frames;
+    if (!parse_ilda(bytes, body.size(), frames) || frames.empty()) { r.status = 400; r.error = "not a valid ILDA file"; return r; }
+    r.file = ilda_storage_name(bytes, body.size());
+    const std::string path = ilda_dir() + "/" + r.file;
+    if (!std::filesystem::exists(path)) {
+        const std::string tmp = path + ".tmp";
+        { std::ofstream out(tmp, std::ios::binary | std::ios::trunc); out.write(body.data(), (std::streamsize)body.size()); }
+        std::error_code ec;
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) { r.status = 500; r.error = "could not store the file"; return r; }
+    }
+    r.name = ilda_display_name(originalName);
+    if (!originalName.empty()) { std::ofstream(ilda_dir() + "/" + r.file.substr(0, 16) + ".name", std::ios::trunc) << r.name << "\n"; }
+    else if (const std::string stored = ilda_stored_name(r.file); !stored.empty()) r.name = stored;
+    r.frames = frames.size();
+    ilda_cache_put(r.file, std::move(frames));
+    return r;
+}
+
+// Cue numbers whose look plays `file`.
+static std::vector<int> ilda_used_by(const std::string& file) {
+    std::vector<int> out;
+    std::lock_guard<std::mutex> lk(G_cues_mtx);
+    for (const auto& [num, c] : G_cues) if (c.shape == "ilda" && c.ilda_file == file) out.push_back(num);
+    return out;
+}
+
+// Display name of a stored file: from its upload, else from a cue playing it.
+static std::string ilda_known_name(const std::string& file) {
+    std::string name = ilda_stored_name(file);
+    if (!name.empty()) return name;
+    std::lock_guard<std::mutex> lk(G_cues_mtx);
+    for (const auto& [num, c] : G_cues) if (c.shape == "ilda" && c.ilda_file == file && !c.ilda_name.empty()) return c.ilda_name;
+    return {};
+}
+
+// Slot n becomes a fresh ILDA look playing `file` (default position/scale,
+// no movement - tweak and Save to change), replacing the slot, and is
+// recalled right away.
+static void ilda_cue_assign(int n, const std::string& file, const std::string& name) {
+    LaserState cue{};
+    cue.shape = "ilda";
+    cue.ilda_file = file;
+    cue.ilda_name = name;
+    { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[n] = cue; }
+    save_cues_to_disk();
+    do_cue_recall(n);
+    std::cout << "[ilda] cue " << n << " <- " << name << " (" << file << ")\n" << std::flush;
 }
 
 static void do_cue_clear(int n) {
@@ -2871,7 +3078,18 @@ int main(int argc, char* argv[]) {
     // output) where midi_map.json/cues.json actually live.
     std::cout << "[laser_daemon] User data directory: " << app_data_dir() << "\n";
 
+    seed_ilda_files();
     load_cues_from_disk();
+    {
+        // Load every ILDA file a cue uses now, not on the laser thread's
+        // first frame. Stored files are never deleted automatically (a
+        // broken cues.json must not cost the files); releases only ship the
+        // ones a cue uses (packaging/sync_default_data.sh).
+        std::set<std::string> used;
+        { std::lock_guard<std::mutex> lk(G_cues_mtx);
+          for (const auto& [num, c] : G_cues) if (!c.ilda_file.empty()) used.insert(c.ilda_file); }
+        for (const auto& f : used) ilda_clip(f);
+    }
     load_lasers_from_disk();
     load_magic_from_disk();
     load_settings_from_disk();
@@ -2950,6 +3168,7 @@ int main(int argc, char* argv[]) {
         APPLY_F("flicker_phase_degrees",flicker_phase_degrees) APPLY_CLAMP("flicker_phase_degrees",flicker_phase_degrees,0,360)
         APPLY_B("blackout",blackout)
         APPLY_F("points",points)
+        APPLY_F("ilda_fps",ilda_fps) APPLY_CLAMP("ilda_fps",ilda_fps,1,120)
         } // lock released here
         res.set_content(state_to_json(),"application/json");
     });
@@ -3301,6 +3520,137 @@ int main(int argc, char* argv[]) {
         res.set_content("{\"saved\":"+std::to_string(n)+"}","application/json");
     });
 
+    // ── ILDA files ────────────────────────────────────────────────────────────
+    // Stored in the data dir's ilda/ folder under content-hash names
+    // ("<16 hex>.ild", see ilda_storage_name()). The Cues view uploads by
+    // dropping a file onto a slot (POST /api/cue/<n>/ilda).
+    auto ildaError = [](httplib::Response& res, int status, const std::string& msg) {
+        res.status = status; res.set_content("{\"error\":\"" + msg + "\"}", "application/json");
+    };
+
+    // POST /api/cue/<n>/ilda?name=<file name> - body: a raw .ild file; or,
+    // with Content-Type application/json, {"file":"<stored>.ild","name":"..."}
+    // to use an already stored file. Slot n becomes an ILDA look playing it
+    // (replacing the slot) and is recalled right away. Returns the new state
+    // like /recall.
+    svr.Post(R"(/api/cue/(\d+)/ilda)",[ildaError](const httplib::Request& req,httplib::Response& res){
+        int n=std::stoi(std::string(req.matches[1]));
+        if(n<1||n>MAX_CUES){ildaError(res,400,"invalid cue number");return;}
+        std::string file, name;
+        if (req.get_header_value("Content-Type").find("application/json") != std::string::npos) {
+            file = json_str(req.body, "file");
+            if (!ilda_valid_storage_name(file) || !ilda_clip(file)) { ildaError(res,404,"unknown ILDA file"); return; }
+            const std::string given = json_str(req.body, "name");
+            name = !given.empty() ? ilda_display_name(given) : ilda_known_name(file);
+            if (name.empty()) name = file;
+        } else {
+            const IldaStoreResult r = ilda_store_upload(req.body, req.has_param("name") ? req.get_param_value("name") : "");
+            if (r.status != 200) { ildaError(res, r.status, r.error); return; }
+            file = r.file; name = r.name;
+        }
+        ilda_cue_assign(n, file, name);
+        res.set_content(state_to_json(),"application/json");
+    });
+
+    // GET /api/ilda - every stored file:
+    // [{"file","name","frames","bytes","cues":[n,...]}, ...]
+    svr.Get("/api/ilda",[](const httplib::Request&,httplib::Response& res){
+        std::vector<std::string> files;
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(ilda_dir(), ec)) {
+            const std::string name = e.path().filename().string();
+            if (ilda_valid_storage_name(name)) files.push_back(name);
+        }
+        std::sort(files.begin(), files.end());
+        std::ostringstream ss; ss << "[";
+        for (std::size_t i = 0; i < files.size(); ++i) {
+            const std::string& f = files[i];
+            const IldaClip clip = ilda_clip(f);
+            std::error_code sec;
+            const auto bytes = std::filesystem::file_size(ilda_dir() + "/" + f, sec);
+            ss << (i ? "," : "") << "{\"file\":\"" << f << "\",\"name\":\"" << ilda_known_name(f)
+               << "\",\"frames\":" << (clip ? clip->size() : 0) << ",\"bytes\":" << (sec ? 0 : bytes) << ",\"cues\":[";
+            const auto used = ilda_used_by(f);
+            for (std::size_t k = 0; k < used.size(); ++k) ss << (k ? "," : "") << used[k];
+            ss << "]}";
+        }
+        ss << "]";
+        res.set_content(ss.str(),"application/json");
+    });
+
+    // POST /api/ilda?name=<file name> - body: a raw .ild file. Stores it
+    // without touching any cue: {"file","name","frames"}. 400 if invalid.
+    svr.Post("/api/ilda",[ildaError](const httplib::Request& req,httplib::Response& res){
+        const IldaStoreResult r = ilda_store_upload(req.body, req.has_param("name") ? req.get_param_value("name") : "");
+        if (r.status != 200) { ildaError(res, r.status, r.error); return; }
+        res.set_content("{\"file\":\"" + r.file + "\",\"name\":\"" + r.name + "\",\"frames\":" + std::to_string(r.frames) + "}",
+                        "application/json");
+    });
+
+    // GET /api/ilda/<file> - the stored file itself (download).
+    svr.Get(R"(/api/ilda/([0-9a-f]{16}\.ild))",[ildaError](const httplib::Request& req,httplib::Response& res){
+        const std::string file = req.matches[1];
+        std::ifstream f(ilda_dir() + "/" + file, std::ios::binary);
+        if (!f) { ildaError(res,404,"unknown ILDA file"); return; }
+        std::ostringstream buf; buf << f.rdbuf();
+        const std::string name = ilda_known_name(file);
+        res.set_header("Content-Disposition", "attachment; filename=\"" + (name.empty() ? file : name) + "\"");
+        res.set_content(buf.str(), "application/octet-stream");
+    });
+
+    // DELETE /api/ilda/<file> - removes a stored file. 409 while a cue, the
+    // current look or a cue layer still plays it.
+    svr.Delete(R"(/api/ilda/([0-9a-f]{16}\.ild))",[ildaError](const httplib::Request& req,httplib::Response& res){
+        const std::string file = req.matches[1];
+        const std::string path = ilda_dir() + "/" + file;
+        if (!std::filesystem::exists(path)) { ildaError(res,404,"unknown ILDA file"); return; }
+        const auto used = ilda_used_by(file);
+        if (!used.empty()) {
+            std::string list;
+            for (std::size_t k = 0; k < used.size(); ++k) list += (k ? ", " : "") + std::to_string(used[k]);
+            ildaError(res, 409, "still used by cue " + list); return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(G_mtx);
+            bool playing = G.shape == "ilda" && G.ilda_file == file;
+            for (const auto& L : G_show_layers) playing = playing || (L.s.shape == "ilda" && L.s.ilda_file == file);
+            if (playing) { ildaError(res, 409, "currently playing"); return; }
+        }
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        if (ec) { ildaError(res,500,"could not delete the file"); return; }
+        std::filesystem::remove(ilda_dir() + "/" + file.substr(0, 16) + ".name", ec);
+        { std::lock_guard<std::mutex> lk(G_ilda_mtx); G_ilda_cache.erase(file); }
+        res.set_content("{\"deleted\":\"" + file + "\"}","application/json");
+    });
+
+    // ── GET /api/ilda/<file>/preview — thumbnail data for a cue slot ───────────
+    // {"frames":N,"points":[[x,y,r,g,b],...]}: the frame with the most lit
+    // points (an animation's first frame is often nearly empty), thinned to
+    // at most 600 points, colors 0..255, blanked points 0,0,0.
+    svr.Get(R"(/api/ilda/([0-9a-f]{16}\.ild)/preview)",[ildaError](const httplib::Request& req,httplib::Response& res){
+        const IldaClip clip = ilda_clip(req.matches[1]);
+        if (!clip || clip->empty()) { ildaError(res,404,"unknown ILDA file"); return; }
+        const IldaFrame* best = &clip->front();
+        std::size_t bestLit = 0;
+        for (const auto& f : *clip) {
+            std::size_t lit = 0;
+            for (const auto& q : f.points) lit += (q.r > 0.0f || q.g > 0.0f || q.b > 0.0f);
+            if (lit > bestLit) { bestLit = lit; best = &f; }
+        }
+        const auto pts = ilda_fit_points(best->points, 600);
+        std::ostringstream ss; ss << std::fixed << std::setprecision(3);
+        ss << "{\"frames\":" << clip->size() << ",\"points\":[";
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+            const auto& q = pts[i];
+            ss << (i ? "," : "") << '[' << q.x << ',' << q.y << ',' << (int)std::lround(q.r * 255) << ','
+               << (int)std::lround(q.g * 255) << ',' << (int)std::lround(q.b * 255) << ']';
+        }
+        ss << "]}";
+        res.set_header("Cache-Control", "max-age=86400"); // content-hash names never change
+        res.set_content(ss.str(),"application/json");
+    });
+
     // ── POST /api/cue/<n>/recall — apply slot n's saved show params ────────────
     svr.Post(R"(/api/cue/(\d+)/recall)",[](const httplib::Request& req,httplib::Response& res){
         int n=std::stoi(std::string(req.matches[1]));
@@ -3405,6 +3755,7 @@ int main(int argc, char* argv[]) {
               << "  POST /brightness/gate/<0|1>  /rotation/reset\n"
               << "  GET /api/lasers   POST /api/lasers   POST /api/lasers/<id>   POST /api/lasers/<id>/masks   DELETE /api/lasers/<id>\n"
               << "  GET /api/test-patterns   POST /api/test-pattern   (ILDA test patterns on armed lasers)\n"
+              << "  POST /api/cue/<n>/ilda   GET/POST /api/ilda   GET/DELETE /api/ilda/<file>   GET /api/ilda/<file>/preview\n"
               << "  GET/POST /api/magic-touch   (shared Magic Touch layout)\n"
               << "  WS   /ws/points\n"
               << "  MIDI: optional, see backend/midi_map.json (Akai APC40 mkII or any USB controller)\n";

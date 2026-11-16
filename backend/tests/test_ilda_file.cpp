@@ -234,6 +234,60 @@ TEST(rate_must_be_within_one_percent) {
     CHECK(!test_pattern_rate_ok(0.0f, 0.0f));
 }
 
+// ── Playback helpers ────────────────────────────────────────────────────────
+TEST(storage_name_is_content_hash_and_validated) {
+    const std::uint8_t a[] = {1, 2, 3}, b[] = {1, 2, 4};
+    const std::string na = ilda_storage_name(a, 3);
+    CHECK(na.size() == 20);
+    CHECK(na == ilda_storage_name(a, 3));        // same bytes -> same name
+    CHECK(na != ilda_storage_name(b, 3));
+    CHECK(ilda_valid_storage_name(na));
+    CHECK(ilda_valid_storage_name(ilda_storage_name(TEST_12K_ILD, TEST_12K_ILD_len)));
+    CHECK(!ilda_valid_storage_name("../../etc/passwd"));
+    CHECK(!ilda_valid_storage_name("0123456789abcdeF.ild"));
+    CHECK(!ilda_valid_storage_name("0123456789abcdef.ilda"));
+    CHECK(!ilda_valid_storage_name("0123456789abcde/.ild"));
+    CHECK(!ilda_valid_storage_name(""));
+}
+
+TEST(display_name_is_sanitized) {
+    CHECK(ilda_display_name("C:\\shows\\My Show (v2).ild") == "My Show (v2).ild");
+    CHECK(ilda_display_name("/tmp/a\"b{c}.ILD") == "a_b_c_.ILD");
+    CHECK(ilda_display_name("") == "ILDA");
+    CHECK(ilda_display_name(std::string(100, 'x')).size() == 60);
+}
+
+TEST(frame_index_loops_at_fps) {
+    CHECK(ilda_frame_index(0.0, 30.0f, 10) == 0);
+    CHECK(ilda_frame_index(0.034, 30.0f, 10) == 1);
+    CHECK(ilda_frame_index(0.34, 30.0f, 10) == 0);  // frame 10 wraps to 0
+    CHECK(ilda_frame_index(0.5, 30.0f, 10) == 5);
+    CHECK(ilda_frame_index(5.0, 30.0f, 1) == 0);
+    CHECK(ilda_frame_index(-1.0, 30.0f, 10) == 0);
+    CHECK(ilda_frame_index(1.0, 0.0f, 10) == 0);
+}
+
+TEST(fit_points_keeps_small_frames_and_never_lights_a_blanked_jump) {
+    std::vector<libera::core::LaserPoint> pts;
+    for (int i = 0; i < 1000; ++i) {
+        libera::core::LaserPoint p{};
+        p.x = (float)i / 1000.0f; p.r = p.g = p.b = (i % 7 == 3) ? 0.0f : 1.0f; // scattered blanked points
+        pts.push_back(p);
+    }
+    CHECK(ilda_fit_points(pts, 1000).size() == 1000);
+    CHECK(ilda_fit_points(pts, 5000).size() == 1000);
+    const auto fit = ilda_fit_points(pts, 100);
+    CHECK(fit.size() == 100);
+    // every kept point covers 10 originals, each window contains a blanked one
+    for (const auto& p : fit) CHECK(isBlank(p));
+    // a frame without any blanking stays lit
+    for (auto& p : pts) p.r = p.g = p.b = 1.0f;
+    const auto lit = ilda_fit_points(pts, 300);
+    CHECK(lit.size() == 300);
+    for (const auto& p : lit) CHECK(!isBlank(p));
+    CHECK(ilda_fit_points(pts, 0).empty());
+}
+
 int main() {
     std::printf("ilda_file tests\n");
     for (const auto& t : registry()) {

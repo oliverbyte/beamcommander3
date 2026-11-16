@@ -64,6 +64,7 @@ cp "$WORK/out/laser_daemon" "$STAGE/bc3/"
 cp -R "$REPO/frontend/dist" "$STAGE/bc3/frontend_dist"
 # First-run seeds next to the binary (like the desktop releases) ...
 cp "$REPO"/backend/{cues,magic_touch,midi_map,lasers,settings}.json "$STAGE/bc3/"
+cp -R "$REPO/backend/ilda" "$STAGE/bc3/ilda"   # ILDA files the cues play
 # ... and the complete data set for the Pi's data directory.
 cp "$REPO"/backend/{cues,magic_touch,lasers,settings}.json "$STAGE/bc3/data/"
 chmod +x "$STAGE"/bc3/*.sh "$STAGE/bc3/laser_daemon"

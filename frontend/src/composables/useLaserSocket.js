@@ -8,6 +8,10 @@ import { reactive } from 'vue'
 export const laserState = reactive({
   // Shape
   shape:           'circle',
+  // ILDA file look (shape 'ilda'): stored file, original name, animation fps
+  ilda_file:       '',
+  ilda_name:       '',
+  ilda_fps:        30,
   radius:          0.7,
   points:          300,
   shape_scale:     0.0,
@@ -348,7 +352,7 @@ export async function recallCue(n) {
 // projector settings - scan rate, max rate, output latency, dot dwell/blanking -
 // are global, not part of cues.
 const CUE_STATE_FIELDS = [
-  'shape', 'radius', 'points', 'r', 'g', 'b', 'shape_scale',
+  'shape', 'ilda_file', 'radius', 'points', 'r', 'g', 'b', 'shape_scale',
   'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed',
   'move_size', 'move_phase_degrees', 'wave_frequency', 'wave_amplitude', 'wave_speed',
   'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees',
@@ -414,6 +418,36 @@ export async function clearLayers() {
   markLocalChange()
   const seq = nextStateSeq()
   applyStateIfCurrent(seq, await api('/layers/clear', { method: 'POST' }))
+}
+
+// Drag & drop of an ILDA file onto a cue slot: the daemon checks and stores
+// the file, turns slot n into an ILDA look playing it (replacing the slot)
+// and recalls it right away - see POST /api/cue/<n>/ilda.
+export async function uploadIldaCue(n, file) {
+  markLocalChange()
+  const seq = nextStateSeq()
+  const res = await fetch(`/api/cue/${n}/ilda?name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: file,
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || `upload failed (${res.status})`)
+  applyStateIfCurrent(seq, data)
+  await fetchCues()
+}
+
+// Thumbnail data of a stored ILDA file ({frames, points:[[x,y,r,g,b],...]},
+// first frame) - cached per file; stored files never change (content-hash names).
+const ildaPreviewCache = new Map()
+export function fetchIldaPreview(file) {
+  if (!ildaPreviewCache.has(file)) {
+    ildaPreviewCache.set(file, api(`/ilda/${file}/preview`).catch((e) => {
+      ildaPreviewCache.delete(file)
+      throw e
+    }))
+  }
+  return ildaPreviewCache.get(file)
 }
 
 export async function clearCue(n) {

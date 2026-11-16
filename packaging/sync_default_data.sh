@@ -6,6 +6,9 @@
 # resolve_data_file() in backend/laser_daemon.cpp - a missing data file is
 # seeded from a same-named file next to the binary / in Resources/).
 #
+# Also mirrors the ILDA files the cues play (data dir ilda/ -> backend/ilda/,
+# only those cues.json refers to - see seed_ilda_files() in laser_daemon.cpp).
+#
 # Run this before every release (= every push to main), then commit the
 # changed files. Not copied on purpose:
 # - midi_map.json: the app never writes it - backend/midi_map.json in the repo
@@ -37,4 +40,21 @@ copy() { # copy <file> <destination dir>
 
 for f in "${FILES[@]}"; do copy "$f" "$DEST"; done
 
-git -C "$DEST/.." status --short -- "${FILES[@]/#/backend/}"
+# ILDA files: exactly the ones the synced cues use.
+mkdir -p "$DEST/ilda"
+find "$DEST/ilda" -maxdepth 1 -name '*.ild' -delete
+if [[ -s "$DEST/cues.json" ]]; then
+  python3 -c 'import json,sys
+for c in json.load(open(sys.argv[1])).values():
+    f = c.get("ilda_file", "")
+    if c.get("shape") == "ilda" and f: print(f)' "$DEST/cues.json" | sort -u | while read -r f; do
+    if [[ -s "$DATA_DIR/ilda/$f" ]]; then
+      cp "$DATA_DIR/ilda/$f" "$DEST/ilda/$f"
+      echo "[sync] ilda/$f"
+    else
+      echo "[sync] WARNING: ilda/$f is used by a cue but missing in $DATA_DIR/ilda" >&2
+    fi
+  done
+fi
+
+git -C "$DEST/.." status --short -- "${FILES[@]/#/backend/}" backend/ilda

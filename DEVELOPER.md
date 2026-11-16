@@ -11,6 +11,7 @@ backend/
   ilda_file.h        ILDA file reader (all formats of the ILDA IDTF spec, rev. 011)
   test_patterns.h    Official ILDA 12K/30K test patterns (played from ILDA's files)
   test_patterns/     The original ILDA files (TEST_12K.ILD, TEST_30K.ILD)
+  ilda/              ILDA files the shipped cues play (synced, see "ILDA files on cues")
   ilda_test_pattern_data.h  Generated: those files embedded byte for byte
   json_lite.h        Tiny JSON field readers shared by the daemon and the tests
   tests/             Backend unit tests, run before every push (.githooks/pre-push)
@@ -198,6 +199,34 @@ then the normal `finalize_hardware_frame()` (blackout/arm gate, footswitch,
 mirror, zone, masks); flicker and layers are skipped. The WS preview gets
 `tp: {laserId: kpps}` so it replays those lasers at the pattern's rate
 without flicker.
+
+### ILDA files on cues
+
+Dropping an `.ild` file onto a cue slot (`CuePanel.vue` ->
+`POST /api/cue/<n>/ilda`) validates it with `parse_ilda()`, stores it as
+`<data dir>/ilda/<FNV-1a hash>.ild` (`ilda_storage_name()`; identical files
+share one name, and only such names are ever loaded - `ilda_valid_storage_name()`
+- so a cue can't point outside that folder), and makes the slot a look with
+`shape = "ilda"`, `ilda_file`, `ilda_name` (sanitized original name) and
+`ilda_fps`. Being a normal `LaserState` look, it works everywhere cues do
+(recall, momentary, layers, move, MIDI). `make_frame()` hands such looks to
+`make_ilda_frame()`: the frame for `pose.ilda_time` (seconds since the look
+started - `G_ilda_time`, reset by cue recall, or the layer's own), thinned
+only if it exceeds the look's point budget (`ilda_fit_points()`, never
+lighting a blanked jump), then scale/rotation/position/movement/mirror,
+master brightness and flash. Parsed files are cached (`ilda_clip()`);
+startup preloads every file a cue uses. Files are never deleted
+automatically. The REST surface (`/api/ilda...`, see README) shares
+`ilda_store_upload()` (validate, store once, cache; the upload's original
+name goes to `<hash>.name` next to the file) and `ilda_cue_assign()`
+between dropping a file on a slot, uploading without a cue, and assigning an
+already stored file; `DELETE` refuses files a cue, the look or a layer plays. `GET /api/ilda/<file>/preview` feeds the slot thumbnail
+(`CuePreview.vue`).
+
+Shipping: `packaging/sync_default_data.sh` mirrors the files `cues.json`
+uses into `backend/ilda/`; the releases (macOS `Resources/ilda`, Windows,
+Raspberry Pi) ship that folder and `seed_ilda_files()` copies missing files
+into the data dir at startup.
 
 ## Standalone / packaged builds
 

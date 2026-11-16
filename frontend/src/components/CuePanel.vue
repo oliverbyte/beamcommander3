@@ -1,5 +1,6 @@
 <template>
-  <div id="cue-panel" :class="{ popout }">
+  <!-- Drops that miss a slot are swallowed - otherwise the browser would open the file instead of the app. -->
+  <div id="cue-panel" :class="{ popout }" @dragover.prevent @drop.prevent>
     <div class="panel-body">
       <div class="mode-row">
         <button class="mode-btn save-mode-btn" :class="{ active: saveArmed }" @click="toggleSaveMode">
@@ -13,8 +14,12 @@
         <button
           v-for="n in CUE_COUNT" :key="n"
           class="cue-btn"
-          :class="{ populated: !!cues[n], 'current-cue': isCurrentCue(n), armed: saveArmed, 'move-armed': moveArmed, 'move-source': moveSource === n }"
+          :class="{ populated: !!cues[n], 'current-cue': isCurrentCue(n), armed: saveArmed, 'move-armed': moveArmed, 'move-source': moveSource === n, 'drop-target': dropTarget === n, uploading: uploading === n }"
           @click="onClick(n)"
+          @dragenter.prevent="onDragOver($event, n)"
+          @dragover.prevent="onDragOver($event, n)"
+          @dragleave="onDragLeave(n)"
+          @drop.prevent.stop="onDrop($event, n)"
           @contextmenu.prevent="onClear(n)"
           :title="cueTitle(n)"
         >
@@ -22,7 +27,8 @@
           <span class="cue-num" :class="{ empty: !cues[n] }">{{ n }}</span>
         </button>
       </div>
-      <p class="hint">Right-click a slot to clear it.</p>
+      <p class="hint">Right-click a slot to clear it. Drop an ILDA file (.ild) onto a slot to store it there and play it.</p>
+      <p v-if="error" class="error">{{ error }}</p>
     </div>
   </div>
 </template>
@@ -30,13 +36,16 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import CuePreview from './CuePreview.vue'
-import { cues, isCueCurrent as isCurrentCue, saveCue, recallCue, clearCue, moveCue, fetchCues } from '../composables/useLaserSocket.js'
+import { cues, isCueCurrent as isCurrentCue, saveCue, recallCue, clearCue, moveCue, fetchCues, uploadIldaCue } from '../composables/useLaserSocket.js'
 
 const { popout } = defineProps({ popout: { type: Boolean, default: false } })
 const CUE_COUNT = 128
 const saveArmed = ref(false)
 const moveArmed = ref(false)
 const moveSource = ref(null)
+const dropTarget = ref(null) // slot an ILDA file is dragged over
+const uploading = ref(null)  // slot whose ILDA file is being stored
+const error = ref(null)
 
 onMounted(() => { fetchCues().catch(() => {}) })
 
@@ -58,7 +67,10 @@ function cueTitle(n) {
       ? (moveSource.value === n ? `Cue ${n} — click again to cancel` : `Move cue ${moveSource.value} into slot ${n}${cues[n] ? ' (overwrites it)' : ''}`)
       : (cues[n] ? `Cue ${n} — click to pick as the one to move` : `Cue ${n} — empty, nothing to move`)
   }
-  return cues[n] ? `Cue ${n} — click to recall, right-click to clear` : `Cue ${n} — empty, arm save mode then click to save`
+  const ilda = cues[n]?.shape === 'ilda' ? ` (ILDA: ${cues[n].ilda_name})` : ''
+  return cues[n]
+    ? `Cue ${n}${ilda} — click to recall, right-click to clear, drop an .ild file to replace`
+    : `Cue ${n} — empty, arm save mode then click to save, or drop an .ild file`
 }
 
 async function onClick(n) {
@@ -79,6 +91,34 @@ async function onClick(n) {
     saveArmed.value = false
   } else if (cues[n]) {
     await recallCue(n).catch(console.error)
+  }
+}
+
+// ── ILDA files: drag & drop onto a slot ──────────────────────────────────────
+function isFileDrag(event) {
+  return Array.from(event.dataTransfer?.types || []).includes('Files')
+}
+function onDragOver(event, n) {
+  if (!isFileDrag(event)) return
+  event.dataTransfer.dropEffect = 'copy'
+  dropTarget.value = n
+}
+function onDragLeave(n) {
+  if (dropTarget.value === n) dropTarget.value = null
+}
+async function onDrop(event, n) {
+  dropTarget.value = null
+  if (!isFileDrag(event)) return
+  const file = Array.from(event.dataTransfer.files).find((f) => /\.ild$/i.test(f.name))
+  if (!file) { error.value = 'Only ILDA files (.ild) can be dropped onto a cue slot.'; return }
+  uploading.value = n
+  try {
+    await uploadIldaCue(n, file) // stores it in slot n and plays it right away
+    error.value = null
+  } catch (e) {
+    error.value = `${file.name}: ${e.message || e}`
+  } finally {
+    uploading.value = null
   }
 }
 
@@ -160,4 +200,8 @@ async function onClear(n) {
   width:100%; height:100%; font-size:18px; color:inherit; text-shadow:none;
 }
 .hint { font-size:10px; color:#6a7090; margin:8px 0 0; line-height:1.4; }
+.error { font-size:11px; color:#ff8080; margin:4px 0 0; }
+.cue-btn.drop-target { border:2px dashed #ffc83c; background:rgba(255,200,60,0.18); }
+.cue-btn.uploading { animation:cue-uploading 0.8s ease-in-out infinite alternate; }
+@keyframes cue-uploading { from { background:rgba(255,200,60,0.08); } to { background:rgba(255,200,60,0.3); } }
 </style>
