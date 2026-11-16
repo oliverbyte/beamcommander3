@@ -14,7 +14,8 @@
         <div
           v-for="w in widgets" :key="w.id"
           class="mtb-widget"
-          :class="{ selected: editing && selectedIds.includes(w.id) }"
+          :class="{ selected: editing && selectedIds.includes(w.id), inactive: !editing && widgetUnused(w) }"
+          :title="!editing && widgetUnused(w) ? 'Not used by the current shape - the value is kept for shapes that use it' : undefined"
           :style="{ left: w.x + 'px', top: w.y + 'px', width: w.w + 'px', height: w.h + 'px', '--cs': (w.controlScale ?? 100) / 100 }"
           @pointerdown="onWidgetDown($event, w)"
           @contextmenu.prevent="onContextMenu($event, w)"
@@ -236,7 +237,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   flashPress, flashRelease, cues, isCueCurrent, laserState, lasers, markLocalChange, recallCue, resetState, rotationReset,
   momentaryCuePress, momentaryCueRelease, setCueLayer, clearLayers,
-  setBrightnessGate, updateLaser, updateState, magicTouch, fetchMagicTouch, saveMagicTouch,
+  setBrightnessGate, updateLaser, updateState, magicTouch, fetchMagicTouch, saveMagicTouch, isParamUnused,
 } from '../composables/useLaserSocket.js'
 import CuePreview from './CuePreview.vue'
 import { MOVE_ICONS, SHAPE_ICONS } from './magicIcons.js'
@@ -361,6 +362,13 @@ for (let n = 1; n <= LASER_SLOTS; n++) {
 const FUNCTIONS = { fader: VALUE_FNS, knob: VALUE_FNS, button: BUTTON_FNS, xy: VALUE_FNS }
 const defFor = (w) => FUNCTIONS[w.type]?.[w.fn]
 const defForY = (w) => VALUE_FNS[w.fnY]
+// Fader/knob/X-Y bound only to parameters no selected laser's shape uses
+// (e.g. a wave knob while the shape is text) - dimmed, but still working.
+function widgetUnused(w) {
+  if (w.type === 'button') return false
+  const keys = [defFor(w)?.key, w.type === 'xy' ? defForY(w)?.key : null].filter(Boolean)
+  return keys.length > 0 && keys.every((k) => isParamUnused(k))
+}
 function groupedFunctions(type) {
   const groups = new Map()
   for (const [id, def] of Object.entries(FUNCTIONS[type])) {
@@ -1001,6 +1009,7 @@ onBeforeUnmount(() => {
 .mtb-spacer { position: absolute; width: 1px; height: 1px; pointer-events: none; }
 .editing .mtb-canvas { background-image: radial-gradient(rgba(159,190,187,.22) 1px, transparent 1px); background-size: 24px 24px; }
 .mtb-empty { margin: 24px; color: #91a6a2; font-size: 13px; pointer-events: none; }
+.mtb-widget.inactive { opacity: .4; filter: grayscale(.7); }
 .mtb-widget { position: absolute; display: flex; flex-direction: column; box-sizing: border-box; container-type: size; padding: clamp(3px, 7cqmin, 10px); background: #11191f; border: 1px solid rgba(159,190,187,.16); border-radius: 8px; user-select: none; }
 .editing .mtb-widget { cursor: move; border-style: dashed; }
 .mtb-widget.selected { border-color: #65e6a5; box-shadow: 0 0 0 2px rgba(101,230,165,.25); }

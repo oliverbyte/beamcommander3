@@ -3232,6 +3232,57 @@ static void save_magic_to_disk(const std::string& body) {
 #define APPLY_CLAMP(key, field, lo, hi) { float _v=json_float(req.body,key,-9999); if(_v!=-9999) T_.field=std::clamp(_v,(float)(lo),(float)(hi)); }
 
 // ── main ───────────────────────────────────────────────────────────────────────
+// ── Shapes and the parameters they use ─────────────────────────────────────
+// Which shape-dependent look parameters each shape uses - the single source
+// for the UI (GET /api/shapes): controls no selected laser's shape uses are
+// greyed out, shape options (wave, ILDA, ...) only shown for shapes in the
+// selection. Parameters not in kShapeDependentParams (position, rotation,
+// movement, scale, mirror, flicker) work with every shape. A new shape only
+// needs a row here. `selectable` = offered in the shape picker (an ILDA look
+// comes from dropping a file onto a cue).
+struct ShapeInfo { std::string id, label; bool selectable; std::vector<std::string> params; };
+static const std::vector<std::string> kShapeDependentParams = {
+    "radius", "points", "r", "g", "b", "rainbow_amount", "rainbow_speed", "rainbow_phase_degrees", "dot_amount",
+    "wave_frequency", "wave_amplitude", "wave_speed", "ilda_fps",
+};
+static const std::vector<ShapeInfo>& shape_catalog() {
+    static const std::vector<ShapeInfo> c = [] {
+        const std::vector<std::string> outline = {"radius", "points", "r", "g", "b", "rainbow_amount", "rainbow_speed",
+                                                  "rainbow_phase_degrees", "dot_amount"};
+        auto with = [&](std::vector<std::string> extra) { auto v = outline; v.insert(v.end(), extra.begin(), extra.end()); return v; };
+        return std::vector<ShapeInfo>{
+            {"circle", "Circle", true, outline},
+            {"line", "Line", true, outline},
+            {"triangle", "Triangle", true, outline},
+            {"square", "Square", true, outline},
+            {"wave", "Wave", true, with({"wave_frequency", "wave_amplitude", "wave_speed"})},
+            {"staticwave", "Static wave", true, with({"wave_frequency", "wave_amplitude"})},
+            {"ilda", "ILDA file", false, {"ilda_fps"}}, // the file's own colors, points and size
+        };
+    }();
+    return c;
+}
+static std::string shapes_json() {
+    std::ostringstream ss;
+    auto list = [&](const std::vector<std::string>& v) {
+        ss << "[";
+        for (std::size_t i = 0; i < v.size(); ++i) ss << (i ? "," : "") << '"' << v[i] << '"';
+        ss << "]";
+    };
+    ss << "{\"dependent\":";
+    list(kShapeDependentParams);
+    ss << ",\"shapes\":[";
+    const auto& c = shape_catalog();
+    for (std::size_t i = 0; i < c.size(); ++i) {
+        ss << (i ? "," : "") << "{\"id\":\"" << c[i].id << "\",\"label\":\"" << c[i].label
+           << "\",\"selectable\":" << (c[i].selectable ? "true" : "false") << ",\"params\":";
+        list(c[i].params);
+        ss << "}";
+    }
+    ss << "]}";
+    return ss.str();
+}
+
 // The lasers a request targets: ?lasers=2,3 or a "lasers":[2,3] array in a
 // JSON body - the browser's laser selection. None = every look (see
 // look_targets()).
@@ -3361,6 +3412,11 @@ int main(int argc, char* argv[]) {
             APPLY_F("ilda_fps",ilda_fps) APPLY_CLAMP("ilda_fps",ilda_fps,1,120)
         });
         res.set_content(state_to_json(),"application/json");
+    });
+
+    // ── GET /api/shapes — shapes and the look parameters each uses ─────────────
+    svr.Get("/api/shapes",[](const httplib::Request&,httplib::Response& res){
+        res.set_content(shapes_json(),"application/json");
     });
 
     // ── POST /laser/shape/<shape> ───────────────────────────────────────────────

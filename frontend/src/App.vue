@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import LaserScene from './components/LaserScene.vue'
 import MagicTouchPanel from './components/MagicTouchPanel.vue'
-import { connectSocket, fetchLasers, fetchState, startStatusPolling } from './composables/useLaserSocket.js'
+import { connectSocket, fetchLasers, fetchShapes, fetchState, startStatusPolling } from './composables/useLaserSocket.js'
 
 const persistenceMs = ref(20)
 const activePage = ref('cues')
@@ -16,6 +16,7 @@ const previewEnabled = ref(true)
 onMounted(() => {
   connectSocket()
   fetchState().catch(() => {})
+  fetchShapes().catch(() => {})
   fetchLasers().catch(() => {})
   startStatusPolling()
 })

@@ -232,10 +232,10 @@ function projectSelection() {
 }
 // Local echo of a look change on every targeted laser, so "mixed" marks and
 // the projection agree with the change before the daemon answers.
-function patchLocalLooks(partial) {
+function patchLocalLooks(partial, ids = null) {
   const lookPart = Object.fromEntries(Object.entries(partial).filter(([k]) => LOOK_FIELD_SET.has(k)))
   if (!Object.keys(lookPart).length || !laserState.looks) return
-  for (const id of targetLookIds()) if (laserState.looks[id]) Object.assign(laserState.looks[id], lookPart)
+  for (const id of ids || targetLookIds()) if (laserState.looks[id]) Object.assign(laserState.looks[id], lookPart)
 }
 function sameValue(a, b) {
   if (typeof a === 'number' && typeof b === 'number') return Math.abs(a - b) <= 0.00011
@@ -254,6 +254,40 @@ export function lookValues(key) {
 }
 watch(() => [laserSelection.ids.join(','), lasers.map((l) => l.id).join(',')], projectSelection)
 
+// ── Shapes and the parameters they use (GET /api/shapes) ──────────────────────
+// { dependent: [keys that only some shapes use], shapes: [{id, label,
+// selectable, params: [dependent keys this shape uses]}] } - the daemon's
+// table (shape_catalog() in laser_daemon.cpp) is the single source.
+export const shapeCatalog = reactive({ dependent: [], shapes: [] })
+export async function fetchShapes() {
+  Object.assign(shapeCatalog, await api('/shapes'))
+}
+function shapeUses(shape, key) {
+  const info = shapeCatalog.shapes.find((s) => s.id === shape)
+  return !info || info.params.includes(key) // unknown shape: don't grey anything out
+}
+// Lasers (ids) among the targeted ones whose shape uses `key`.
+export function looksUsing(key) {
+  if (!shapeCatalog.dependent.includes(key)) return targetLookIds()
+  return targetLookIds().filter((id) => shapeUses(laserState.looks?.[id]?.shape ?? laserState.shape, key))
+}
+// True when none of the targeted lasers' shapes uses `key` - its control is
+// greyed out (it still works: the value is kept for when the shape uses it).
+// Shape options (wave, ILDA, ...) act on the selected lasers whose shape
+// uses them: null = the whole selection uses it, else those laser ids.
+export function optionTargets(key) {
+  const using = looksUsing(key)
+  return using.length === targetLookIds().length ? null : using
+}
+// A shape option's value as the first laser using it has it.
+export function optionValue(key) {
+  const id = looksUsing(key)[0]
+  return laserState.looks?.[id]?.[key] ?? laserState[key]
+}
+export function isParamUnused(key) {
+  return shapeCatalog.dependent.includes(key) && looksUsing(key).length === 0
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 export async function fetchState() {
@@ -262,11 +296,13 @@ export async function fetchState() {
 
 // Global settings change for everyone; look fields only on the selected
 // lasers (the daemon sorts the keys).
-export async function updateState(partial) {
+// `lasers` overrides the selection (e.g. a shape option that only some of
+// the selected lasers' shapes use).
+export async function updateState(partial, lasers = null) {
   markLocalChange()
-  patchLocalLooks(partial)
+  patchLocalLooks(partial, lasers)
   const seq = nextStateSeq()
-  const targets = selectionTargets()
+  const targets = lasers || selectionTargets()
   const body = targets ? { ...partial, lasers: targets } : partial
   applyStateIfCurrent(seq, await api('/state', { method: 'POST', body: JSON.stringify(body) }))
 }

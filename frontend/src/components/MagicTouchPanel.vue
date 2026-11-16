@@ -24,7 +24,6 @@
           <p class="eyebrow">LIVE CONTROL</p>
           <h1>{{ activePageMeta.title }}</h1>
           <p v-if="activePageMeta.description" class="page-description">{{ activePageMeta.description }}</p>
-          <LaserSelectionBar v-if="SELECTION_PAGES.has(activePage)" />
         </div>
         <div class="header-actions">
           <!-- MagicTouchBuilder teleports its page tabs in here (saves a row at the bottom). -->
@@ -36,6 +35,8 @@
             :aria-pressed="builderEditing"
             @click="builderEditing = !builderEditing"
           >{{ builderEditing ? 'Edit mode' : 'Run mode' }}</button>
+          <!-- Same row as the laser status - costs no extra height. -->
+          <LaserSelectionBar v-if="SELECTION_PAGES.has(activePage)" />
           <div class="laser-status" :class="{ online: connectedLaserCount > 0 }">
             <span class="status-light" :class="{ connected: connectedLaserCount > 0 }"></span>
             <span>{{ connectedLaserCount }} / {{ lasers.length }} lasers</span>
@@ -49,7 +50,7 @@
         </div>
 
         <div v-else-if="activePage === 'color'" class="page-body color-page">
-          <section class="control-section palette-section">
+          <section class="control-section palette-section" :class="{ unused: isParamUnused('r') }" :title="unusedTitle('r')">
             <div class="section-heading">
               <div><h2>Color palette</h2><p>Choose a look for the current beam.</p></div>
               <div class="current-color" :style="{ '--swatch': hexColor }" :aria-label="`Current color ${hexColor}`"></div>
@@ -73,7 +74,7 @@
           </section>
           <section class="control-section">
             <div class="section-heading"><div><h2>Rainbow</h2><p>Blend animated color across the shape.</p></div></div>
-            <div v-for="control in COLOR_CONTROLS" :key="control.key" class="range-control">
+            <div v-for="control in COLOR_CONTROLS" :key="control.key" class="range-control" :class="{ unused: isParamUnused(control.key) }" :title="unusedTitle(control.key)">
               <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isLookMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(laserState[control.key], control) }}</output></label>
               <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="laserState[control.key]" @input="setNumeric(control.key, $event.target.value)" />
             </div>
@@ -90,7 +91,7 @@
               </button>
             </div>
             <div class="range-grid">
-              <div v-for="control in SHAPE_CONTROLS" :key="control.key" class="range-control">
+              <div v-for="control in SHAPE_CONTROLS" :key="control.key" class="range-control" :class="{ unused: isParamUnused(control.key) }" :title="unusedTitle(control.key)">
                 <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isLookMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(laserState[control.key], control) }}</output></label>
                 <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="laserState[control.key]" @input="setNumeric(control.key, $event.target.value)" />
               </div>
@@ -99,18 +100,28 @@
           <section class="control-section">
             <div class="section-heading"><div><h2>Dots &amp; flicker</h2><p>Part of the look - saved in cues.</p></div></div>
             <div class="range-grid">
-              <div v-for="control in LOOK_FX_CONTROLS" :key="control.key" class="range-control">
+              <div v-for="control in LOOK_FX_CONTROLS" :key="control.key" class="range-control" :class="{ unused: isParamUnused(control.key) }" :title="unusedTitle(control.key)">
                 <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isLookMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(laserState[control.key], control) }}</output></label>
                 <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="laserState[control.key]" @input="setNumeric(control.key, $event.target.value)" />
               </div>
             </div>
           </section>
-          <section class="control-section">
-            <div class="section-heading"><div><h2>Wave</h2><p>Set the wave profile and phase movement.</p></div></div>
+          <!-- Shape options: only for shapes some selected laser uses. -->
+          <section v-if="looksUsing('wave_frequency').length" class="control-section">
+            <div class="section-heading"><div><h2>Wave{{ optionSuffix('wave_frequency') }}</h2><p>Set the wave profile and phase movement.</p></div></div>
             <div class="range-grid">
-              <div v-for="control in WAVE_CONTROLS" :key="control.key" class="range-control">
-                <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isLookMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(laserState[control.key], control) }}</output></label>
-                <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="laserState[control.key]" @input="setNumeric(control.key, $event.target.value)" />
+              <div v-for="control in WAVE_CONTROLS" :key="control.key" class="range-control" :class="{ unused: isParamUnused(control.key) }" :title="unusedTitle(control.key)">
+                <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isOptionMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(optionValue(control.key), control) }}</output></label>
+                <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="optionValue(control.key)" @input="setOption(control.key, $event.target.value)" />
+              </div>
+            </div>
+          </section>
+          <section v-if="looksUsing('ilda_fps').length" class="control-section">
+            <div class="section-heading"><div><h2>ILDA file{{ optionSuffix('ilda_fps') }}</h2><p>{{ ildaNames }} - its own colors and points; dropped onto a cue in Cues.</p></div></div>
+            <div class="range-grid">
+              <div v-for="control in ILDA_CONTROLS" :key="control.key" class="range-control">
+                <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isOptionMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(optionValue(control.key), control) }}</output></label>
+                <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="optionValue(control.key)" @input="setOption(control.key, $event.target.value)" />
               </div>
             </div>
           </section>
@@ -126,7 +137,7 @@
               </button>
             </div>
             <div class="range-grid">
-              <div v-for="control in MOVE_CONTROLS" :key="control.key" class="range-control">
+              <div v-for="control in MOVE_CONTROLS" :key="control.key" class="range-control" :class="{ unused: isParamUnused(control.key) }" :title="unusedTitle(control.key)">
                 <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isLookMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(laserState[control.key], control) }}</output></label>
                 <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="laserState[control.key]" @input="setNumeric(control.key, $event.target.value)" />
               </div>
@@ -135,7 +146,7 @@
           <section class="control-section">
             <div class="section-heading"><div><h2>Position &amp; rotation</h2><p>Offset and spin the complete shape.</p></div></div>
             <div class="range-grid">
-              <div v-for="control in TRANSFORM_CONTROLS" :key="control.key" class="range-control">
+              <div v-for="control in TRANSFORM_CONTROLS" :key="control.key" class="range-control" :class="{ unused: isParamUnused(control.key) }" :title="unusedTitle(control.key)">
                 <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isLookMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(laserState[control.key], control) }}</output></label>
                 <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="laserState[control.key]" @input="setNumeric(control.key, $event.target.value)" />
               </div>
@@ -162,7 +173,7 @@
           <section class="control-section">
             <div class="section-heading"><div><h2>Scanner tuning</h2><p>Raise the dot times if dots look like streaks on your projector.</p></div></div>
             <div class="range-grid">
-              <div v-for="control in BEAM_CONTROLS" :key="control.key" class="range-control">
+              <div v-for="control in BEAM_CONTROLS" :key="control.key" class="range-control" :class="{ unused: isParamUnused(control.key) }" :title="unusedTitle(control.key)">
                 <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isLookMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(laserState[control.key], control) }}</output></label>
                 <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="laserState[control.key]" @input="setNumeric(control.key, $event.target.value)" />
               </div>
@@ -250,7 +261,10 @@ import LasersPanel from './LasersPanel.vue'
 import MagicTouchBuilder from './MagicTouchBuilder.vue'
 import LaserSelectionBar from './LaserSelectionBar.vue'
 import { MOVE_ICONS, SHAPE_ICONS } from './magicIcons.js'
-import { flashPress, flashRelease, isLookMixed, laserState, lasers, lookValues, markLocalChange, resetState, setBrightnessGate, updateState } from '../composables/useLaserSocket.js'
+import {
+  flashPress, flashRelease, isLookMixed, isParamUnused, laserState, lasers, looksUsing, lookValues, markLocalChange,
+  optionTargets, optionValue, resetState, setBrightnessGate, shapeCatalog, targetLookIds, updateState,
+} from '../composables/useLaserSocket.js'
 
 const props = defineProps({
   standalone: { type: Boolean, default: false },
@@ -317,6 +331,9 @@ const TRANSFORM_CONTROLS = [
   { label: 'Position Y', key: 'pos_y', min: -1, max: 1, step: 0.01, decimals: 2 },
   { label: 'Rotation', key: 'rotation_speed', min: -4, max: 4, step: 0.1, decimals: 1, suffix: ' rot/s' },
 ]
+const ILDA_CONTROLS = [
+  { label: 'Frames per second', key: 'ilda_fps', min: 1, max: 120, step: 1, decimals: 0, suffix: ' fps' },
+]
 // Beam page = projector/scanner settings: global, saved centrally (settings.json), never in cues.
 const BEAM_CONTROLS = [
   { label: 'Dot dwell (lit time per dot)', key: 'dot_dwell_us', min: 30, max: 3000, step: 10, decimals: 0, suffix: ' µs' },
@@ -357,20 +374,31 @@ const ratePosition = computed(() => {
 
 watch(() => props.persistenceMs, (value) => { persistenceMs.value = value })
 
-let pendingState = {}
+// Pending changes per target set ('' = the selection), sent together after a
+// short pause so a dragged slider doesn't flood the daemon.
+let pendingState = new Map()
 let updateTimer = null
 let flashHeld = false
 
-function queueState(partial) {
+// One request after the other: each answer carries the complete state, so a
+// parallel request answering out of order could undo the other's change.
+let sendChain = Promise.resolve()
+function flushPending() {
+  const batches = [...pendingState.values()]
+  pendingState = new Map()
+  for (const { lasers: targets, partial } of batches) {
+    sendChain = sendChain.then(() => updateState(partial, targets)).catch(console.error)
+  }
+}
+function queueState(partial, targets = null) {
   markLocalChange()
-  Object.assign(laserState, partial)
-  Object.assign(pendingState, partial)
+  if (!targets) Object.assign(laserState, partial)
+  const key = targets ? targets.join(',') : ''
+  const batch = pendingState.get(key) || { lasers: targets, partial: {} }
+  Object.assign(batch.partial, partial)
+  pendingState.set(key, batch)
   clearTimeout(updateTimer)
-  updateTimer = setTimeout(() => {
-    const update = pendingState
-    pendingState = {}
-    updateState(update).catch(console.error)
-  }, 70)
+  updateTimer = setTimeout(flushPending, 70)
 }
 
 function selectPage(page) {
@@ -379,6 +407,17 @@ function selectPage(page) {
 }
 function setValues(partial) { queueState(partial) }
 function setNumeric(key, value) { queueState({ [key]: Number(value) }) }
+// Shape options only change the selected lasers whose shape uses them.
+function setOption(key, value) {
+  const targets = optionTargets(key)
+  const partial = { [key]: Number(value) }
+  if (targets) for (const id of targets) Object.assign(laserState.looks?.[id] || {}, partial)
+  queueState(partial, targets)
+}
+function isOptionMixed(key) {
+  const values = looksUsing(key).map((id) => laserState.looks?.[id]?.[key])
+  return values.some((v) => v !== values[0])
+}
 function setRatePosition(value) {
   const maximum = laserState.max_rate_kpps || 1
   queueState({ rate_kpps: Math.pow(Number(value), 3) * maximum })
@@ -401,6 +440,21 @@ function selectColor(color) {
 }
 function onColorInput(event) { selectColor(event.target.value) }
 function isPresetActive(preset) { return hexColor.value.toLowerCase() === preset.color.toLowerCase() && laserState.rainbow_amount === 0 }
+// Shape-dependent controls (see shapeCatalog): why one is greyed out.
+function shapeLabel(id) { return shapeCatalog.shapes.find((s) => s.id === id)?.label || id }
+function unusedTitle(key) {
+  if (!isParamUnused(key)) return undefined
+  const shapes = [...new Set(targetLookIds().map((id) => laserState.looks?.[id]?.shape ?? laserState.shape))]
+  return `Not used by ${shapes.map(shapeLabel).join(' / ')} - kept for shapes that use it`
+}
+// " · L1, L3" when a shape option applies to only part of the selection.
+function optionSuffix(key) {
+  const using = looksUsing(key)
+  if (lasers.length < 2 || using.length === targetLookIds().length) return ''
+  return ` · ${using.map((id) => lasers.find((l) => l.id === id)?.name ?? id).join(', ')}`
+}
+const ildaNames = computed(() => [...new Set(looksUsing('ilda_fps')
+  .map((id) => laserState.looks?.[id]?.ilda_name || laserState.ilda_name).filter(Boolean))].join(', ') || 'ILDA file')
 function toggleGate() { setBrightnessGate(!laserState.brightness_gate_open).catch(console.error) }
 function onFlashDown(event) {
   event.preventDefault()
@@ -416,7 +470,7 @@ function onFlashUp() {
 
 onBeforeUnmount(() => {
   clearTimeout(updateTimer)
-  if (Object.keys(pendingState).length) updateState(pendingState).catch(console.error)
+  flushPending()
   if (flashHeld) flashRelease().catch(console.error)
 })
 </script>
@@ -479,6 +533,8 @@ h1 { margin: 0; font-size: 23px; line-height: 1.2; }
 .section-heading p { margin: 5px 0 0; color: var(--mt-muted); font-size: 12px; line-height: 1.4; }
 .range-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 24px; }
 .range-control { min-width: 0; }
+/* Not used by any selected laser's shape (see shapeCatalog): greyed out, still usable. */
+.range-control.unused, .control-section.unused { opacity: .38; filter: grayscale(.7); }
 .range-control label { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; color: #c7d4d0; font-size: 13px; }
 .range-control output { color: var(--mt-accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .range-control input[type="range"] { display: block; width: 100%; height: 48px; margin: 0; accent-color: var(--mt-accent); touch-action: pan-y; cursor: pointer; }

@@ -36,10 +36,10 @@ const selected = computed(() => (laserSelection.ids.length, selectedLaserIds()))
 </script>
 
 <style scoped>
-.laser-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.laser-selection { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
 .selection-label { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #91a6a2; margin-right: 4px; }
 .selection-button {
-  display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 4px 12px;
+  display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 4px 12px;
   color: #a7b9b5; background: rgba(255,255,255,.04); border: 1px solid rgba(159,190,187,.22); border-radius: 8px;
   font: inherit; font-size: 13px; cursor: pointer; touch-action: manipulation;
 }
