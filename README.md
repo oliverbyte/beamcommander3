@@ -508,7 +508,7 @@ always apply to all lasers.
 | `POST /api/reset` | Reset the looks of `lasers` (all without it: also master brightness) to defaults, without layers |
 | `GET /api/shapes` | Shapes and the shape-dependent parameters each uses: `{"dependent":[...],"shapes":[{"id","label","selectable","params":[...]}]}` - the UI greys out the others |
 | `GET /api/fonts` | Fonts of the text shape: `[{"id","label","bold","italic"}]` (`bold`/`italic` = the font has that style) |
-| `POST /laser/shape/<shape>` | `circle`, `line`, `triangle`, `square`, `wave`, `staticwave` |
+| `POST /laser/shape/<shape>` | `circle`, `line`, `triangle`, `square`, `wave`, `text` (the former `staticwave` = `wave` with speed 0, still accepted) |
 | `POST /laser/brightness/<0-1>` | Master brightness |
 | `POST /laser/color/<r>/<g>/<b>` | Beam color, each channel 0..1 |
 | `POST /laser/position/<x>/<y>` | Shape offset, each axis -1..1 |
@@ -680,7 +680,7 @@ last value always takes over immediately the next time the pedal is
 pressed).
 
 **Buttons (`note`, note-on presses / note-off or velocity-0 releases):**
-`shape:<circle|line|triangle|square|wave|staticwave>`,
+`shape:<circle|line|triangle|square|wave|text>`,
 `move:<none|circle|pan|tilt|eight|random>`,
 `color:<red|green|blue|white>` (plus `orange`, `yellow`, `cyan`, `magenta` if
 you want to bind extra buttons to them),

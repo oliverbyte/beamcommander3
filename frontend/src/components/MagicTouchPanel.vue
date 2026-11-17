@@ -334,7 +334,7 @@ const COLOR_PRESETS = [
   { name: 'Mint green', color: '#30e878' }, { name: 'Cyan', color: '#37e5e5' }, { name: 'Sky', color: '#42a5ff' },
   { name: 'Electric blue', color: '#4666ff' }, { name: 'Violet', color: '#9e63ff' }, { name: 'Magenta', color: '#f34bd7' },
 ]
-const SHAPES = ['circle', 'line', 'triangle', 'square', 'wave', 'staticwave', 'text']
+const SHAPES = ['circle', 'line', 'triangle', 'square', 'wave', 'text']
 const MOVES = ['none', 'circle', 'pan', 'tilt', 'tiltup', 'tiltdown', 'eight', 'random']
 const COLOR_CONTROLS = [
   { label: 'Rainbow amount', key: 'rainbow_amount', min: 0, max: 1, step: 0.01, decimals: 2 },

@@ -46,7 +46,7 @@
   { "type": "note", "channel": 0, "number": 34, "action": "shape:triangle" },
   { "type": "note", "channel": 0, "number": 35, "action": "shape:square" },
   { "type": "note", "channel": 0, "number": 36, "action": "shape:wave" },
-  { "type": "note", "channel": 0, "number": 37, "action": "shape:staticwave" },
+  { "type": "note", "channel": 0, "number": 37, "action": "shape:text" },
 
   { "type": "note", "channel": 0, "number": 24, "action": "color:red" },
   { "type": "note", "channel": 0, "number": 25, "action": "color:green" },

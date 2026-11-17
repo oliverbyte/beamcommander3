@@ -134,7 +134,7 @@ function shapeStyle(shape) {
   if (c.dot_amount < 1 && c.rate_kpps < 5) {
     anims.push(`cue-dash ${Math.max(0.4, 3 / Math.max(0.1, c.rate_kpps))}s linear infinite`)
   }
-  // Only "wave" integrates a time-based phase in the backend; "staticwave" does not.
+  // A wave with speed 0 stands still.
   if (shape === 'wave' && c.wave_speed) {
     anims.push(`cue-wave-travel ${1 / Math.max(0.05, Math.abs(c.wave_speed))}s linear infinite ${c.wave_speed < 0 ? 'reverse' : 'normal'}`)
   }

@@ -365,6 +365,12 @@ static std::string G_test_pattern      = "off";
 static float       G_test_pattern_size = 1.0f;
 static float       G_rate_before_test_pattern = -1.0f; // < 0: no pattern active
 
+// The former "staticwave" shape is a wave with speed 0 - looks from older
+// cues, scripts or MIDI maps that still name it become exactly that.
+static void apply_legacy_shape(LaserState& L) {
+    if (L.shape == "staticwave") { L.shape = "wave"; L.wave_speed = 0.0f; }
+}
+
 // `next` (a cue, a momentary snapshot, the defaults) with the *global* daemon
 // settings taken over from `current`: footswitch fade time, blackout, - for
 // cue recall - master brightness, and the Beam page's projector settings
@@ -687,11 +693,6 @@ static std::vector<Pt> gen_base_shape(const LaserState& s, const RenderPose& pos
         for (int i=0;i<n;++i) {
             float t=(float)i/(n-1)*tau;
             pts.push_back({(t/tau*2.0f-1.0f)*r, r*pose.wave_amplitude*std::sin(pose.wave_frequency*t+phase)});
-        }
-    } else if (s.shape == "staticwave") {
-        for (int i=0;i<n;++i) {
-            float t=(float)i/(n-1)*tau;
-            pts.push_back({(t/tau*2.0f-1.0f)*r, r*pose.wave_amplitude*std::sin(pose.wave_frequency*t)});
         }
     } else {
         for (int i=0;i<n;++i) pts.push_back({0.0f,0.0f});
@@ -2091,6 +2092,7 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.flicker_phase_degrees = std::clamp(json_float(obj,"flicker_phase_degrees",0.0f),0.0f,360.0f);
     // rate_kpps stored by older versions is ignored on purpose: the scan
     // rate is a global projector setting.
+    apply_legacy_shape(s);
     return s;
 }
 
@@ -2693,9 +2695,9 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         // across successive physical taps rather than an on+off pair per
         // tap. Setting the same shape twice is idempotent, so reacting to
         // both is safe.
-        static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","staticwave"};
+        static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","text","staticwave"};
         std::string s = action.substr(6);
-        if (SHAPES.count(s)) for_all_looks([&](LookSlot& sl) { sl.look.shape = s; });
+        if (SHAPES.count(s)) for_all_looks([&](LookSlot& sl) { sl.look.shape = s; apply_legacy_shape(sl.look); });
         return;
     }
     if (action.rfind("move:",0)==0) {
@@ -3363,7 +3365,6 @@ static const std::vector<ShapeInfo>& shape_catalog() {
             {"triangle", "Triangle", true, outline},
             {"square", "Square", true, outline},
             {"wave", "Wave", true, with({"wave_frequency", "wave_amplitude", "wave_speed"})},
-            {"staticwave", "Static wave", true, with({"wave_frequency", "wave_amplitude"})},
             {"text", "Text", true, {"r", "g", "b", "rainbow_amount", "rainbow_speed", "rainbow_phase_degrees",
                                     "text", "font", "text_size", "text_spacing", "text_bold", "text_italic", "text_underline"}},
             {"ilda", "ILDA file", false, {"ilda_fps"}}, // the file's own colors, points and size
@@ -3495,6 +3496,7 @@ int main(int argc, char* argv[]) {
         for_target_looks(targets, [&](LookSlot& sl) {
             LaserState& T_ = sl.look;
             APPLY_S("shape",shape)  APPLY_S("move_mode",move_mode)
+            apply_legacy_shape(T_);
             APPLY_F("radius",radius)  APPLY_CLAMP("radius",radius,0,1)
             APPLY_F("r",r) APPLY_CLAMP("r",r,0,1)
             APPLY_F("g",g) APPLY_CLAMP("g",g,0,1)
@@ -3546,12 +3548,13 @@ int main(int argc, char* argv[]) {
     });
 
     // ── POST /laser/shape/<shape> ───────────────────────────────────────────────
-    static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","staticwave","text"};
+    // "staticwave" is still accepted from older clients: a wave with speed 0.
+    static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","text","staticwave"};
     svr.Post(R"(/laser/shape/([a-z]+))",[](const httplib::Request& req,httplib::Response& res){
         std::string s=req.matches[1];
         if(!SHAPES.count(s)){res.status=400;res.set_content("{\"error\":\"unknown shape\"}","application/json");return;}
-        for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.shape = s; });
-        res.set_content("{\"shape\":\""+s+"\"}","application/json");
+        for_target_looks(request_lasers(req), [&](LookSlot& sl) { sl.look.shape = s; apply_legacy_shape(sl.look); });
+        res.set_content("{\"shape\":\""+std::string(s == "staticwave" ? "wave" : s)+"\"}","application/json");
     });
 
     // ── POST /laser/brightness/<val> ───────────────────────────────────────────
@@ -4125,7 +4128,7 @@ int main(int argc, char* argv[]) {
     std::cout << "[laser_daemon] Listening on :" << http_port << "\n"
               << "  GET/POST /api/state   POST /api/reset\n"
               << "  GET /api/cues   POST /api/cue/<1-" << MAX_CUES << ">/save|recall|clear|move/<n>\n"
-              << "  POST /laser/shape/<circle|line|triangle|square|wave|staticwave>\n"
+              << "  POST /laser/shape/<circle|line|triangle|square|wave|text>\n"
               << "  POST /laser/brightness/<0-1>  /laser/color/<r>/<g>/<b>\n"
               << "  POST /laser/position/<x>/<y>  /laser/rotation/speed/<v>\n"
               << "  POST /move/mode/<none|circle|pan|tilt|tiltup|tiltdown|eight|random>\n"
