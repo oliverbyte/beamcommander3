@@ -68,14 +68,30 @@ const CANVAS_TRACE = 1.0     // trace on the wall
 // up to a bright fan right across the image. Only the wall image counts.
 const CANVAS_RAY_NEAR = 0
 const CANVAS_RAY_FAR = 0
-const CANVAS_DOT = 0.035     // a dwelled point (zero-length trace) is drawn as a short dash this long (world units)
+const CANVAS_DOT = 0.1      // a dwelled point (zero-length trace) is drawn as a short dash this long (world units)
 // Every scanned point takes the same time, so a trace segment's light is
-// spread over its length: segments up to this length (world units - normal
-// point spacing) are drawn at full brightness, longer ones dimmer in
-// proportion. Otherwise a frame's lit jump back to its start (a line or wave
-// returning to its left end) would be drawn as bright as the shape, in one
-// color, a hundred times a second, washing e.g. a rainbow out to white.
-const CANVAS_FULL_LEN = 0.25
+// spread over its length: segments up to the frame's typical point spacing
+// (stream.canvasRefLen, the median lit step - see canvasReferenceLength())
+// are drawn at full brightness, longer ones dimmer in proportion. Otherwise a
+// frame's lit jump back to its start (a line or wave returning to its left
+// end) would be drawn as bright as the shape, in one color, a hundred times
+// a second, washing e.g. a rainbow out to white.
+const CANVAS_MIN_REF_LEN = 0.02
+
+// Median length (world units) of the lit steps between consecutive points of
+// a frame - its normal point spacing.
+function canvasReferenceLength(frame) {
+  const steps = []
+  for (let i = 1; i < frame.length; i++) {
+    const a = frame[i - 1], b = frame[i]
+    if (a[2] + a[3] + a[4] <= 0 || b[2] + b[3] + b[4] <= 0) continue
+    const d = Math.hypot(b[0] - a[0], b[1] - a[1]) * WORLD_SCALE
+    if (d > 1e-6) steps.push(d)
+  }
+  if (!steps.length) return CANVAS_MIN_REF_LEN
+  steps.sort((x, y) => x - y)
+  return Math.max(CANVAS_MIN_REF_LEN, steps[Math.floor(steps.length / 2)] * 1.5)
+}
 
 let renderer, scene, camera, controls, laserTemplate
 let dust
@@ -168,7 +184,7 @@ function createLaserStream(id) {
     spokeGeo, spokePositions, spokeColors, spokeBaseColors, spokeTimestamps, spokeMaterial,
     hazeGeo, hazePositions, hazeBaseColors, hazeColors, hazeMaterial,
     edgeX: 0.5, edgeY: 0.5,
-    canvas: false, canvasSurface,
+    canvas: false, canvasSurface, canvasRefLen: CANVAS_MIN_REF_LEN,
   }
 }
 
@@ -413,6 +429,7 @@ function handleIncomingPoints(msg) {
   testPatternRates = msg.tp || {}
   for (const [id, stream] of laserStreams) {
     stream.currentFrame = msg.laser_pts?.[id] || msg.pts || []
+    if (stream.canvas) stream.canvasRefLen = canvasReferenceLength(stream.currentFrame)
   }
 }
 
@@ -589,7 +606,7 @@ function writeCanvasSpoke(stream, wx, wy, cr, cg, cb, fanBrightness) {
   P[vi + 9] = px; P[vi + 10] = wy; P[vi + 11] = z + 0.02
   C[vi] = cr * CANVAS_RAY_NEAR; C[vi + 1] = cg * CANVAS_RAY_NEAR; C[vi + 2] = cb * CANVAS_RAY_NEAR
   C[vi + 3] = cr * CANVAS_RAY_FAR; C[vi + 4] = cg * CANVAS_RAY_FAR; C[vi + 5] = cb * CANVAS_RAY_FAR
-  const trace = lit ? CANVAS_TRACE * Math.min(1, CANVAS_FULL_LEN / Math.max(len, 1e-6)) : 0
+  const trace = lit ? CANVAS_TRACE * Math.min(1, (stream.canvasRefLen || CANVAS_MIN_REF_LEN) / Math.max(len, 1e-6)) : 0
   C[vi + 6] = cr * trace; C[vi + 7] = cg * trace; C[vi + 8] = cb * trace
   C[vi + 9] = cr * trace; C[vi + 10] = cg * trace; C[vi + 11] = cb * trace
   // Faint haze fan between the rays, like in beam mode but dimmer.
