@@ -303,6 +303,12 @@ for how the packaged macOS/Windows builds are put together.
    per second the text can be drawn at - below 25 it flickers, so use shorter
    text, a smaller size or a higher scan rate. To put text on one laser only,
    select just that laser first.
+   **Canvas mode (preview)**: a laser that projects onto a screen or wall
+   (text, graphics) can be switched from **Beams** to **Canvas** - with the
+   button on its marker in Preview, or **▭** in the Lasers panel. The preview
+   then draws its output on a virtual wall behind it, readable for the
+   viewer, instead of as beams aimed at the audience. Preview only - the
+   laser's real output is the same; the setting is saved with the laser.
 4. **Flash / Blackout**: the ⚡ Flash button punches the beam to full white
    brightness while held, then returns to whatever it was showing before.
    Blackout forces the real laser dark (the on-screen preview keeps
@@ -522,7 +528,7 @@ always apply to all lasers.
 | `GET /api/lasers` | List every configured laser (DAC): `[ {"id","name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","mirror_y","preview_x","preview_y","masks","connected"}, ...]` |
 | `POST /api/lasers/order` | Persist installation order: `{"ids":[3,1,2]}`; must contain every configured laser ID exactly once |
 | `POST /api/lasers` | Add a new laser: `{"name":"...","ip":"..."}` (`armed` defaults to `false`, i.e. configured but idle) |
-| `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","armed","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","mirror_y","preview_x","preview_y"}` - setting `armed` to `true` connects + streams this laser's own zone-calibrated output, `false` disconnects/idles it. `mirror_x`/`mirror_y` flip this laser's output horizontally/vertically in hardware and preview (both = rotated 180°, e.g. an upside-down mounted projector). `zone_x`/`zone_y` (-1..1, offset) and `zone_scale_x`/`zone_scale_y` (0.1..2, independent per-axis scale) are this laser's own pan/zoom calibration - set by dragging in the Zoning panel. `preview_x`/`preview_y` (0..1) are its position in the browser preview and do not affect hardware output |
+| `POST /api/lasers/<id>` | Update a laser: any of `{"name","ip","armed","canvas","zone_x","zone_y","zone_scale_x","zone_scale_y","mirror_x","mirror_y","preview_x","preview_y"}` - setting `armed` to `true` connects + streams this laser's own zone-calibrated output, `false` disconnects/idles it. `mirror_x`/`mirror_y` flip this laser's output horizontally/vertically in hardware and preview (both = rotated 180°, e.g. an upside-down mounted projector). `zone_x`/`zone_y` (-1..1, offset) and `zone_scale_x`/`zone_scale_y` (0.1..2, independent per-axis scale) are this laser's own pan/zoom calibration - set by dragging in the Zoning panel. `preview_x`/`preview_y` (0..1) are its position in the browser preview and do not affect hardware output; `canvas` (preview only) draws this laser's output on a virtual wall behind it instead of as beams |
 | `POST /api/lasers/<id>/masks` | Replace this laser's safety masks: `{"masks":[{"x0","y0","x1","y1","reduce","outline"}, ...]}` (complete list, up to 64). Coordinates are the laser's real output range (-1..1, y up, after the zone); `reduce` is 0..100 % of light removed inside; `outline` draws the border in red on the laser (setup aid, never saved). Invalid/non-numeric values → 400 |
 | `DELETE /api/lasers/<id>` | Remove a laser |
 | `GET /api/test-patterns` | The available official ILDA test patterns: `[{"id":"ilda_12k","label":"ILDA 12K","kpps":12}, {"id":"ilda_30k",...}]` |

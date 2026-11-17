@@ -55,6 +55,12 @@
             :title="l.mirror_y ? 'Un-mirror Y axis (hardware only)' : 'Mirror Y axis (hardware only)'"
             @click="toggleMirrorY(l)"
           >⇅</button>
+          <button
+            class="mirror-btn canvas-btn"
+            :class="{ active: l.canvas }"
+            :title="l.canvas ? 'Canvas: the preview projects this laser onto a wall (e.g. readable text) - click for beams' : 'Beams: the preview aims this laser at the audience - click for canvas (wall projection, e.g. readable text). Preview only.'"
+            @click="toggleCanvas(l)"
+          >▭</button>
           <button class="del-btn" title="Remove laser" @click="onDelete(l)">✕</button>
         </div>
         <p v-if="!lasers.length" class="empty">No lasers configured yet.</p>
@@ -199,6 +205,10 @@ async function toggleMirrorY(l) {
   try { await updateLaser(l.id, { mirror_y: !l.mirror_y }); error.value = null }
   catch (e) { error.value = String(e) }
 }
+async function toggleCanvas(l) {
+  try { await updateLaser(l.id, { canvas: !l.canvas }); error.value = null }
+  catch (e) { error.value = String(e) }
+}
 async function onDelete(l) {
   try { await deleteLaser(l.id); error.value = null } catch (e) { error.value = String(e) }
 }
@@ -275,6 +285,7 @@ button:disabled { opacity:0.5; cursor:default; }
 .arm-btn.active { background:rgba(72,224,122,0.18); border-color:#48e07a; color:#48e07a; }
 .mirror-btn { flex-shrink:0; padding:4px 7px; }
 .mirror-btn.active { background:rgba(120,170,255,0.18); border-color:#78aaff; color:#78aaff; }
+.canvas-btn.active { background:rgba(143,184,255,0.25); border-color:#8fb8ff; color:#cfe0ff; }
 .del-btn { flex-shrink:0; padding:4px 7px; color:#ff8080; border-color:rgba(255,100,100,0.35); }
 
 .tp-buttons { display:flex; gap:5px; margin-bottom:8px; }

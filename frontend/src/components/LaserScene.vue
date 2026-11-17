@@ -13,6 +13,11 @@
     >
       <span class="laser-marker-status" aria-hidden="true"></span>
       <span class="laser-marker-name">{{ entry.name }}</span>
+      <span
+        class="laser-marker-mode" :class="{ canvas: entry.canvas }" role="button"
+        :title="entry.canvas ? 'Canvas: projects onto a wall behind it - click for beams' : 'Beams: aimed at the audience - click for canvas (wall projection, e.g. readable text)'"
+        @pointerdown.stop @click.stop="toggleCanvas(entry)"
+      >{{ entry.canvas ? 'Canvas' : 'Beams' }}</span>
       <span class="laser-marker-grip" aria-hidden="true"><i></i><i></i><i></i></span>
     </button>
   </div>
@@ -52,6 +57,18 @@ const FRONT_PLANE_Z = -8
 const PREVIEW_FOG_DENSITY = 0.008
 const PREVIEW_FOG_REFERENCE_DISTANCE = 28
 const FRONT_PLANE = new THREE.Plane(new THREE.Vector3(0, 0, 1), -FRONT_PLANE_Z)
+// Canvas mode (a laser's `canvas` setting): instead of beaming at the
+// audience, the laser projects onto a virtual wall behind it - as far behind
+// it as the beam pattern plane is in front, so the image keeps its size -
+// and its output is drawn there as a readable trace (text, graphics).
+const CANVAS_DIST = BEAM_LEN
+const CANVAS_TRACE = 1.0     // trace on the wall
+// Rays source -> wall: not drawn - the projector is behind/above the
+// audience, and in the straight-on view thousands of rays per frame would add
+// up to a bright fan right across the image. Only the wall image counts.
+const CANVAS_RAY_NEAR = 0
+const CANVAS_RAY_FAR = 0
+const CANVAS_DOT = 0.035     // a dwelled point (zero-length trace) is drawn as a short dash this long (world units)
 
 let renderer, scene, camera, controls, laserTemplate
 let dust
@@ -120,12 +137,31 @@ function createLaserStream(id) {
   spokes.name = 'laser-rays'
   output.add(spokes)
 
+  // Canvas mode: the projection surface on the wall (the laser's full output
+  // range) - a slightly lighter screen with a dim frame, hidden in beam mode.
+  const canvasSurface = new THREE.Group()
+  canvasSurface.name = 'canvas-surface'
+  canvasSurface.visible = false
+  const screen = new THREE.Mesh(
+    new THREE.PlaneGeometry(2 * WORLD_SCALE, 2 * WORLD_SCALE),
+    new THREE.MeshBasicMaterial({ color: 0x080b16, fog: false }),
+  )
+  screen.position.z = -CANVAS_DIST - 0.05
+  canvasSurface.add(screen)
+  const frameGeo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(-WORLD_SCALE, -WORLD_SCALE, -CANVAS_DIST), new THREE.Vector3(WORLD_SCALE, -WORLD_SCALE, -CANVAS_DIST),
+    new THREE.Vector3(WORLD_SCALE, WORLD_SCALE, -CANVAS_DIST), new THREE.Vector3(-WORLD_SCALE, WORLD_SCALE, -CANVAS_DIST),
+  ])
+  canvasSurface.add(new THREE.LineLoop(frameGeo, new THREE.LineBasicMaterial({ color: 0x1d2640, fog: false })))
+  output.add(canvasSurface)
+
   return {
     id, output, currentFrame: [], emitIndex: 0, lastEmitTime: 0,
     lastPoint: [0, 0], lastColor: [0, 0, 0], spokeWriteIndex: 0, spokeCount: 0,
     spokeGeo, spokePositions, spokeColors, spokeBaseColors, spokeTimestamps, spokeMaterial,
     hazeGeo, hazePositions, hazeBaseColors, hazeColors, hazeMaterial,
     edgeX: 0.5, edgeY: 0.5,
+    canvas: false, canvasSurface,
   }
 }
 
@@ -169,6 +205,21 @@ function positionLaserSources() {
     const entry = id === '__virtual__' ? { preview_x: 0.5, preview_y: 0.5 } : lasers.find((laser) => laser.id === id)
     if (!entry) continue
     const output = source.getObjectByName('laser-output')
+    const stream = laserStreams.get(id)
+    if (stream && !!entry.canvas !== stream.canvas) {
+      // Switched beams <-> canvas: drop the trail drawn the other way.
+      stream.canvas = !!entry.canvas
+      stream.canvasSurface.visible = stream.canvas
+      // The fixture stands in front of the wall image - hide it, like a
+      // projector behind the audience.
+      const housing = source.getObjectByName('laser-housing')
+      if (housing) housing.visible = !stream.canvas
+      // The wall image is drawn on top - other fixtures standing in front of
+      // the wall mustn't cover the text.
+      stream.spokeMaterial.depthTest = !stream.canvas
+      stream.spokeMaterial.needsUpdate = true
+      resetStream(stream, performance.now() / 1000)
+    }
     if (output) {
       output.visible = entry.armed !== false
       // No scale flip for mirror_x/mirror_y here: the daemon already sends
@@ -182,6 +233,10 @@ function positionLaserSources() {
       source.rotation.set(0, 0, 0)
     }
   }
+}
+
+function toggleCanvas(entry) {
+  updateLaser(entry.id, { canvas: !entry.canvas }).catch(() => fetchLasers())
 }
 
 function startLaserDrag(event, entry) {
@@ -276,7 +331,8 @@ function setupScene() {
     new THREE.PlaneGeometry(160, 40),
     new THREE.MeshBasicMaterial({ color: 0x03040a })
   )
-  backWall.position.set(0, 20, -12)
+  // Behind the canvas wall (see CANVAS_DIST), so canvas projections land in front of it.
+  backWall.position.set(0, 20, FRONT_PLANE_Z - CANVAS_DIST - 0.3)
   scene.add(backWall)
 
   laserTemplate = new THREE.Group()
@@ -286,6 +342,7 @@ function setupScene() {
     new THREE.MeshBasicMaterial({ color: 0x1a1d28 })
   )
   housing.position.z = -0.36
+  housing.name = 'laser-housing'
   laserTemplate.add(housing)
 
   // The visible beam is rendered purely as a fan of lines from the source
@@ -427,6 +484,17 @@ function emitLaserScan(stream, now) {
     // (the daemon sends the real output), so no extra intensity factor here.
     const fanBrightness = Math.min(1, Math.max(0.01, 5 / frame.length))
 
+    if (stream.canvas) {
+      writeCanvasSpoke(stream, wx, wy, cr, cg, cb, fanBrightness)
+      stream.spokeTimestamps[stream.spokeWriteIndex] = t
+      stream.spokeWriteIndex = (stream.spokeWriteIndex + 1) % MAX_SCAN_POINTS
+      stream.spokeCount = Math.min(stream.spokeCount + 1, MAX_SCAN_POINTS)
+      stream.lastPoint = [x, y]
+      stream.lastColor = [cr, cg, cb]
+      stream.emitIndex += 1
+      continue
+    }
+
     // Spoke: source (local origin) -> shape point -> far continuation.
     // Segment 1 (source->point) fades bright-to-dim; segment 2
     // (point->far) continues fading from dim all the way to black, so the
@@ -490,6 +558,41 @@ function emitLaserScan(stream, now) {
   stream.hazeGeo.setDrawRange(0, stream.spokeCount * 3)
   stream.spokeGeo.attributes.position.needsUpdate = true
   stream.hazeGeo.attributes.position.needsUpdate = true
+}
+
+// Canvas mode: one scanned point as [faint ray source -> wall point] plus
+// [trace on the wall from the previous point], the trace only between two
+// lit points (the laser draws nothing while blanked). A point dwelled on
+// (zero-length trace) becomes a short dash so dots stay visible.
+function writeCanvasSpoke(stream, wx, wy, cr, cg, cb, fanBrightness) {
+  const z = -CANVAS_DIST
+  const vi = stream.spokeWriteIndex * 12
+  const fi = stream.spokeWriteIndex * 9
+  let lx = stream.lastPoint[0] * WORLD_SCALE
+  let ly = stream.lastPoint[1] * WORLD_SCALE
+  let px = wx
+  const lc = stream.lastColor
+  const lit = cr + cg + cb > 0 && lc[0] + lc[1] + lc[2] > 0
+  if (Math.hypot(wx - lx, wy - ly) < CANVAS_DOT * 0.5) { lx = wx - CANVAS_DOT * 0.5; ly = wy; px = wx + CANVAS_DOT * 0.5 }
+  const P = stream.spokePositions, C = stream.spokeBaseColors
+  P[vi] = 0; P[vi + 1] = 0; P[vi + 2] = 0
+  P[vi + 3] = wx; P[vi + 4] = wy; P[vi + 5] = z
+  P[vi + 6] = lx; P[vi + 7] = ly; P[vi + 8] = z + 0.02
+  P[vi + 9] = px; P[vi + 10] = wy; P[vi + 11] = z + 0.02
+  C[vi] = cr * CANVAS_RAY_NEAR; C[vi + 1] = cg * CANVAS_RAY_NEAR; C[vi + 2] = cb * CANVAS_RAY_NEAR
+  C[vi + 3] = cr * CANVAS_RAY_FAR; C[vi + 4] = cg * CANVAS_RAY_FAR; C[vi + 5] = cb * CANVAS_RAY_FAR
+  const trace = lit ? CANVAS_TRACE : 0
+  C[vi + 6] = cr * trace; C[vi + 7] = cg * trace; C[vi + 8] = cb * trace
+  C[vi + 9] = cr * trace; C[vi + 10] = cg * trace; C[vi + 11] = cb * trace
+  // Faint haze fan between the rays, like in beam mode but dimmer.
+  const H = stream.hazePositions, HC = stream.hazeBaseColors
+  H[fi] = 0; H[fi + 1] = 0; H[fi + 2] = 0
+  H[fi + 3] = stream.lastPoint[0] * WORLD_SCALE; H[fi + 4] = stream.lastPoint[1] * WORLD_SCALE; H[fi + 5] = z
+  H[fi + 6] = wx; H[fi + 7] = wy; H[fi + 8] = z
+  const hb = 0 * fanBrightness // no haze fan across the image
+  HC[fi] = (lc[0] + cr) * 0.5 * hb; HC[fi + 1] = (lc[1] + cg) * 0.5 * hb; HC[fi + 2] = (lc[2] + cb) * 0.5 * hb
+  HC[fi + 3] = lc[0] * 0.1 * hb; HC[fi + 4] = lc[1] * 0.1 * hb; HC[fi + 5] = lc[2] * 0.1 * hb
+  HC[fi + 6] = cr * 0.1 * hb; HC[fi + 7] = cg * 0.1 * hb; HC[fi + 8] = cb * 0.1 * hb
 }
 
 // Brightness falloff along each spoke: bright near the source, dim at the
@@ -566,22 +669,23 @@ function handleResize() {
 
 function clearPointBuffer() {
   const now = performance.now() / 1000
-  for (const stream of laserStreams.values()) {
-    stream.spokeTimestamps.fill(-Infinity)
-    stream.spokeWriteIndex = 0
-    stream.spokeCount = 0
-    stream.currentFrame = []
-    stream.emitIndex = 0
-    stream.lastEmitTime = now
-    stream.lastPoint = [0, 0]
-    stream.lastColor = [0, 0, 0]
-    stream.spokeGeo.setDrawRange(0, 0)
-    stream.hazeGeo.setDrawRange(0, 0)
-    stream.spokeGeo.attributes.position.needsUpdate = true
-    stream.spokeGeo.attributes.color.needsUpdate = true
-    stream.hazeGeo.attributes.position.needsUpdate = true
-    stream.hazeGeo.attributes.color.needsUpdate = true
-  }
+  for (const stream of laserStreams.values()) resetStream(stream, now)
+}
+function resetStream(stream, now) {
+  stream.spokeTimestamps.fill(-Infinity)
+  stream.spokeWriteIndex = 0
+  stream.spokeCount = 0
+  stream.currentFrame = []
+  stream.emitIndex = 0
+  stream.lastEmitTime = now
+  stream.lastPoint = [0, 0]
+  stream.lastColor = [0, 0, 0]
+  stream.spokeGeo.setDrawRange(0, 0)
+  stream.hazeGeo.setDrawRange(0, 0)
+  stream.spokeGeo.attributes.position.needsUpdate = true
+  stream.spokeGeo.attributes.color.needsUpdate = true
+  stream.hazeGeo.attributes.position.needsUpdate = true
+  stream.hazeGeo.attributes.color.needsUpdate = true
 }
 
 onMounted(() => {
@@ -669,6 +773,12 @@ onBeforeUnmount(() => {
 }
 .laser-marker.is-armed .laser-marker-name { color: #48e07a; }
 .laser-marker.is-selected { outline: 2px solid #65e6a5; outline-offset: 2px; }
+.laser-marker-mode {
+  pointer-events: auto; margin-left: 2px; padding: 1px 6px; border-radius: 4px; cursor: pointer;
+  font-size: 10px; letter-spacing: .04em; color: #a7b9b5; border: 1px solid rgba(159,190,187,.35);
+}
+.laser-marker-mode:hover { color: #e7f0ed; border-color: #a7b9b5; }
+.laser-marker-mode.canvas { color: #0c1116; background: #8fb8ff; border-color: #8fb8ff; }
 .laser-marker.is-connected .laser-marker-status {
   background: #48e07a;
   box-shadow: 0 0 9px rgba(72, 224, 122, 0.7);

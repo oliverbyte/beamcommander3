@@ -230,6 +230,17 @@ projects the first selected laser's look into the top-level look fields
 the daemon's `shape_catalog()` - a new shape only needs a row there) drive
 the mixed marks, greyed-out controls and shape options.
 
+### Preview canvas mode
+
+`LaserConfig::canvas` (lasers.json, `POST /api/lasers/<id>`) only affects
+the 3D preview (`LaserScene.vue`): such a laser draws its output on a virtual
+wall `CANVAS_DIST` behind it (as far as the beam pattern plane is in front,
+so the image keeps its size) - the scanner trace between consecutive lit
+points, dwelled points as short dashes (`writeCanvasSpoke()`), with the same
+point-by-point replay and persistence fade as beams. Rays, haze and the
+fixture are hidden and the wall image ignores depth, so in the straight-on
+view the text stays readable even with other fixtures or beams in front.
+
 ### Text shape
 
 `laser_text.h`: Hershey `.jhf` parser, font catalog (`text_font_catalog()`:

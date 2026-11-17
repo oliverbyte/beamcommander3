@@ -417,6 +417,11 @@ struct LaserConfig {
     bool        mirror_x = false; // this laser's own horizontal flip (hardware-only, applied before its zone offset/scale) - independent of the global LaserState::mirror_x
     bool        mirror_y = false; // same, vertical flip (e.g. a projector mounted upside down)
     float       preview_x = 0.5f, preview_y = 0.5f; // normalized position in the browser preview
+    // Preview only: this laser projects onto a screen/wall (text, graphics)
+    // instead of beaming at the audience - the 3D preview then draws its
+    // output on a virtual wall behind it, readable for the viewer. The
+    // hardware output is the same either way.
+    bool        canvas = false;
     std::vector<LaserMask> masks; // safety masks in this laser's output space (see LaserMask)
 };
 static std::vector<LaserConfig> G_lasers;
@@ -1824,6 +1829,7 @@ static std::string laser_config_to_json(const LaserConfig& l) {
        << ",\"zone_scale_y\":" << l.zone_scale_y
        << ",\"mirror_x\":" << (l.mirror_x ? "true" : "false")
        << ",\"mirror_y\":" << (l.mirror_y ? "true" : "false")
+       << ",\"canvas\":" << (l.canvas ? "true" : "false")
          << ",\"preview_x\":" << l.preview_x
          << ",\"preview_y\":" << l.preview_y
        << ",\"masks\":" << masks_to_json(l.masks, true)
@@ -1844,6 +1850,7 @@ static void save_lasers_to_disk() {
            << ",\"zone_scale_x\":" << l.zone_scale_x << ",\"zone_scale_y\":" << l.zone_scale_y
            << ",\"mirror_x\":" << (l.mirror_x ? "true" : "false")
            << ",\"mirror_y\":" << (l.mirror_y ? "true" : "false")
+           << ",\"canvas\":" << (l.canvas ? "true" : "false")
            << ",\"preview_x\":" << l.preview_x << ",\"preview_y\":" << l.preview_y
            << ",\"masks\":" << masks_to_json(l.masks, false)
            << "}";
@@ -1890,6 +1897,7 @@ static void load_lasers_from_disk() {
             l.zone_scale_y  = json_float(obj, "zone_scale_y", 1.0f);
             l.mirror_x      = json_bool(obj, "mirror_x", false);
             l.mirror_y      = json_bool(obj, "mirror_y", false);
+            l.canvas        = json_bool(obj, "canvas", false);
             const bool hasPreviewPosition = json_has(obj, "preview_x")
                 && json_has(obj, "preview_y");
             l.preview_x     = json_float(obj, "preview_x", -1.0f);
@@ -3801,7 +3809,7 @@ int main(int argc, char* argv[]) {
     });
 
     // ── POST /api/lasers/<id> — update name/ip/armed/zone calibration ──────────
-    // Body: any of {"name", "ip", "armed":true|false, "mirror_x", "mirror_y", "zone_x", "zone_y",
+    // Body: any of {"name", "ip", "armed":true|false, "mirror_x", "mirror_y", "canvas", "zone_x", "zone_y",
     // "zone_scale_x", "zone_scale_y", "preview_x", "preview_y"} - only fields present in the body are
     // changed. Setting "armed":true is what actually makes laser_thread()
     // connect to and stream this laser (see laser_thread()'s connect loop);
@@ -3819,6 +3827,7 @@ int main(int argc, char* argv[]) {
               if (json_has(req.body,"armed")) l.armed = json_bool(req.body,"armed",l.armed);
               if (json_has(req.body,"mirror_x")) l.mirror_x = json_bool(req.body,"mirror_x",l.mirror_x);
               if (json_has(req.body,"mirror_y")) l.mirror_y = json_bool(req.body,"mirror_y",l.mirror_y);
+              if (json_has(req.body,"canvas")) l.canvas = json_bool(req.body,"canvas",l.canvas);
               l.zone_x       = json_float(req.body,"zone_x",l.zone_x);
               l.zone_y       = json_float(req.body,"zone_y",l.zone_y);
               l.zone_scale_x = std::clamp(json_float(req.body,"zone_scale_x",l.zone_scale_x),0.1f,2.0f);
