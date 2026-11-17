@@ -295,6 +295,25 @@ export function isParamUnused(key) {
   return shapeCatalog.dependent.includes(key) && looksUsing(key).length === 0
 }
 
+// ── Changes in order ───────────────────────────────────────────────────────────
+// Look changes and cue actions reach the daemon one after the other, in the
+// order they were made - a cue saved right after moving a slider always
+// contains the new value. Components that batch slider moves for a moment
+// (Magic Touch panel/builder) register a flush: every ordered action first
+// sends whatever they still hold back.
+const pendingFlushes = new Set()
+export function registerPendingFlush(flush) {
+  pendingFlushes.add(flush)
+  return () => pendingFlushes.delete(flush)
+}
+let changeChain = Promise.resolve()
+function inOrder(task) {
+  for (const flush of pendingFlushes) flush()
+  const run = changeChain.then(task)
+  changeChain = run.catch(() => {})
+  return run
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 export async function fetchState() {
@@ -305,27 +324,33 @@ export async function fetchState() {
 // lasers (the daemon sorts the keys).
 // `lasers` overrides the selection (e.g. a shape option that only some of
 // the selected lasers' shapes use).
-export async function updateState(partial, lasers = null) {
+export function updateState(partial, lasers = null) {
   markLocalChange()
   patchLocalLooks(partial, lasers)
-  const seq = nextStateSeq()
   const targets = lasers || selectionTargets()
   const body = targets ? { ...partial, lasers: targets } : partial
-  applyStateIfCurrent(seq, await api('/state', { method: 'POST', body: JSON.stringify(body) }))
+  return inOrder(async () => {
+    const seq = nextStateSeq()
+    applyStateIfCurrent(seq, await api('/state', { method: 'POST', body: JSON.stringify(body) }))
+  })
 }
 
 // Resets the selected lasers' looks (all lasers: also master brightness).
-export async function resetState() {
+export function resetState() {
   markLocalChange()
-  const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await api(withLasers('/reset'), { method: 'POST' }))
+  const path = withLasers('/reset')
+  return inOrder(async () => {
+    const seq = nextStateSeq()
+    applyStateIfCurrent(seq, await api(path, { method: 'POST' }))
+  })
 }
 
-export async function setShape(shape) {
+export function setShape(shape) {
   markLocalChange()
   patchLocalLooks({ shape })
-  await laser(withLasers(`/shape/${shape}`), { method: 'POST' })
   laserState.shape = shape
+  const path = withLasers(`/shape/${shape}`)
+  return inOrder(() => laser(path, { method: 'POST' }))
 }
 
 export async function setBrightness(v) {
@@ -462,11 +487,14 @@ export async function setBrightnessGate(open) {
 
 // Snaps the rotation angle back to 0 and stops spinning (rotation_speed 0) -
 // same as the MIDI "rotation_reset" action, see POST /rotation/reset.
-export async function rotationReset() {
+export function rotationReset() {
   markLocalChange()
   laserState.rotation_speed = 0
-  const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await (await fetch(withLasers('/rotation/reset'), { method: 'POST' })).json())
+  const path = withLasers('/rotation/reset')
+  return inOrder(async () => {
+    const seq = nextStateSeq()
+    applyStateIfCurrent(seq, await (await fetch(path, { method: 'POST' })).json())
+  })
 }
 
 // ── Cue save/recall ─────────────────────────────────────────────────────────────
@@ -480,15 +508,20 @@ export async function fetchCues() {
   applyCues(await api('/cues'))
 }
 
+// Saving always stores every laser (each with its own look, animation and
+// layers) - the selection only decides which lasers a recall goes to.
 export async function saveCue(n) {
-  await api(withLasers(`/cue/${n}/save`), { method: 'POST' })
+  await inOrder(() => api(`/cue/${n}/save`, { method: 'POST' }))
   await fetchCues()
 }
 
-export async function recallCue(n) {
+export function recallCue(n) {
   markLocalChange()
-  const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await api(withLasers(`/cue/${n}/recall`), { method: 'POST' }))
+  const path = withLasers(`/cue/${n}/recall`)
+  return inOrder(async () => {
+    const seq = nextStateSeq()
+    applyStateIfCurrent(seq, await api(path, { method: 'POST' }))
+  })
 }
 
 // Fields a cue stores (the look, incl. dots and flicker). The Beam page's
@@ -524,20 +557,17 @@ export function isCueCurrent(n) {
 // blackout and release time aren't touched). Several momentary cues can be
 // held at once (multitouch): the most recently pressed one shows; releasing
 // it falls back to the previous still-held one, and only releasing the last
-// one restores the original look. Requests are chained so the daemon always
-// sees presses and releases in the order they happened.
+// one restores the original look. Requests go through inOrder(), so the
+// daemon always sees presses and releases in the order they happened.
 const heldMomentaryCues = [] // cue numbers in press order
-let momentaryChain = Promise.resolve()
 function momentaryRequest(n, on) {
-  const run = async () => {
-    markLocalChange()
+  markLocalChange()
+  const path = `/cue/${n}/momentary/${on ? 1 : 0}`
+  const target = on ? withLasers(path) : path
+  return inOrder(async () => {
     const seq = nextStateSeq()
-    const path = `/cue/${n}/momentary/${on ? 1 : 0}`
-    applyStateIfCurrent(seq, await api(on ? withLasers(path) : path, { method: 'POST' }))
-  }
-  const next = momentaryChain.then(run)
-  momentaryChain = next.catch(() => {})
-  return next
+    applyStateIfCurrent(seq, await api(target, { method: 'POST' }))
+  })
 }
 export function momentaryCuePress(n) {
   heldMomentaryCues.push(n)
@@ -554,15 +584,21 @@ export function momentaryCueRelease(n) {
 // Cue layers: play cue n *on top of* the current look instead of replacing
 // it (Layer playback) - mode 'on' | 'off' | 'toggle'. See POST
 // /api/cue/<n>/layer/<mode> and ShowLayer in laser_daemon.cpp.
-export async function setCueLayer(n, mode) {
+export function setCueLayer(n, mode) {
   markLocalChange()
-  const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await api(withLasers(`/cue/${n}/layer/${mode}`), { method: 'POST' }))
+  const path = withLasers(`/cue/${n}/layer/${mode}`)
+  return inOrder(async () => {
+    const seq = nextStateSeq()
+    applyStateIfCurrent(seq, await api(path, { method: 'POST' }))
+  })
 }
-export async function clearLayers() {
+export function clearLayers() {
   markLocalChange()
-  const seq = nextStateSeq()
-  applyStateIfCurrent(seq, await api(withLasers('/layers/clear'), { method: 'POST' }))
+  const path = withLasers('/layers/clear')
+  return inOrder(async () => {
+    const seq = nextStateSeq()
+    applyStateIfCurrent(seq, await api(path, { method: 'POST' }))
+  })
 }
 
 // Drag & drop of an ILDA file onto a cue slot: the daemon checks and stores
@@ -570,15 +606,18 @@ export async function clearLayers() {
 // and recalls it right away - see POST /api/cue/<n>/ilda.
 export async function uploadIldaCue(n, file) {
   markLocalChange()
-  const seq = nextStateSeq()
-  const res = await fetch(withLasers(`/api/cue/${n}/ilda?name=${encodeURIComponent(file.name)}`), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: file,
+  const url = withLasers(`/api/cue/${n}/ilda?name=${encodeURIComponent(file.name)}`)
+  await inOrder(async () => {
+    const seq = nextStateSeq()
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || `upload failed (${res.status})`)
+    applyStateIfCurrent(seq, data)
   })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || `upload failed (${res.status})`)
-  applyStateIfCurrent(seq, data)
   await fetchCues()
 }
 

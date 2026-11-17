@@ -237,7 +237,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   flashPress, flashRelease, cues, isCueCurrent, laserState, lasers, markLocalChange, recallCue, resetState, rotationReset,
   momentaryCuePress, momentaryCueRelease, setCueLayer, clearLayers,
-  setBrightnessGate, updateLaser, updateState, magicTouch, fetchMagicTouch, saveMagicTouch, isParamUnused,
+  setBrightnessGate, updateLaser, updateState, magicTouch, fetchMagicTouch, saveMagicTouch, isParamUnused, registerPendingFlush,
 } from '../composables/useLaserSocket.js'
 import CuePreview from './CuePreview.vue'
 import { MOVE_ICONS, SHAPE_ICONS } from './magicIcons.js'
@@ -647,17 +647,23 @@ const display = (w) => defFor(w).format(Number(laserState[defFor(w).key]) || 0)
 // Throttled send of the latest value over REST; markLocalChange guards against the status poll overwriting it.
 let pending = {}
 let timer = null
+function flushValues() {
+  clearTimeout(timer)
+  timer = null
+  if (!Object.keys(pending).length) return
+  const update = pending
+  pending = {}
+  updateState(update).catch(console.error)
+}
+// Cue actions (save, recall, ...) send the values still held back first.
+const unregisterFlush = registerPendingFlush(flushValues)
+onBeforeUnmount(() => { unregisterFlush(); flushValues() })
 function sendValue(key, value) {
   markLocalChange()
   laserState[key] = value
   pending[key] = value
   if (timer) return
-  timer = setTimeout(() => {
-    const update = pending
-    pending = {}
-    timer = null
-    updateState(update).catch(console.error)
-  }, 70)
+  timer = setTimeout(flushValues, 70)
 }
 const sendRatio = (w, position) => sendAxis(w, defFor(w), w.inv, position)
 const displayY = (w) => defForY(w).format(Number(laserState[defForY(w).key]) || 0)

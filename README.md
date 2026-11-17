@@ -283,9 +283,10 @@ for how the packaged macOS/Windows builds are put together.
    can cause brief gaps on a slow network.
    **Every laser has its own look.** With more than one laser, the
    **Applies to** bar next to the laser status (Master, Magic Touch, Cues,
-   Color, Shapes, Move) chooses which lasers your changes go to: **All**,
-   or any set of lasers (tap to add/remove). Only those lasers change - the
-   others keep playing their look. The controls show the first selected
+   Color, Shapes, Move) chooses which lasers your changes and cue recalls go
+   to: **All**, or any set of lasers (tap to add/remove). Only those lasers
+   change - the others keep playing their look. (Saving a cue always stores
+   all lasers.) The controls show the first selected
    laser's values; a yellow **mixed** mark means the selected lasers differ
    (moving the control sets all of them), a dashed shape/movement button
    means only some of them use it. The selection belongs to this browser
@@ -323,9 +324,12 @@ for how the packaged macOS/Windows builds are put together.
    dotted look) so you can see what a cue looks like before recalling it. The
    active cue is outlined in bright green.
    Right-click a slot to clear it, or use "Move" to relocate a saved cue
-   to a different slot. A cue saves everything about each (selected) laser:
-   its look, where its rotation/movement/rainbow animation currently is,
-   and the cue layers playing on it - recalling it brings exactly that back.
+   to a different slot. A cue always saves everything about every laser -
+   its look (shape, color, rainbow, dots, flicker, ...), where its
+   rotation/movement/rainbow animation currently is, and the cue layers
+   playing on it - and recalling it brings exactly that back, on the lasers
+   selected under **Applies to** (all by default), each with its own saved
+   state.
    Its icon shows the looks of all lasers in it on top of each other.
    **ILDA files**: drag an `.ild` file from your computer onto a slot - it's
    stored there (replacing the slot) and plays right away; the slot then
@@ -537,7 +541,7 @@ always apply to all lasers.
 | `GET /api/test-patterns` | The available official ILDA test patterns: `[{"id":"ilda_12k","label":"ILDA 12K","kpps":12}, {"id":"ilda_30k",...}]` |
 | `POST /api/test-pattern` | `{"pattern":"off"\|"ilda_12k"\|"ilda_30k","size":0.05..1}` (either key optional): every armed laser outputs that pattern instead of the show, at exactly its point rate: switching a pattern on sets `rate_kpps` to it, `"off"` restores the previous `rate_kpps`. 400 for an unknown pattern or one faster than `max_rate_kpps`. `GET /api/state` reports `test_pattern` and `test_pattern_size` (runtime only, never saved) |
 | `GET /api/cues` | List all populated cue slots (1-128) |
-| `POST /api/cue/<n>/save` | Save everything about `lasers` (all without it) into slot `n` - per laser its look, rotation angle, animation state (movement/wave/rainbow phase, ILDA time) and the cue layers playing on it. Recalling a cue (also momentary, or an ILDA drop) onto `lasers` gives each exactly its own saved state back (layers replaced by the saved ones), or the cue's main state (the first saved laser) if the cue has none for it - so a cue saved on one laser can be put onto any other. Global settings (master brightness, blackout, Beam settings) are never part of a cue |
+| `POST /api/cue/<n>/save` | Save everything about `lasers` (all without it - the UI always saves all) into slot `n` - per laser its look, rotation angle, animation state (movement/wave/rainbow phase, ILDA time) and the cue layers playing on it. Recalling a cue (also momentary, or an ILDA drop) onto `lasers` gives each exactly its own saved state back (layers replaced by the saved ones), or the cue's main state (the first saved laser) if the cue has none for it - so a cue saved on one laser can be put onto any other. Global settings (master brightness, blackout, Beam settings) are never part of a cue |
 | `POST /api/cue/<n>/recall` | Apply slot `n`'s saved show params (keeps the global `flash_release_ms` setting - see below). The look starts exactly at the rotation angle it was saved at, with its own rotation speed - a previously spinning look doesn't turn it further |
 | `POST /api/cue/<n>/momentary/<1\|0>` | Hold-to-preview cue: `1` = remember the current look and rotation angle, recall cue `n`; `0` = put both back (same as the MIDI `cue_momentary:<n>` action) |
 | `POST /api/cue/<n>/layer/<on\|off\|toggle>` | Layer playback: play cue `n` *on top of* the current look instead of replacing it (up to 8 layers, the oldest is dropped; runtime only). `GET /api/state` lists active layers as `layers` |

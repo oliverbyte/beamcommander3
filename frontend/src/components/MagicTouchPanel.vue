@@ -293,7 +293,7 @@ import LaserSelectionBar from './LaserSelectionBar.vue'
 import { MOVE_ICONS, SHAPE_ICONS } from './magicIcons.js'
 import {
   flashPress, flashRelease, isLookMixed, isParamUnused, laserState, lasers, looksUsing, lookValues, markLocalChange,
-  optionTargets, optionValue, patchLocalLooks, resetState, setBrightnessGate, shapeCatalog, targetLookIds, textFonts, updateState,
+  optionTargets, optionValue, patchLocalLooks, registerPendingFlush, resetState, setBrightnessGate, shapeCatalog, targetLookIds, textFonts, updateState,
 } from '../composables/useLaserSocket.js'
 
 const props = defineProps({
@@ -419,16 +419,16 @@ let pendingState = new Map()
 let updateTimer = null
 let flashHeld = false
 
-// One request after the other: each answer carries the complete state, so a
-// parallel request answering out of order could undo the other's change.
-let sendChain = Promise.resolve()
+// updateState() sends in order (see inOrder() in useLaserSocket.js), so a
+// parallel request can't answer out of order and undo the other's change.
 function flushPending() {
+  clearTimeout(updateTimer)
   const batches = [...pendingState.values()]
   pendingState = new Map()
-  for (const { lasers: targets, partial } of batches) {
-    sendChain = sendChain.then(() => updateState(partial, targets)).catch(console.error)
-  }
+  for (const { lasers: targets, partial } of batches) updateState(partial, targets).catch(console.error)
 }
+// Cue actions send the values still held back first (registerPendingFlush).
+const unregisterFlush = registerPendingFlush(flushPending)
 function queueState(partial, targets = null) {
   markLocalChange()
   if (!targets) Object.assign(laserState, partial)
@@ -534,7 +534,7 @@ function onFlashUp() {
 }
 
 onBeforeUnmount(() => {
-  clearTimeout(updateTimer)
+  unregisterFlush()
   flushPending()
   if (flashHeld) flashRelease().catch(console.error)
 })

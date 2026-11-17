@@ -27,7 +27,7 @@
           <span class="cue-num" :class="{ empty: !cues[n] }">{{ n }}</span>
         </button>
       </div>
-      <p class="hint">Right-click a slot to clear it. Drop an ILDA file (.ild) onto a slot to store it there and play it.</p>
+      <p class="hint">Save stores every laser - its look, animation and layers. Clicking a cue recalls it onto the selected lasers (Applies to), each with its own saved state. Right-click a slot to clear it. Drop an ILDA file (.ild) onto a slot to store it there and play it.</p>
       <p v-if="error" class="error">{{ error }}</p>
     </div>
   </div>
