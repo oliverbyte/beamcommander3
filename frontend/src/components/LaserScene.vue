@@ -68,7 +68,12 @@ const CANVAS_TRACE = 1.0     // trace on the wall
 // up to a bright fan right across the image. Only the wall image counts.
 const CANVAS_RAY_NEAR = 0
 const CANVAS_RAY_FAR = 0
-const CANVAS_DOT = 0.1      // a dwelled point (zero-length trace) is drawn as a short dash this long (world units)
+// A point the scanner dwells on (a zero-length step: dots, stroke ends) is
+// drawn as a tiny dash this long (world units, ~1-2 px) - a dot, not a
+// smear. Only true zero-length steps: tiny text has real strokes far shorter
+// than any "dot" size, and those must stay exactly as they are.
+const CANVAS_DOT = 0.03
+const CANVAS_DWELL_EPS = 1e-4
 // Every scanned point takes the same time, so a trace segment's light is
 // spread over its length: segments up to the frame's typical point spacing
 // (stream.canvasRefLen, the median lit step - see canvasReferenceLength())
@@ -598,7 +603,7 @@ function writeCanvasSpoke(stream, wx, wy, cr, cg, cb, fanBrightness) {
   const lc = stream.lastColor
   const lit = cr + cg + cb > 0 && lc[0] + lc[1] + lc[2] > 0
   const len = Math.hypot(wx - lx, wy - ly)
-  if (len < CANVAS_DOT * 0.5) { lx = wx - CANVAS_DOT * 0.5; ly = wy; px = wx + CANVAS_DOT * 0.5 }
+  if (len < CANVAS_DWELL_EPS) { lx = wx - CANVAS_DOT * 0.5; ly = wy; px = wx + CANVAS_DOT * 0.5 }
   const P = stream.spokePositions, C = stream.spokeBaseColors
   P[vi] = 0; P[vi + 1] = 0; P[vi + 2] = 0
   P[vi + 3] = wx; P[vi + 4] = wy; P[vi + 5] = z
