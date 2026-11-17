@@ -242,10 +242,16 @@ the mixed marks, greyed-out controls and shape options.
 the 3D preview (`LaserScene.vue`): such a laser draws its output on a virtual
 wall `CANVAS_DIST` behind it (as far as the beam pattern plane is in front,
 so the image keeps its size) - the scanner trace between consecutive lit
-points, dwelled points as short dashes (`writeCanvasSpoke()`), with the same
-point-by-point replay and persistence fade as beams. Rays, haze and the
-fixture are hidden and the wall image ignores depth, so in the straight-on
-view the text stays readable even with other fixtures or beams in front.
+points (`writeCanvasSpoke()`), with the same point-by-point replay and
+persistence fade as beams. Like on a real wall, a segment's light is spread
+over its length: steps up to the frame's typical spacing (median lit step,
+`canvasReferenceLength()`) are full brightness, longer ones (a line's or
+wave's lit return to its start) proportionally dimmer - otherwise they wash
+a rainbow out to white. Only true zero-length steps (dwelled dots, stroke
+ends) become a tiny dot; every real stroke - also of very small text - is
+drawn exactly. Rays, haze and the fixture are hidden and the wall image
+ignores depth, so in the straight-on view the text stays readable even with
+other fixtures or beams in front.
 
 ### Text shape
 
