@@ -496,6 +496,10 @@ struct LookSlot {
     bool   snap_speeds = false;    // speeds jump - a freeze must be a freeze (motion hold)
     bool   rotation_pending = false;
     double pending_angle = 0.0;    // start angle (radians), applied with the look's own rotation speed
+    // A cue's saved animation state (movement/wave/rainbow phase, ILDA
+    // time), applied after snap_all so the cue continues exactly where it was.
+    bool   anim_pending = false;
+    double pending_move_phase = 0.0, pending_wave_phase = 0.0, pending_rainbow_phase = 0.0, pending_ilda_time = 0.0;
     // Points in this laser's last preview frame (the UI's frame rate hint).
     std::size_t frame_points = 0;
     // Speeds to restore when motion hold is released.
@@ -1379,6 +1383,13 @@ static void animate_look(LookSlot& sl, double dt, bool frozen) {
         sl.wave_speed_smooth     = L.wave_speed;
         sl.ilda_time = 0.0; // an ILDA look starts at its first frame
     }
+    if (sl.anim_pending) {
+        sl.anim_pending = false;
+        sl.move_phase = sl.pending_move_phase;
+        sl.wave_phase = sl.pending_wave_phase;
+        sl.rainbow_phase = sl.pending_rainbow_phase;
+        sl.ilda_time = sl.pending_ilda_time;
+    }
     if (sl.snap_speeds) { sl.snap_speeds = false; sl.smooth.snap_speeds(L); }
     // Cue recall / rotation reset: jump to the requested start angle and
     // take the new rotation speed as is (no leftover spin).
@@ -1936,19 +1947,37 @@ static void load_lasers_from_disk() {
 // higher there would be silently rejected by do_cue_save/recall/clear/move
 // below (they all range-check against MAX_CUES).
 static constexpr int MAX_CUES = 128;
-// A cue: the looks of the lasers it was saved on (laser id -> look) plus its
-// main look - the first of them, or the only look of a cue saved before
+// One laser's complete state in a cue: its look (look.rotation_phase = its
+// rotation angle), its animation state when it was saved (movement, wave and
+// rainbow phase, ILDA time) and the cue layers playing on it (copies, with
+// their own looks and animation) - so recalling brings back exactly that.
+// Cues saved before this existed have no animation state / layers (has_*
+// false): recalling them keeps the running animation and layers.
+struct CueLaser {
+    LaserState look;
+    bool   has_anim = false;
+    double move_phase = 0.0, wave_phase = 0.0, rainbow_phase = 0.0, ilda_time = 0.0;
+    bool   has_layers = false;
+    std::vector<ShowLayer> layers;
+};
+// A cue: the state of every laser it was saved on (laser id -> state) plus
+// its main state - the first of them, or the only look of a cue saved before
 // per-laser looks existed (or without any laser configured). Recalling it
-// onto a laser gives that laser its own saved look, or the main look if the
-// cue has none for it - so any cue can be put onto any laser.
+// onto a laser gives that laser its own saved state, or the main state if
+// the cue has none for it - so any cue can be put onto any laser.
 struct CueData {
-    LaserState main;
-    std::map<int, LaserState> lasers;
-    const LaserState& look_for(int id) const {
+    CueLaser main;
+    std::map<int, CueLaser> lasers;
+    const CueLaser& for_laser(int id) const {
         auto it = lasers.find(id);
         return it != lasers.end() ? it->second : main;
     }
-    template <class F> void for_each_look(F fn) const { fn(main); for (const auto& [id, l] : lasers) fn(l); }
+    // Every look in the cue, layers included.
+    template <class F> void for_each_look(F fn) const {
+        auto one = [&](const CueLaser& c) { fn(c.look); for (const auto& L : c.layers) fn(L.s); };
+        one(main);
+        for (const auto& [id, c] : lasers) one(c);
+    }
 };
 static std::map<int, CueData> G_cues;
 static std::mutex                G_cues_mtx;
@@ -2098,13 +2127,74 @@ static LaserState cue_state_from_json(const std::string& obj) {
 
 // {...main look..., "lasers":{"<id>":{...look...}, ...}} - older files have
 // no "lasers" (one look for all lasers).
+// {...look..., "move_phase", "wave_phase", "rainbow_phase", "ilda_time",
+//  "layers":[{...layer look..., "cue":n, phases}, ...]}
+static std::string cue_laser_to_json(const CueLaser& c) {
+    auto num = [](double v) { std::ostringstream ss; ss << std::fixed << std::setprecision(6) << v; return ss.str(); };
+    std::string out = cue_state_to_json(c.look);
+    out.pop_back(); // '}'
+    if (c.has_anim)
+        out += ",\"move_phase\":" + num(c.move_phase) + ",\"wave_phase\":" + num(c.wave_phase) +
+               ",\"rainbow_phase\":" + num(c.rainbow_phase) + ",\"ilda_time\":" + num(c.ilda_time);
+    if (c.has_layers) {
+        out += ",\"layers\":[";
+        for (std::size_t i = 0; i < c.layers.size(); ++i) {
+            const ShowLayer& L = c.layers[i];
+            LaserState look = L.s;
+            look.rotation_phase = L.rotation_phase; // the layer's live angle
+            std::string l = cue_state_to_json(look);
+            l.pop_back();
+            out += (i ? "," : "") + l + ",\"cue\":" + std::to_string(L.cue) + ",\"move_phase\":" + num(L.move_phase) +
+                   ",\"wave_phase\":" + num(L.wave_phase) + ",\"rainbow_phase\":" + num(L.rainbow_phase) +
+                   ",\"ilda_time\":" + num(L.ilda_time) + "}";
+        }
+        out += "]";
+    }
+    return out + "}";
+}
+static CueLaser cue_laser_from_json(const std::string& obj) {
+    CueLaser c;
+    std::string own = obj;
+    std::size_t b = 0, e = 0, open = 0;
+    if (json_value_span(obj, "layers", b, e, open) && obj[open] == '[') {
+        c.has_layers = true;
+        const std::size_t close = e - 1;
+        for (std::size_t i = obj.find('{', open); i != std::string::npos && i < close; i = obj.find('{', i)) {
+            const std::size_t end = json_match(obj, i);
+            if (end == std::string::npos || end > close) break;
+            const std::string lo = obj.substr(i, end - i + 1);
+            ShowLayer L;
+            L.s = cue_state_from_json(lo);
+            L.cue = json_int(lo, "cue", 0);
+            L.rotation_phase = L.s.rotation_phase;
+            L.move_phase = json_float(lo, "move_phase", 0.0f);
+            L.wave_phase = json_float(lo, "wave_phase", 0.0f);
+            L.rainbow_phase = json_float(lo, "rainbow_phase", 0.0f);
+            L.ilda_time = json_float(lo, "ilda_time", 0.0f);
+            if (c.layers.size() < MAX_SHOW_LAYERS) c.layers.push_back(L);
+            i = end + 1;
+        }
+        own = obj.substr(0, b) + obj.substr(e); // the laser's own keys only
+    }
+    c.look = cue_state_from_json(own);
+    c.has_anim = json_has(own, "move_phase");
+    if (c.has_anim) {
+        c.move_phase = json_float(own, "move_phase", 0.0f);
+        c.wave_phase = json_float(own, "wave_phase", 0.0f);
+        c.rainbow_phase = json_float(own, "rainbow_phase", 0.0f);
+        c.ilda_time = json_float(own, "ilda_time", 0.0f);
+    }
+    return c;
+}
+// {...main laser state..., "lasers":{"<id>":{...laser state...}, ...}} -
+// older files have no "lasers" (one look for all lasers).
 static std::string cue_to_json(const CueData& c) {
-    std::string out = cue_state_to_json(c.main);
+    std::string out = cue_laser_to_json(c.main);
     out.pop_back(); // '}'
     out += ",\"lasers\":{";
     bool first = true;
     for (const auto& [id, l] : c.lasers) {
-        out += (first ? "\"" : ",\"") + std::to_string(id) + "\":" + cue_state_to_json(l);
+        out += (first ? "\"" : ",\"") + std::to_string(id) + "\":" + cue_laser_to_json(l);
         first = false;
     }
     return out + "}}";
@@ -2112,33 +2202,22 @@ static std::string cue_to_json(const CueData& c) {
 static CueData cue_from_json(const std::string& obj) {
     CueData c;
     std::string mainPart = obj;
-    const auto key = obj.find("\"lasers\"");
-    if (key != std::string::npos) {
-        const auto open = obj.find('{', key);
-        std::size_t close = std::string::npos;
-        int depth = 0;
-        for (std::size_t j = open; open != std::string::npos && j < obj.size(); ++j) {
-            if (obj[j] == '{') ++depth;
-            else if (obj[j] == '}' && --depth == 0) { close = j; break; }
+    std::size_t b = 0, e = 0, open = 0;
+    if (json_value_span(obj, "lasers", b, e, open) && obj[open] == '{') {
+        const std::size_t close = e - 1;
+        std::size_t i = open + 1;
+        while (true) {
+            const auto q1 = obj.find('"', i);      if (q1 == std::string::npos || q1 > close) break;
+            const auto q2 = obj.find('"', q1 + 1); if (q2 == std::string::npos || q2 > close) break;
+            const auto ob = obj.find('{', q2);     if (ob == std::string::npos || ob > close) break;
+            const auto oe = json_match(obj, ob);   if (oe == std::string::npos || oe > close) break;
+            try { c.lasers[std::stoi(obj.substr(q1 + 1, q2 - q1 - 1))] = cue_laser_from_json(obj.substr(ob, oe - ob + 1)); }
+            catch (...) {}
+            i = oe + 1;
         }
-        if (close != std::string::npos) {
-            // Each "<id>":{...} inside the lasers object.
-            std::size_t i = open + 1;
-            while (true) {
-                const auto q1 = obj.find('"', i);      if (q1 == std::string::npos || q1 > close) break;
-                const auto q2 = obj.find('"', q1 + 1); if (q2 == std::string::npos || q2 > close) break;
-                const auto b = obj.find('{', q2);      if (b == std::string::npos || b > close) break;
-                int d = 0; std::size_t e = b;
-                for (; e < close; ++e) { if (obj[e] == '{') ++d; else if (obj[e] == '}' && --d == 0) break; }
-                if (d != 0) break;
-                try { c.lasers[std::stoi(obj.substr(q1 + 1, q2 - q1 - 1))] = cue_state_from_json(obj.substr(b, e - b + 1)); }
-                catch (...) {}
-                i = e + 1;
-            }
-            mainPart = obj.substr(0, key) + obj.substr(close + 1); // the main look's own keys only
-        }
+        mainPart = obj.substr(0, b) + obj.substr(e); // the main state's own keys only
     }
-    c.main = cue_state_from_json(mainPart);
+    c.main = cue_laser_from_json(mainPart);
     return c;
 }
 
@@ -2174,12 +2253,9 @@ static void load_cues_from_disk() {
         std::string key = body.substr(q1 + 1, q2 - q1 - 1);
         auto colon = body.find(':', q2);      if (colon == std::string::npos) break;
         auto brace = body.find('{', colon);   if (brace == std::string::npos) break;
-        int depth = 0; std::size_t j = brace;
-        for (; j < body.size(); ++j) {
-            if (body[j] == '{') ++depth;
-            else if (body[j] == '}') { --depth; if (depth == 0) { ++j; break; } }
-        }
-        if (depth != 0) break; // malformed, bail out
+        const auto closeBrace = json_match(body, brace); // skips strings (texts may contain braces)
+        if (closeBrace == std::string::npos) break; // malformed, bail out
+        const std::size_t j = closeBrace + 1;
         try {
             int num = std::stoi(key);
             if (num >= 1 && num <= MAX_CUES)
@@ -2196,9 +2272,44 @@ static void load_cues_from_disk() {
 // time by any of these.
 using LaserTargets = std::optional<std::vector<int>>; // nullopt = every look (see look_targets())
 
-// Saves the looks of the target lasers into slot n (see CueData). The
-// rotation angle lives in the look's animation state, so it's stashed into
-// each saved look's transport field - recalling restores the exact angle.
+// A laser's complete current state for a cue (see CueLaser). G_mtx held.
+static CueLaser capture_cue_laser(const LookSlot& sl) {
+    CueLaser c;
+    c.look = sl.look;
+    c.look.rotation_phase = sl.current_angle();
+    c.has_anim = true;
+    c.move_phase = sl.anim_pending ? sl.pending_move_phase : sl.move_phase;
+    c.wave_phase = sl.anim_pending ? sl.pending_wave_phase : sl.wave_phase;
+    c.rainbow_phase = sl.anim_pending ? sl.pending_rainbow_phase : sl.rainbow_phase;
+    c.ilda_time = sl.anim_pending ? sl.pending_ilda_time : sl.ilda_time;
+    c.has_layers = true;
+    c.layers = sl.layers;
+    return c;
+}
+// Puts a saved state onto a laser: instantly (no glide), at its saved
+// rotation angle and animation state, with its saved layers. G_mtx held.
+static void apply_cue_laser(LookSlot& sl, const CueLaser& c) {
+    sl.look = c.look;
+    sl.snap_all = true;
+    sl.request_angle(c.look.rotation_phase);
+    if (c.has_anim) {
+        sl.anim_pending = true;
+        sl.pending_move_phase = c.move_phase;
+        sl.pending_wave_phase = c.wave_phase;
+        sl.pending_rainbow_phase = c.rainbow_phase;
+        sl.pending_ilda_time = c.ilda_time;
+    }
+    if (c.has_layers) sl.layers = c.layers;
+}
+// A plain look (reset, defaults): no saved animation, layers untouched.
+static void set_look(LookSlot& sl, const LaserState& look) {
+    CueLaser c;
+    c.look = look;
+    apply_cue_laser(sl, c);
+}
+
+// Saves everything about the target lasers into slot n (see CueData):
+// per laser its look, rotation angle, animation state and active layers.
 static bool do_cue_save(int n, const LaserTargets& targets = std::nullopt) {
     if (n < 1 || n > MAX_CUES) return false;
     CueData cue;
@@ -2208,26 +2319,18 @@ static bool do_cue_save(int n, const LaserTargets& targets = std::nullopt) {
         const std::vector<int> ids = look_targets(targets, order);
         if (ids.empty()) return false;
         for (int id : ids) {
-            const LookSlot& sl = G_looks.at(id);
-            LaserState look = sl.look;
-            look.rotation_phase = sl.current_angle();
-            if (id == ids.front()) cue.main = look;
-            if (id != kVirtualLook) cue.lasers[id] = look;
+            const CueLaser c = capture_cue_laser(G_looks.at(id));
+            if (id == ids.front()) cue.main = c;
+            if (id != kVirtualLook) cue.lasers[id] = c;
         }
     }
     { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[n] = cue; }
     save_cues_to_disk();
     return true;
 }
-// Puts `look` onto a laser: instantly (no glide), at its saved rotation angle
-// with its own rotation speed. G_mtx held.
-static void set_look(LookSlot& sl, const LaserState& look) {
-    sl.look = look;
-    sl.snap_all = true;
-    sl.request_angle(look.rotation_phase);
-}
-// Recalls slot n onto the target lasers (see CueData). Lasers that aren't
-// targeted keep their look; global settings never change.
+// Recalls slot n onto the target lasers (see CueData): each gets exactly its
+// saved state back - look, angle, animation, layers. Lasers that aren't
+// targeted keep theirs; global settings never change.
 static bool do_cue_recall(int n, const LaserTargets& targets = std::nullopt) {
     if (n < 1 || n > MAX_CUES) return false;
     CueData cue;
@@ -2237,7 +2340,7 @@ static bool do_cue_recall(int n, const LaserTargets& targets = std::nullopt) {
       cue = it->second; }
     const std::vector<int> order = laser_order();
     std::lock_guard<std::mutex> lk(G_mtx);
-    for (int id : look_targets(targets, order)) set_look(G_looks.at(id), cue.look_for(id));
+    for (int id : look_targets(targets, order)) apply_cue_laser(G_looks.at(id), cue.for_laser(id));
     return true;
 }
 // Cue layers (see ShowLayer) on the target lasers: mode 1 = on, 0 = off,
@@ -2267,7 +2370,8 @@ static bool do_cue_layer(int n, int mode, const LaserTargets& targets = std::nul
         if (!wantOn) { if (it != sl.layers.end()) sl.layers.erase(it); continue; }
         if (it != sl.layers.end()) continue;
         ShowLayer L;
-        L.cue = n; L.s = cue.look_for(id);
+        // The cue's look for this laser (a cue's own layers don't stack in).
+        L.cue = n; L.s = cue.for_laser(id).look;
         L.rotation_phase = L.s.rotation_phase;
         sl.layers.push_back(L);
         if (sl.layers.size() > MAX_SHOW_LAYERS) sl.layers.erase(sl.layers.begin());
@@ -2351,9 +2455,9 @@ static std::string ilda_known_name(const std::string& file) {
 // recalled right away onto the target lasers.
 static void ilda_cue_assign(int n, const std::string& file, const std::string& name, const LaserTargets& targets) {
     CueData cue;
-    cue.main.shape = "ilda";
-    cue.main.ilda_file = file;
-    cue.main.ilda_name = name;
+    cue.main.look.shape = "ilda";
+    cue.main.look.ilda_file = file;
+    cue.main.look.ilda_name = name;
     { std::lock_guard<std::mutex> lk(G_cues_mtx); G_cues[n] = cue; }
     save_cues_to_disk();
     do_cue_recall(n, targets);
@@ -2564,7 +2668,7 @@ static void midi_apply_cc_action(const std::string& action, float out) {
 // State for the momentary (hold-to-preview) cue buttons and the momentary
 // flash button - both need to remember what to restore on release.
 static bool      g_midi_cue_save_armed = false;
-static std::map<int, LaserState> g_cue_momentary_snapshot; // laser id -> look (incl. angle) before the first momentary press
+static std::map<int, CueLaser> g_cue_momentary_snapshot; // laser id -> its complete state before the first momentary press
 // Guards g_cue_momentary_snapshot (MIDI thread + HTTP threads).
 // Lock order: always taken *before* G_mtx / G_cues_mtx, never inside them.
 static std::mutex g_cue_momentary_mtx;
@@ -2579,21 +2683,17 @@ static bool do_cue_momentary_press(int n, const LaserTargets& targets = std::nul
     {
         const std::vector<int> order = laser_order();
         std::lock_guard<std::mutex> lk(G_mtx);
-        for (int id : look_targets(targets, order)) {
-            if (g_cue_momentary_snapshot.count(id)) continue;
-            LaserState look = G_looks.at(id).look;
-            look.rotation_phase = G_looks.at(id).current_angle();
-            g_cue_momentary_snapshot[id] = look;
-        }
+        for (int id : look_targets(targets, order))
+            if (!g_cue_momentary_snapshot.count(id)) g_cue_momentary_snapshot[id] = capture_cue_laser(G_looks.at(id));
     }
     return do_cue_recall(n, targets);
 }
 static void do_cue_momentary_release() {
     std::lock_guard<std::mutex> mlk(g_cue_momentary_mtx);
     std::lock_guard<std::mutex> lk(G_mtx);
-    for (const auto& [id, look] : g_cue_momentary_snapshot) {
+    for (const auto& [id, saved] : g_cue_momentary_snapshot) {
         auto it = G_looks.find(id);
-        if (it != G_looks.end()) set_look(it->second, look); // back instantly, at the remembered angle
+        if (it != G_looks.end()) apply_cue_laser(it->second, saved); // back instantly, exactly as it was
     }
     g_cue_momentary_snapshot.clear();
 }

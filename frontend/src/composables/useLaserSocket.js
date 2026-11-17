@@ -503,14 +503,16 @@ const CUE_STATE_FIELDS = [
 ]
 
 // True when recalling cue n onto the selected lasers would change nothing:
-// every selected laser already shows the cue's look for it (its own saved
-// look, or the cue's main look - see CueData in laser_daemon.cpp).
+// every selected laser already shows the cue's state for it (its own saved
+// state, or the cue's main state - see CueData in laser_daemon.cpp): the
+// same look and, if the cue saved them, the same cue layers.
 export function isCueCurrent(n) {
   const cue = cues[n]
   if (!cue) return false
   return targetLookIds().every((id) => {
     const current = laserState.looks?.[id] || laserState
     const saved = cue.lasers?.[id] || cue
+    if (Array.isArray(saved.layers) && !sameValue(saved.layers.map((l) => l.cue), current.layers || [])) return false
     return CUE_STATE_FIELDS.every((field) => sameValue(saved[field], current[field]))
   })
 }

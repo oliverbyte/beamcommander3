@@ -66,6 +66,40 @@ inline bool json_string(const std::string& b, const std::string& k, std::string&
     }
     return false;
 }
+// Index of the bracket closing the one at `open` ('{' or '['), skipping
+// anything inside JSON strings (so a text like "a{b]" can't confuse it), or
+// npos if unbalanced.
+inline std::size_t json_match(const std::string& b, std::size_t open) {
+    if (open >= b.size() || (b[open] != '{' && b[open] != '[')) return std::string::npos;
+    int depth = 0;
+    bool inString = false;
+    for (std::size_t i = open; i < b.size(); ++i) {
+        const char c = b[i];
+        if (inString) {
+            if (c == '\\') ++i;
+            else if (c == '"') inString = false;
+            continue;
+        }
+        if (c == '"') inString = true;
+        else if (c == '{' || c == '[') ++depth;
+        else if ((c == '}' || c == ']') && --depth == 0) return i;
+    }
+    return std::string::npos;
+}
+// The [begin, end) span of `"key": <object or array>` (for cutting a nested
+// value out before reading the surrounding object's own keys); false if
+// `key` isn't there or its value isn't a balanced object/array.
+inline bool json_value_span(const std::string& b, const std::string& key, std::size_t& begin, std::size_t& end,
+                            std::size_t& valueOpen) {
+    const auto k = json_key_pos(b, key);
+    if (k == std::string::npos) return false;
+    auto v = b.find(':', k) + 1;
+    while (v < b.size() && (b[v] == ' ' || b[v] == '\n' || b[v] == '\t' || b[v] == '\r')) ++v;
+    const auto close = json_match(b, v);
+    if (close == std::string::npos) return false;
+    begin = k; end = close + 1; valueOpen = v;
+    return true;
+}
 // A string as a JSON string literal (with quotes); control characters dropped.
 inline std::string json_escape(const std::string& s) {
     std::string out = "\"";

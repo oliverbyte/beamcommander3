@@ -218,9 +218,15 @@ brightness, flash release, Beam settings. Flash is applied when drawing
 
 REST look changes and cue actions take the target lasers as `lasers`
 (`request_lasers()`; none = every look, so MIDI and scripts drive all lasers
-as before). Cues (`CueData`) store the looks of the lasers they were saved on
-plus a main look; recalling onto a laser uses its own saved look or the main
-look. Older cues (one look) load as main look.
+as before). Cues (`CueData`) store a `CueLaser` per laser they were saved on
+plus a main one: the look (incl. rotation angle), the animation state
+(movement/wave/rainbow phase, ILDA time - applied after the recall's
+snap_all via `LookSlot::anim_pending`) and copies of the active cue layers.
+`capture_cue_laser()`/`apply_cue_laser()` are shared by save/recall and the
+momentary-cue snapshot. Recalling onto a laser uses its own saved state or
+the main one. Older cues (one look, no animation/layers) load as main state
+and leave the running animation and layers alone. cues.json is parsed with
+string-aware bracket matching (`json_match()`), so texts may contain braces.
 
 The selection lives only in the browser (`laserSelection` in
 `useLaserSocket.js`, localStorage) - the daemon never knows it. The client
