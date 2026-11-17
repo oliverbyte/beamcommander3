@@ -225,6 +225,20 @@ TEST(json_string_round_trips_quotes_backslashes_and_unicode) {
     CHECK_NEAR(json_float("{\"name\":\"r\",\"r\":0.25}", "r", -1), 0.25, 1e-6);
 }
 
+TEST(json_match_skips_brackets_inside_strings) {
+    const std::string b = "{\"text\":\"a{b]c\\\"}\",\"layers\":[{\"cue\":2,\"text\":\"x]\"}],\"r\":1}";
+    CHECK(json_match(b, 0) == b.size() - 1);
+    std::size_t begin = 0, end = 0, open = 0;
+    CHECK(json_value_span(b, "layers", begin, end, open));
+    CHECK(b[open] == '[' && b[end - 1] == ']');
+    CHECK(b.substr(begin, end - begin) == "\"layers\":[{\"cue\":2,\"text\":\"x]\"}]");
+    std::string text;
+    CHECK(json_string(b, "text", text) && text == "a{b]c\"}");
+    CHECK(!json_value_span(b, "missing", begin, end, open));
+    CHECK(json_match("{\"a\":[1,2}", 0) == std::string::npos);
+    CHECK(json_match("x", 0) == std::string::npos);
+}
+
 int main() {
     std::printf("laser_text tests\n");
     for (const auto& t : registry()) {
