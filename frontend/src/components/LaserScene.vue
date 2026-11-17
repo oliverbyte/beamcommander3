@@ -69,6 +69,13 @@ const CANVAS_TRACE = 1.0     // trace on the wall
 const CANVAS_RAY_NEAR = 0
 const CANVAS_RAY_FAR = 0
 const CANVAS_DOT = 0.035     // a dwelled point (zero-length trace) is drawn as a short dash this long (world units)
+// Every scanned point takes the same time, so a trace segment's light is
+// spread over its length: segments up to this length (world units - normal
+// point spacing) are drawn at full brightness, longer ones dimmer in
+// proportion. Otherwise a frame's lit jump back to its start (a line or wave
+// returning to its left end) would be drawn as bright as the shape, in one
+// color, a hundred times a second, washing e.g. a rainbow out to white.
+const CANVAS_FULL_LEN = 0.25
 
 let renderer, scene, camera, controls, laserTemplate
 let dust
@@ -573,7 +580,8 @@ function writeCanvasSpoke(stream, wx, wy, cr, cg, cb, fanBrightness) {
   let px = wx
   const lc = stream.lastColor
   const lit = cr + cg + cb > 0 && lc[0] + lc[1] + lc[2] > 0
-  if (Math.hypot(wx - lx, wy - ly) < CANVAS_DOT * 0.5) { lx = wx - CANVAS_DOT * 0.5; ly = wy; px = wx + CANVAS_DOT * 0.5 }
+  const len = Math.hypot(wx - lx, wy - ly)
+  if (len < CANVAS_DOT * 0.5) { lx = wx - CANVAS_DOT * 0.5; ly = wy; px = wx + CANVAS_DOT * 0.5 }
   const P = stream.spokePositions, C = stream.spokeBaseColors
   P[vi] = 0; P[vi + 1] = 0; P[vi + 2] = 0
   P[vi + 3] = wx; P[vi + 4] = wy; P[vi + 5] = z
@@ -581,7 +589,7 @@ function writeCanvasSpoke(stream, wx, wy, cr, cg, cb, fanBrightness) {
   P[vi + 9] = px; P[vi + 10] = wy; P[vi + 11] = z + 0.02
   C[vi] = cr * CANVAS_RAY_NEAR; C[vi + 1] = cg * CANVAS_RAY_NEAR; C[vi + 2] = cb * CANVAS_RAY_NEAR
   C[vi + 3] = cr * CANVAS_RAY_FAR; C[vi + 4] = cg * CANVAS_RAY_FAR; C[vi + 5] = cb * CANVAS_RAY_FAR
-  const trace = lit ? CANVAS_TRACE : 0
+  const trace = lit ? CANVAS_TRACE * Math.min(1, CANVAS_FULL_LEN / Math.max(len, 1e-6)) : 0
   C[vi + 6] = cr * trace; C[vi + 7] = cg * trace; C[vi + 8] = cb * trace
   C[vi + 9] = cr * trace; C[vi + 10] = cg * trace; C[vi + 11] = cb * trace
   // Faint haze fan between the rays, like in beam mode but dimmer.
