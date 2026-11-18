@@ -108,7 +108,7 @@ import { laserState, lasers, updateState, resetState, markLocalChange, flashPres
 const { popout } = defineProps({ popout: { type: Boolean, default: false } })
 const emit = defineEmits(['update:persistence'])
 
-const SHAPES = ['circle','line','triangle','square','wave','text']
+const SHAPES = ['circle','line','triangle','square','wave','stars','text']
 const MOVES  = ['none','circle','pan','tilt','tiltup','tiltdown','eight','random']
 const persistenceMs = ref(20)
 

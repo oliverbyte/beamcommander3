@@ -299,6 +299,9 @@ struct LaserState {
     float wave_amplitude  = 0.45f;    // fraction of radius
     float wave_speed      = 0.0f;     // cycles/sec (animated wave)
 
+    // Stars shape: how many stars (dots at random, fixed spots - star_layout()).
+    int   stars_amount    = 40;
+
     // Rainbow
     float rainbow_amount  = 0.0f;     // 0..1 blend
     float rainbow_speed   = 0.0f;     // hue cycles/sec
@@ -698,6 +701,11 @@ static std::vector<Pt> gen_base_shape(const LaserState& s, const RenderPose& pos
             float t=(float)i/(n-1)*tau;
             pts.push_back({(t/tau*2.0f-1.0f)*r, r*pose.wave_amplitude*std::sin(pose.wave_frequency*t+phase)});
         }
+    } else if (s.shape == "stars") {
+        // Random but fixed spots in the disk of radius r (see star_layout());
+        // make_frame() draws every one as a dot.
+        for (const StarPos& p : star_layout(s.stars_amount)) pts.push_back({p.x * r, p.y * r});
+        if (pts.empty()) pts.push_back({0.0f, 0.0f});
     } else {
         for (int i=0;i<n;++i) pts.push_back({0.0f,0.0f});
     }
@@ -916,6 +924,8 @@ static core::Frame make_frame(const LaserState& s, double movement_phase, double
     if (s.dot_amount < 1.0f && s.dot_amount > 0.0f)
         dotCount = std::clamp((double)s.dot_amount * n0, 1.0, (double)n0);
     bool dotted = dotCount < n0 - 1e-6;
+    // Stars are always dots - one per star (dot density doesn't apply).
+    if (s.shape == "stars") { dotCount = n0; dotted = true; }
     int numDots = dotted ? (int)std::ceil(dotCount - 1e-9) : n0;
 
     // A DAC (Ether Dream / Helios) plays a frame's points back-to-back at a
@@ -1222,6 +1232,7 @@ static void look_fields_json(std::ostringstream& ss, const LookSlot& sl) {
        << "\"wave_frequency\":" << L.wave_frequency << ","
        << "\"wave_amplitude\":" << L.wave_amplitude << ","
        << "\"wave_speed\":"    << L.wave_speed     << ","
+       << "\"stars_amount\":"  << L.stars_amount   << ","
        << "\"rainbow_amount\":" << L.rainbow_amount << ","
        << "\"rainbow_speed\":" << L.rainbow_speed  << ","
        << "\"rainbow_phase_degrees\":" << L.rainbow_phase_degrees << ","
@@ -2064,6 +2075,7 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"wave_frequency\":" << s.wave_frequency << ","
        << "\"wave_amplitude\":" << s.wave_amplitude << ","
        << "\"wave_speed\":"    << s.wave_speed    << ","
+       << "\"stars_amount\":"  << s.stars_amount  << ","
        << "\"rainbow_amount\":" << s.rainbow_amount << ","
        << "\"rainbow_speed\":" << s.rainbow_speed << ","
        << "\"rainbow_phase_degrees\":" << s.rainbow_phase_degrees << ","
@@ -2110,6 +2122,7 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.wave_frequency  = json_float(obj,"wave_frequency",s.wave_frequency);
     s.wave_amplitude  = json_float(obj,"wave_amplitude",s.wave_amplitude);
     s.wave_speed      = json_float(obj,"wave_speed",s.wave_speed);
+    s.stars_amount    = std::clamp(json_int(obj,"stars_amount",s.stars_amount),1,kMaxStars);
     s.rainbow_amount  = json_float(obj,"rainbow_amount",s.rainbow_amount);
     s.rainbow_speed   = json_float(obj,"rainbow_speed",s.rainbow_speed);
     s.rainbow_phase_degrees = json_float(obj,"rainbow_phase_degrees",s.rainbow_phase_degrees);
@@ -2656,6 +2669,7 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     if (action=="wave_frequency") { for_all_looks([&](LookSlot& sl) { sl.look.wave_frequency=std::max(0.1f,out); }); return; }
     if (action=="wave_amplitude") { for_all_looks([&](LookSlot& sl) { sl.look.wave_amplitude=std::clamp(out,0.0f,1.0f); }); return; }
     if (action=="wave_speed")     { for_all_looks([&](LookSlot& sl) { sl.look.wave_speed=out; }); return; }
+    if (action=="stars_amount")   { for_all_looks([&](LookSlot& sl) { sl.look.stars_amount=std::clamp((int)std::lround(out),1,kMaxStars); }); return; }
     if (action=="rainbow_amount") { for_all_looks([&](LookSlot& sl) { sl.look.rainbow_amount=std::clamp(out,0.0f,1.0f); }); return; }
     if (action=="rainbow_speed")  { for_all_looks([&](LookSlot& sl) { sl.look.rainbow_speed=out; }); return; }
     if (action=="rainbow_phase_degrees") { for_all_looks([&](LookSlot& sl) { sl.look.rainbow_phase_degrees=std::clamp(out,0.0f,360.0f); }); return; }
@@ -2795,7 +2809,7 @@ static void midi_apply_note_action(const std::string& action, bool isPress, bool
         // across successive physical taps rather than an on+off pair per
         // tap. Setting the same shape twice is idempotent, so reacting to
         // both is safe.
-        static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","text","staticwave"};
+        static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","stars","text","staticwave"};
         std::string s = action.substr(6);
         if (SHAPES.count(s)) for_all_looks([&](LookSlot& sl) { sl.look.shape = s; apply_legacy_shape(sl.look); });
         return;
@@ -3451,7 +3465,7 @@ static void save_magic_to_disk(const std::string& body) {
 struct ShapeInfo { std::string id, label; bool selectable; std::vector<std::string> params; };
 static const std::vector<std::string> kShapeDependentParams = {
     "radius", "points", "r", "g", "b", "rainbow_amount", "rainbow_speed", "rainbow_phase_degrees", "dot_amount",
-    "wave_frequency", "wave_amplitude", "wave_speed", "ilda_fps",
+    "wave_frequency", "wave_amplitude", "wave_speed", "stars_amount", "ilda_fps",
     "text", "font", "text_size", "text_spacing", "text_bold", "text_italic", "text_underline",
 };
 static const std::vector<ShapeInfo>& shape_catalog() {
@@ -3465,6 +3479,8 @@ static const std::vector<ShapeInfo>& shape_catalog() {
             {"triangle", "Triangle", true, outline},
             {"square", "Square", true, outline},
             {"wave", "Wave", true, with({"wave_frequency", "wave_amplitude", "wave_speed"})},
+            {"stars", "Stars", true, {"radius", "r", "g", "b", "rainbow_amount", "rainbow_speed", "rainbow_phase_degrees",
+                                      "stars_amount"}},
             {"text", "Text", true, {"r", "g", "b", "rainbow_amount", "rainbow_speed", "rainbow_phase_degrees",
                                     "text", "font", "text_size", "text_spacing", "text_bold", "text_italic", "text_underline"}},
             {"ilda", "ILDA file", false, {"ilda_fps"}}, // the file's own colors, points and size
@@ -3612,6 +3628,7 @@ int main(int argc, char* argv[]) {
             APPLY_F("wave_frequency",wave_frequency)
             APPLY_F("wave_amplitude",wave_amplitude) APPLY_CLAMP("wave_amplitude",wave_amplitude,0,1)
             APPLY_F("wave_speed",wave_speed)
+            APPLY_F("stars_amount",stars_amount) APPLY_CLAMP("stars_amount",stars_amount,1,kMaxStars)
             APPLY_F("rainbow_amount",rainbow_amount) APPLY_CLAMP("rainbow_amount",rainbow_amount,0,1)
             APPLY_F("rainbow_speed",rainbow_speed)
             APPLY_F("rainbow_phase_degrees",rainbow_phase_degrees) APPLY_CLAMP("rainbow_phase_degrees",rainbow_phase_degrees,0,360)
@@ -3649,7 +3666,7 @@ int main(int argc, char* argv[]) {
 
     // ── POST /laser/shape/<shape> ───────────────────────────────────────────────
     // "staticwave" is still accepted from older clients: a wave with speed 0.
-    static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","text","staticwave"};
+    static const std::set<std::string> SHAPES{"circle","line","triangle","square","wave","stars","text","staticwave"};
     svr.Post(R"(/laser/shape/([a-z]+))",[](const httplib::Request& req,httplib::Response& res){
         std::string s=req.matches[1];
         if(!SHAPES.count(s)){res.status=400;res.set_content("{\"error\":\"unknown shape\"}","application/json");return;}
@@ -4228,7 +4245,7 @@ int main(int argc, char* argv[]) {
     std::cout << "[laser_daemon] Listening on :" << http_port << "\n"
               << "  GET/POST /api/state   POST /api/reset\n"
               << "  GET /api/cues   POST /api/cue/<1-" << MAX_CUES << ">/save|recall|clear|move/<n>\n"
-              << "  POST /laser/shape/<circle|line|triangle|square|wave|text>\n"
+              << "  POST /laser/shape/<circle|line|triangle|square|wave|stars|text>\n"
               << "  POST /laser/brightness/<0-1>  /laser/color/<r>/<g>/<b>\n"
               << "  POST /laser/position/<x>/<y>  /laser/rotation/speed/<v>\n"
               << "  POST /move/mode/<none|circle|pan|tilt|tiltup|tiltdown|eight|random>\n"

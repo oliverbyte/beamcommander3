@@ -357,6 +357,53 @@ TEST(dot_timing_never_zero_and_handles_garbage) {
     CHECK(g.dwell == 12 && g.settleMin >= 2 && g.trail >= 1);
 }
 
+// ── Stars ──────────────────────────────────────────────────────────────────
+TEST(stars_count_and_inside_the_square) {
+    CHECK(star_layout(0).empty());
+    CHECK(star_layout(-5).empty());
+    CHECK(star_layout(40).size() == 40);
+    CHECK(star_layout(10000).size() == (std::size_t)kMaxStars);
+    for (const auto& p : star_layout(kMaxStars)) CHECK(std::fabs(p.x) <= 1.0f && std::fabs(p.y) <= 1.0f);
+    // The corners get stars too - the whole square is filled, not a disk.
+    int corners = 0;
+    for (const auto& p : star_layout(kMaxStars)) corners += (std::fabs(p.x) > 0.75f && std::fabs(p.y) > 0.75f);
+    CHECK(corners > 0);
+}
+
+TEST(stars_are_stable_and_more_stars_only_add) {
+    const auto a = star_layout(30), b = star_layout(30);
+    for (std::size_t i = 0; i < a.size(); ++i) { CHECK(a[i].x == b[i].x); CHECK(a[i].y == b[i].y); }
+    // Every star of the smaller field is still there (same position) in the bigger one.
+    const auto small = star_layout(25), big = star_layout(60);
+    for (const auto& s : small) {
+        bool found = false;
+        for (const auto& t : big) found = found || (s.x == t.x && s.y == t.y);
+        CHECK(found);
+    }
+}
+
+TEST(stars_spread_over_the_square_and_are_ordered_for_short_travel) {
+    const auto stars = star_layout(kMaxStars);
+    int quadrant[4] = {0, 0, 0, 0};
+    for (const auto& p : stars) quadrant[(p.x >= 0 ? 1 : 0) + (p.y >= 0 ? 2 : 0)]++;
+    for (int q : quadrant) CHECK(q > kMaxStars / 8); // no empty corner
+    // Serpentine order: much shorter total path than the stars' index order.
+    auto pathLen = [](const std::vector<StarPos>& v) {
+        double d = 0; for (std::size_t i = 1; i < v.size(); ++i) d += std::hypot(v[i].x - v[i - 1].x, v[i].y - v[i - 1].y); return d; };
+    std::vector<StarPos> byIndex;
+    for (int i = 0; i < kMaxStars; ++i) {
+        // same positions, unsorted: rebuild from the layout of i+1 stars (its new star)
+        const auto upTo = star_layout(i + 1);
+        for (const auto& p : upTo) {
+            bool seen = false;
+            for (const auto& q : byIndex) seen = seen || (q.x == p.x && q.y == p.y);
+            if (!seen) { byIndex.push_back(p); break; }
+        }
+    }
+    CHECK(byIndex.size() == stars.size());
+    CHECK(pathLen(stars) < 0.5 * pathLen(byIndex));
+}
+
 int main() {
     std::printf("show_fx tests\n");
     for (const auto& t : registry()) {

@@ -202,3 +202,34 @@ inline DotTiming dot_timing(double rateHz, float dwellUs, float blankUs) {
     t.settleMax = std::max(t.settleMin, t.settleMin + pts(kDotTravelUsMax));
     return t;
 }
+
+// ── Stars ────────────────────────────────────────────────────────────────────
+// The "stars" shape: `count` static dots scattered at random over the whole
+// square -1..1 (make_frame() scales them by the radius and draws each as a
+// plain dot - a star is just a dot). The i-th
+// star's position depends only on i (a fixed integer hash), so the field is
+// the same every frame (no flicker from re-rolling) and changing the amount
+// only adds or removes stars - the others stay where they are. Drawing
+// order: rows from top to bottom, alternating direction (serpentine), so the
+// scanner hops between neighbours instead of back and forth across the field.
+inline constexpr int kMaxStars = 200;
+struct StarPos { float x, y; };
+inline std::vector<StarPos> star_layout(int count) {
+    count = std::clamp(count, 0, kMaxStars);
+    auto hash = [](unsigned x) {
+        x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+        return (double)x / 4294967296.0; // 0..1
+    };
+    std::vector<StarPos> stars;
+    stars.reserve(count);
+    for (int i = 0; i < count; ++i)
+        stars.push_back({(float)(hash(2u * (unsigned)i + 1u) * 2.0 - 1.0), (float)(hash(2u * (unsigned)i + 2u) * 2.0 - 1.0)});
+    const int rows = std::max(1, (int)std::lround(std::sqrt(count / 2.0)));
+    auto rowOf = [&](const StarPos& p) { return std::clamp((int)((1.0f - p.y) * 0.5f * rows), 0, rows - 1); };
+    std::stable_sort(stars.begin(), stars.end(), [&](const StarPos& a, const StarPos& b) {
+        const int ra = rowOf(a), rb = rowOf(b);
+        if (ra != rb) return ra < rb;
+        return (ra % 2 == 0) ? a.x < b.x : a.x > b.x;
+    });
+    return stars;
+}

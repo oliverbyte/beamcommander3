@@ -274,6 +274,7 @@ const VALUE_FNS = {
   wave_frequency: num('Shapes', 'Wave frequency', 'wave_frequency', 0.1, 8, 1),
   wave_amplitude: num('Shapes', 'Wave amplitude', 'wave_amplitude', 0, 1),
   wave_speed: num('Shapes', 'Wave speed', 'wave_speed', -4, 4, 1),
+  stars_amount: num('Shapes', 'Stars amount', 'stars_amount', 1, 200, 0),
   move_speed: num('Move', 'Move speed', 'move_speed', 0, 4),
   move_size: num('Move', 'Move size', 'move_size', 0, 6),
   move_phase: num('Move', 'Phase step per laser', 'move_phase_degrees', 0, 360, 0, '°'),

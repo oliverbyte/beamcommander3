@@ -220,7 +220,7 @@ function withLasers(path) {
 export const LOOK_FIELDS = [
   'shape', 'ilda_file', 'ilda_name', 'ilda_fps', 'radius', 'points', 'r', 'g', 'b', 'shape_scale',
   'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed', 'move_size', 'move_phase_degrees',
-  'wave_frequency', 'wave_amplitude', 'wave_speed', 'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees',
+  'wave_frequency', 'wave_amplitude', 'wave_speed', 'stars_amount', 'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees',
   'dot_amount', 'flicker_hz', 'flicker_on_ms', 'flicker_phase_degrees', 'layers',
   'text', 'font', 'text_size', 'text_spacing', 'text_bold', 'text_italic', 'text_underline', 'frame_points',
 ]
@@ -530,7 +530,7 @@ export function recallCue(n) {
 const CUE_STATE_FIELDS = [
   'shape', 'ilda_file', 'text', 'font', 'text_size', 'text_spacing', 'text_bold', 'text_italic', 'text_underline', 'radius', 'points', 'r', 'g', 'b', 'shape_scale',
   'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed',
-  'move_size', 'move_phase_degrees', 'wave_frequency', 'wave_amplitude', 'wave_speed',
+  'move_size', 'move_phase_degrees', 'wave_frequency', 'wave_amplitude', 'wave_speed', 'stars_amount',
   'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees',
   'dot_amount', 'flicker_hz', 'flicker_on_ms', 'flicker_phase_degrees',
 ]

@@ -4,6 +4,7 @@ export const SHAPE_ICONS = {
   triangle: '<svg viewBox="0 0 24 24" fill="none"><path d="m12 4 9 16H3L12 4Z"/></svg>',
   square: '<svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>',
   wave: '<svg viewBox="0 0 24 24" fill="none"><path d="M3 12c2.25 0 2.25-6 4.5-6S9.75 18 12 18s2.25-12 4.5-12S18.75 12 21 12"/></svg>',
+  stars: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="6" cy="7" r="1.4"/><circle cx="15" cy="5" r="1.1"/><circle cx="19" cy="12" r="1.4"/><circle cx="10" cy="12" r="1.1"/><circle cx="5" cy="17" r="1.1"/><circle cx="14" cy="18" r="1.4"/></svg>',
   text: '<svg viewBox="0 0 24 24" fill="none"><path d="M3 19 8 5l5 14M4.8 14h6.4M15 9.5c1.2-1 4.5-1.3 4.5 1.5V19m0-4.5c-1-1-5.5-1.3-5.5 1.6 0 2.8 4.3 2.6 5.5.4"/></svg>',
 }
 

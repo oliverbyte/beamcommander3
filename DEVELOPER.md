@@ -253,6 +253,17 @@ drawn exactly. Rays, haze and the fixture are hidden and the wall image
 ignores depth, so in the straight-on view the text stays readable even with
 other fixtures or beams in front.
 
+### Stars shape
+
+`shape == "stars"`: `star_layout()` (show_fx.h, unit-tested) places
+`stars_amount` static dots over the square -1..1 - the i-th star's spot comes
+from a fixed integer hash of i, so the field never re-rolls and more stars
+only add new ones - in serpentine row order for short scanner travel.
+`gen_base_shape()` scales them by the radius and `make_frame()` always draws
+them dotted, one dot per star, with the normal dot timing (settle, dwell,
+trail) and point budget. In the preview's canvas mode, dwelled points (dots,
+stars) are drawn as round point sprites (`writeCanvasDot()`), not as lines.
+
 ### Text shape
 
 `laser_text.h`: Hershey `.jhf` parser, font catalog (`text_font_catalog()`:

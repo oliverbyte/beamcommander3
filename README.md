@@ -292,9 +292,14 @@ for how the packaged macOS/Windows builds are put together.
    means only some of them use it. The selection belongs to this browser
    only, so operators on different devices don't change each other's.
    Controls the selected lasers' shapes don't use are greyed out (e.g. color
-   and dots for ILDA files), and shape options (Wave, Text, ILDA file) only
+   and dots for ILDA files), and shape options (Wave, Stars, Text, ILDA file) only
    appear for shapes in the selection - labelled with their lasers if only
    some use them, and changing only those.
+   **Stars**: the **Stars** shape is a field of static dots at random spots
+   over the whole area (size: Radius / Shape scale); **Amount** sets how many
+   (1-200) - more stars add new ones, the others stay where they are. Every
+   star is a dot with the Beam page's dot dwell/blanking times, so many stars
+   lower the frame rate (the hint under Amount warns below 25 fps).
    **Text**: pick the **Text** shape, type your text, choose one of 7
    single-stroke laser fonts (Sans, Roman, Times, Script, Gothic English,
    Gothic German, Cursive), **B**/**I**/**U** (bold and italic where the font
@@ -515,7 +520,7 @@ always apply to all lasers.
 | `POST /api/reset` | Reset the looks of `lasers` (all without it: also master brightness) to defaults, without layers |
 | `GET /api/shapes` | Shapes and the shape-dependent parameters each uses: `{"dependent":[...],"shapes":[{"id","label","selectable","params":[...]}]}` - the UI greys out the others |
 | `GET /api/fonts` | Fonts of the text shape: `[{"id","label","bold","italic"}]` (`bold`/`italic` = the font has that style) |
-| `POST /laser/shape/<shape>` | `circle`, `line`, `triangle`, `square`, `wave`, `text` (the former `staticwave` = `wave` with speed 0, still accepted) |
+| `POST /laser/shape/<shape>` | `circle`, `line`, `triangle`, `square`, `wave`, `stars`, `text` (the former `staticwave` = `wave` with speed 0, still accepted) |
 | `POST /laser/brightness/<0-1>` | Master brightness |
 | `POST /laser/color/<r>/<g>/<b>` | Beam color, each channel 0..1 |
 | `POST /laser/position/<x>/<y>` | Shape offset, each axis -1..1 |
@@ -562,6 +567,7 @@ always apply to all lasers.
 `rate_kpps`, `max_rate_kpps`, `intensity`, `flash_release_ms`, `r`, `g`, `b`,
 `shape_scale`, `pos_x`, `pos_y`, `rotation_speed`, `mirror_x`, `move_mode`,
 `move_speed`, `move_size`, `move_phase_degrees`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
+`stars_amount` (stars shape: number of stars, 1-200),
 `rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `blackout`, `dot_amount`, `flicker_hz`
 (flicker rate), `flicker_on_ms` (lit time per flicker flash, 0-1000 ms; `0` = auto, half of every period),
 `flicker_phase_degrees` (0-360°: laser 2 flashes that much of a period after laser 1, laser 3 twice as much, ...
@@ -667,7 +673,7 @@ applied, matching the original BeamCommander's MIDI mapper:
 curve fields above):**
 `r`, `g`, `b`, `intensity`, `shape_scale`, `rotation_speed`, `pos_x`, `pos_y`,
 `dot_amount`, `flicker_hz`, `flicker_on_ms`, `flicker_phase_degrees`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
-`rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `move_size`, `move_speed`, `rate_kpps`,
+`stars_amount`, `rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `move_size`, `move_speed`, `rate_kpps`,
 `flash_release_ms` (0-2000ms; ported from the original BeamCommander's
 `flashReleaseMs` knob - the shipped binding uses `relative: true` since the
 APC40's "Cue Level" knob this is mapped to is an endless encoder, not an
@@ -687,7 +693,7 @@ last value always takes over immediately the next time the pedal is
 pressed).
 
 **Buttons (`note`, note-on presses / note-off or velocity-0 releases):**
-`shape:<circle|line|triangle|square|wave|text>`,
+`shape:<circle|line|triangle|square|wave|stars|text>`,
 `move:<none|circle|pan|tilt|eight|random>`,
 `color:<red|green|blue|white>` (plus `orange`, `yellow`, `cyan`, `magenta` if
 you want to bind extra buttons to them),

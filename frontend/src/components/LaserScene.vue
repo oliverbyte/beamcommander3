@@ -68,11 +68,28 @@ const CANVAS_TRACE = 1.0     // trace on the wall
 // up to a bright fan right across the image. Only the wall image counts.
 const CANVAS_RAY_NEAR = 0
 const CANVAS_RAY_FAR = 0
-// A point the scanner dwells on (a zero-length step: dots, stroke ends) is
-// drawn as a tiny dash this long (world units, ~1-2 px) - a dot, not a
-// smear. Only true zero-length steps: tiny text has real strokes far shorter
-// than any "dot" size, and those must stay exactly as they are.
-const CANVAS_DOT = 0.03
+// A point the scanner dwells on is drawn as a round dot (a point sprite this
+// many pixels wide) - e.g. one star of the "stars" shape, which is just a dot.
+// Only for a real dwell (CANVAS_DOT_MIN_DWELL lit zero-length steps in a row:
+// dots and stars dwell many points), not for the 1-2 points a text stroke
+// dwells at its ends. Real strokes, however short, are always drawn exactly.
+const CANVAS_DOT_PX = 4
+const CANVAS_DOT_MIN_DWELL = 3
+let roundDotTexture = null
+function dotTexture() {
+  if (roundDotTexture) return roundDotTexture
+  const c = document.createElement('canvas')
+  c.width = c.height = 32
+  const g = c.getContext('2d')
+  const grad = g.createRadialGradient(16, 16, 0, 16, 16, 16)
+  grad.addColorStop(0, 'rgba(255,255,255,1)')
+  grad.addColorStop(0.55, 'rgba(255,255,255,0.9)')
+  grad.addColorStop(1, 'rgba(255,255,255,0)')
+  g.fillStyle = grad
+  g.fillRect(0, 0, 32, 32)
+  roundDotTexture = new THREE.CanvasTexture(c)
+  return roundDotTexture
+}
 const CANVAS_DWELL_EPS = 1e-4
 // Every scanned point takes the same time, so a trace segment's light is
 // spread over its length: segments up to the frame's typical point spacing
@@ -181,6 +198,20 @@ function createLaserStream(id) {
     new THREE.Vector3(WORLD_SCALE, WORLD_SCALE, -CANVAS_DIST), new THREE.Vector3(-WORLD_SCALE, WORLD_SCALE, -CANVAS_DIST),
   ])
   canvasSurface.add(new THREE.LineLoop(frameGeo, new THREE.LineBasicMaterial({ color: 0x1d2640, fog: false })))
+  // Canvas dots (dwelled points, stars) - round sprites, faded like the trace.
+  const dotPositions = new Float32Array(MAX_SCAN_POINTS * 3)
+  const dotColors = new Float32Array(MAX_SCAN_POINTS * 3)
+  const dotBaseColors = new Float32Array(MAX_SCAN_POINTS * 3)
+  const dotTimestamps = new Float64Array(MAX_SCAN_POINTS).fill(-Infinity)
+  const dotGeo = new THREE.BufferGeometry()
+  dotGeo.setDrawRange(0, 0)
+  dotGeo.setAttribute('position', new THREE.BufferAttribute(dotPositions, 3).setUsage(THREE.DynamicDrawUsage))
+  dotGeo.setAttribute('color', new THREE.BufferAttribute(dotColors, 3).setUsage(THREE.DynamicDrawUsage))
+  const dotMaterial = new THREE.PointsMaterial({
+    size: CANVAS_DOT_PX, sizeAttenuation: false, map: dotTexture(), vertexColors: true, transparent: true,
+    blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false, fog: false,
+  })
+  canvasSurface.add(new THREE.Points(dotGeo, dotMaterial))
   output.add(canvasSurface)
 
   return {
@@ -190,6 +221,7 @@ function createLaserStream(id) {
     hazeGeo, hazePositions, hazeBaseColors, hazeColors, hazeMaterial,
     edgeX: 0.5, edgeY: 0.5,
     canvas: false, canvasSurface, canvasRefLen: CANVAS_MIN_REF_LEN,
+    dotGeo, dotMaterial, dotPositions, dotColors, dotBaseColors, dotTimestamps, dotWriteIndex: 0, dotCount: 0,
   }
 }
 
@@ -198,6 +230,8 @@ function disposeLaserStream(stream) {
   stream.spokeMaterial.dispose()
   stream.hazeGeo.dispose()
   stream.hazeMaterial.dispose()
+  stream.dotGeo.dispose()
+  stream.dotMaterial.dispose()
 }
 
 function syncLaserSources() {
@@ -514,7 +548,7 @@ function emitLaserScan(stream, now) {
     const fanBrightness = Math.min(1, Math.max(0.01, 5 / frame.length))
 
     if (stream.canvas) {
-      writeCanvasSpoke(stream, wx, wy, cr, cg, cb, fanBrightness)
+      writeCanvasSpoke(stream, wx, wy, cr, cg, cb, fanBrightness, t)
       stream.spokeTimestamps[stream.spokeWriteIndex] = t
       stream.spokeWriteIndex = (stream.spokeWriteIndex + 1) % MAX_SCAN_POINTS
       stream.spokeCount = Math.min(stream.spokeCount + 1, MAX_SCAN_POINTS)
@@ -593,25 +627,33 @@ function emitLaserScan(stream, now) {
 // [trace on the wall from the previous point], the trace only between two
 // lit points (the laser draws nothing while blanked). A point dwelled on
 // (zero-length trace) becomes a short dash so dots stay visible.
-function writeCanvasSpoke(stream, wx, wy, cr, cg, cb, fanBrightness) {
+function writeCanvasSpoke(stream, wx, wy, cr, cg, cb, fanBrightness, t) {
   const z = -CANVAS_DIST
   const vi = stream.spokeWriteIndex * 12
   const fi = stream.spokeWriteIndex * 9
   let lx = stream.lastPoint[0] * WORLD_SCALE
   let ly = stream.lastPoint[1] * WORLD_SCALE
   let px = wx
+  let py = wy
   const lc = stream.lastColor
   const lit = cr + cg + cb > 0 && lc[0] + lc[1] + lc[2] > 0
   const len = Math.hypot(wx - lx, wy - ly)
-  if (len < CANVAS_DWELL_EPS) { lx = wx - CANVAS_DOT * 0.5; ly = wy; px = wx + CANVAS_DOT * 0.5 }
+  if (len < CANVAS_DWELL_EPS && lit) { // lit dwell only - blanked settle points before a stroke don't count
+    stream.dwellRun = (stream.dwellRun || 0) + 1
+    // Once per dwell: a round dot (later dwell points of the same dot just keep it lit).
+    if (stream.dwellRun >= CANVAS_DOT_MIN_DWELL) writeCanvasDot(stream, wx, wy, z, cr, cg, cb, t)
+  } else {
+    stream.dwellRun = 0
+  }
   const P = stream.spokePositions, C = stream.spokeBaseColors
   P[vi] = 0; P[vi + 1] = 0; P[vi + 2] = 0
   P[vi + 3] = wx; P[vi + 4] = wy; P[vi + 5] = z
   P[vi + 6] = lx; P[vi + 7] = ly; P[vi + 8] = z + 0.02
-  P[vi + 9] = px; P[vi + 10] = wy; P[vi + 11] = z + 0.02
+  P[vi + 9] = px; P[vi + 10] = py; P[vi + 11] = z + 0.02
   C[vi] = cr * CANVAS_RAY_NEAR; C[vi + 1] = cg * CANVAS_RAY_NEAR; C[vi + 2] = cb * CANVAS_RAY_NEAR
   C[vi + 3] = cr * CANVAS_RAY_FAR; C[vi + 4] = cg * CANVAS_RAY_FAR; C[vi + 5] = cb * CANVAS_RAY_FAR
-  const trace = lit ? CANVAS_TRACE * Math.min(1, (stream.canvasRefLen || CANVAS_MIN_REF_LEN) / Math.max(len, 1e-6)) : 0
+  const trace = !lit || len < CANVAS_DWELL_EPS ? 0 // dwells: drawn as dots (or by their stroke)
+    : CANVAS_TRACE * Math.min(1, (stream.canvasRefLen || CANVAS_MIN_REF_LEN) / len)
   C[vi + 6] = cr * trace; C[vi + 7] = cg * trace; C[vi + 8] = cb * trace
   C[vi + 9] = cr * trace; C[vi + 10] = cg * trace; C[vi + 11] = cb * trace
   // Faint haze fan between the rays, like in beam mode but dimmer.
@@ -623,6 +665,17 @@ function writeCanvasSpoke(stream, wx, wy, cr, cg, cb, fanBrightness) {
   HC[fi] = (lc[0] + cr) * 0.5 * hb; HC[fi + 1] = (lc[1] + cg) * 0.5 * hb; HC[fi + 2] = (lc[2] + cb) * 0.5 * hb
   HC[fi + 3] = lc[0] * 0.1 * hb; HC[fi + 4] = lc[1] * 0.1 * hb; HC[fi + 5] = lc[2] * 0.1 * hb
   HC[fi + 6] = cr * 0.1 * hb; HC[fi + 7] = cg * 0.1 * hb; HC[fi + 8] = cb * 0.1 * hb
+}
+
+function writeCanvasDot(stream, wx, wy, z, cr, cg, cb, t) {
+  const i = stream.dotWriteIndex
+  stream.dotPositions[i * 3] = wx; stream.dotPositions[i * 3 + 1] = wy; stream.dotPositions[i * 3 + 2] = z + 0.03
+  stream.dotBaseColors[i * 3] = cr; stream.dotBaseColors[i * 3 + 1] = cg; stream.dotBaseColors[i * 3 + 2] = cb
+  stream.dotTimestamps[i] = t
+  stream.dotWriteIndex = (i + 1) % MAX_SCAN_POINTS
+  stream.dotCount = Math.min(stream.dotCount + 1, MAX_SCAN_POINTS)
+  stream.dotGeo.setDrawRange(0, stream.dotCount)
+  stream.dotGeo.attributes.position.needsUpdate = true
 }
 
 // Brightness falloff along each spoke: bright near the source, dim at the
@@ -677,6 +730,14 @@ function animate() {
     }
     stream.spokeGeo.attributes.color.needsUpdate = true
     stream.hazeGeo.attributes.color.needsUpdate = true
+    if (stream.dotCount) {
+      for (let i = 0; i < stream.dotCount; i++) {
+        const age = now - stream.dotTimestamps[i]
+        const brightness = age < 0 ? 0 : Math.exp(-age / persistenceTau)
+        for (let c = 0; c < 3; c++) stream.dotColors[i * 3 + c] = stream.dotBaseColors[i * 3 + c] * brightness
+      }
+      stream.dotGeo.attributes.color.needsUpdate = true
+    }
   }
 
   dust.rotation.y = now * 0.01
@@ -702,6 +763,11 @@ function clearPointBuffer() {
   for (const stream of laserStreams.values()) resetStream(stream, now)
 }
 function resetStream(stream, now) {
+  stream.dotTimestamps.fill(-Infinity)
+  stream.dotWriteIndex = 0
+  stream.dotCount = 0
+  stream.dotGeo.setDrawRange(0, 0)
+  stream.dwellRun = 0
   stream.spokeTimestamps.fill(-Infinity)
   stream.spokeWriteIndex = 0
   stream.spokeCount = 0

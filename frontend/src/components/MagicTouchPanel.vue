@@ -116,6 +116,16 @@
               </div>
             </div>
           </section>
+          <section v-if="looksUsing('stars_amount').length" class="control-section">
+            <div class="section-heading"><div><h2>Stars{{ optionSuffix('stars_amount') }}</h2><p>Dots at random spots - more stars add new ones, the others stay put.</p></div></div>
+            <div class="range-grid">
+              <div v-for="control in STARS_CONTROLS" :key="control.key" class="range-control">
+                <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isOptionMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(optionValue(control.key), control) }}</output></label>
+                <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="optionValue(control.key)" @input="setOption(control.key, $event.target.value)" />
+              </div>
+            </div>
+            <p class="text-hint" :class="{ warn: starsFps > 0 && starsFps < 25 }">{{ starsHint }}</p>
+          </section>
           <section v-if="looksUsing('text').length" class="control-section text-section">
             <div class="section-heading"><div><h2>Text{{ optionSuffix('text') }}</h2><p>Single-stroke Hershey fonts. Size, rotation, position, color and rainbow work like for shapes.</p></div></div>
             <div class="text-row">
@@ -334,7 +344,7 @@ const COLOR_PRESETS = [
   { name: 'Mint green', color: '#30e878' }, { name: 'Cyan', color: '#37e5e5' }, { name: 'Sky', color: '#42a5ff' },
   { name: 'Electric blue', color: '#4666ff' }, { name: 'Violet', color: '#9e63ff' }, { name: 'Magenta', color: '#f34bd7' },
 ]
-const SHAPES = ['circle', 'line', 'triangle', 'square', 'wave', 'text']
+const SHAPES = ['circle', 'line', 'triangle', 'square', 'wave', 'stars', 'text']
 const MOVES = ['none', 'circle', 'pan', 'tilt', 'tiltup', 'tiltdown', 'eight', 'random']
 const COLOR_CONTROLS = [
   { label: 'Rainbow amount', key: 'rainbow_amount', min: 0, max: 1, step: 0.01, decimals: 2 },
@@ -360,6 +370,9 @@ const TRANSFORM_CONTROLS = [
   { label: 'Position X', key: 'pos_x', min: -1, max: 1, step: 0.01, decimals: 2 },
   { label: 'Position Y', key: 'pos_y', min: -1, max: 1, step: 0.01, decimals: 2 },
   { label: 'Rotation', key: 'rotation_speed', min: -4, max: 4, step: 0.1, decimals: 1, suffix: ' rot/s' },
+]
+const STARS_CONTROLS = [
+  { label: 'Amount', key: 'stars_amount', min: 1, max: 200, step: 1, decimals: 0 },
 ]
 const TEXT_CONTROLS = [
   { label: 'Font size', key: 'text_size', min: 0.05, max: 1, step: 0.01, decimals: 2 },
@@ -473,6 +486,16 @@ const textFps = computed(() => {
   const points = laserState.looks?.[id]?.frame_points || 0
   return points > 0 ? (laserState.rate_kpps * 1000) / points : 0
 })
+// Every star is a dot with dwell and blanking time (Beam settings), so many
+// stars mean long frames - same frame rate hint as for text.
+const starsFps = computed(() => {
+  const id = looksUsing('stars_amount')[0]
+  const points = laserState.looks?.[id]?.frame_points || 0
+  return points > 0 ? (laserState.rate_kpps * 1000) / points : 0
+})
+const starsHint = computed(() => starsFps.value > 0
+  ? `~${Math.round(starsFps.value)} fps at ${laserState.rate_kpps.toFixed(0)} kpps${starsFps.value < 25 ? ' - flickers, use fewer stars or shorter dot times (Beam)' : ''}`
+  : '')
 const textHint = computed(() => {
   const chars = [...(optionValue('text') || '')].length
   return textFps.value > 0

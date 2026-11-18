@@ -4,7 +4,7 @@ export const COLORS = [
   ['Rose red', '#ff304f'], ['Amber', '#ff9f1c'], ['Yellow', '#ffe64d'], ['Lime', '#b7f531'], ['Mint green', '#30e878'],
   ['Cyan', '#37e5e5'], ['Sky', '#42a5ff'], ['Electric blue', '#4666ff'], ['Violet', '#9e63ff'], ['Magenta', '#f34bd7'],
 ]
-export const SHAPES = ['circle', 'line', 'triangle', 'square', 'wave', 'text']
+export const SHAPES = ['circle', 'line', 'triangle', 'square', 'wave', 'stars', 'text']
 export const MOVES = ['none', 'circle', 'pan', 'tilt', 'tiltup', 'tiltdown', 'eight', 'random']
 
 export const colorFnId = (name) => `color_${name.toLowerCase().replace(/ /g, '_')}`
