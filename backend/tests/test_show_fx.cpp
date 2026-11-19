@@ -437,15 +437,17 @@ TEST(sparkle_amount_is_the_share_and_it_keeps_changing) {
     // Share over many elements and times ~ amount.
     int on = 0, total = 0;
     for (unsigned e = 0; e < 200; ++e)
-        for (int k = 0; k < 50; ++k) { on += sparkle_lit(e, 1, k * 0.05, 0.3f); ++total; }
+        for (int k = 0; k < 50; ++k) { on += sparkle_lit(e, 1, k * 0.4, 0.3f); ++total; }
     CHECK_NEAR((double)on / total, 0.3, 0.03);
     // Changes over time: an element is not stuck on or off.
     int changes = 0;
     for (unsigned e = 0; e < 20; ++e) {
         bool prev = sparkle_lit(e, 1, 0.0, 0.5f);
-        for (int k = 1; k < 40; ++k) { const bool cur = sparkle_lit(e, 1, k * kSparkleSlotSec, 0.5f); changes += cur != prev; prev = cur; }
+        for (int k = 1; k < 40; ++k) { const bool cur = sparkle_lit(e, 1, (double)k, 0.5f); changes += cur != prev; prev = cur; }
     }
     CHECK(changes > 100);
+    // Within one decision the state holds: same phase -> same answer (speed 0 = frozen).
+    for (unsigned e = 0; e < 50; ++e) CHECK(sparkle_lit(e, 1, 7.25, 0.5f) == sparkle_lit(e, 1, 7.25, 0.5f));
     // Different lasers (seeds) glitter differently.
     int diff = 0;
     for (unsigned e = 0; e < 100; ++e) diff += sparkle_lit(e, 1, 2.0, 0.5f) != sparkle_lit(e, 2, 2.0, 0.5f);

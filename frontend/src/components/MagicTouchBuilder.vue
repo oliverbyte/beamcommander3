@@ -270,6 +270,7 @@ const VALUE_FNS = {
   rainbow_phase: num('Color', 'Rainbow phase per laser', 'rainbow_phase_degrees', 0, 360, 0, '°'),
   sparkle_amount: num('Color', 'Sparkle amount', 'sparkle_amount', 0, 1),
   sparkle_intensity: num('Color', 'Sparkle intensity', 'sparkle_intensity', 0, 1),
+  sparkle_speed: num('Color', 'Sparkle speed', 'sparkle_speed', 0, 30, 1, ' Hz'),
   radius: num('Shapes', 'Radius', 'radius', 0.05, 1),
   shape_scale: num('Shapes', 'Shape scale', 'shape_scale', -1, 1),
   points: num('Shapes', 'Points', 'points', 8, 1000, 0),

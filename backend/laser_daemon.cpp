@@ -312,6 +312,7 @@ struct LaserState {
     // sparkle color, and that color (white by default). Works on every shape.
     float sparkle_amount    = 0.0f;   // 0..1
     float sparkle_intensity = 1.0f;   // 0..1
+    float sparkle_speed     = kSparkleDefaultHz; // changes per second, 0 = frozen pattern
     float sparkle_r = 1.0f, sparkle_g = 1.0f, sparkle_b = 1.0f;
 
     // FX
@@ -355,6 +356,7 @@ struct ShowLayer {
     LaserState s;
     double     move_phase = 0.0, rotation_phase = 0.0, wave_phase = 0.0, rainbow_phase = 0.0;
     double     ilda_time = 0.0; // seconds since the layer started (ILDA animation)
+    double     sparkle_phase = 0.0; // integrated sparkle_speed (see apply_sparkle())
 };
 static constexpr std::size_t MAX_SHOW_LAYERS = 8;
 
@@ -494,6 +496,7 @@ struct LookSlot {
     double move_phase = 0.0, rotation_phase = 0.0, wave_phase = 0.0; // radians
     double rainbow_phase = 0.0;    // cycles, *unwrapped* (0 = rainbow just switched on) - see animate_look()
     double ilda_time = 0.0;        // seconds since the look started (ILDA animation)
+    double sparkle_phase = 0.0;    // integrated sparkle_speed - a speed change only changes the rate (see apply_sparkle())
     // Exponential position smoothing (ported from the original
     // BeamCommander's ofApp.cpp `smoothOne`, see smooth_toward()): pos_x/
     // pos_y are a *target*, the rendered value slews toward it - hides
@@ -669,7 +672,7 @@ struct RenderPose {
     float  wave_frequency = 1.0f, wave_amplitude = 0.45f;
     double wave_phase = 0.0;         // radians
     double ilda_time = 0.0;          // seconds since the look started (ILDA animation)
-    double fx_time = 0.0;            // show clock (G_time) for time-based effects (sparkle)
+    double sparkle_phase = 0.0;      // the look's sparkle phase (integrated sparkle_speed)
     int    maxPoints = 3000;
 };
 static constexpr int kFramePointBudget = 3000; // safely under the DAC's 4095-point buffer
@@ -1246,6 +1249,7 @@ static void look_fields_json(std::ostringstream& ss, const LookSlot& sl) {
        << "\"rainbow_phase_degrees\":" << L.rainbow_phase_degrees << ","
        << "\"sparkle_amount\":" << L.sparkle_amount << ","
        << "\"sparkle_intensity\":" << L.sparkle_intensity << ","
+       << "\"sparkle_speed\":" << L.sparkle_speed << ","
        << "\"sparkle_r\":" << L.sparkle_r << ",\"sparkle_g\":" << L.sparkle_g << ",\"sparkle_b\":" << L.sparkle_b << ","
        << "\"dot_amount\":"    << L.dot_amount     << ","
        << "\"flicker_hz\":"    << L.flicker_hz     << ","
@@ -1310,7 +1314,7 @@ static RenderPose layer_pose(const ShowLayer& L, int maxPoints) {
     p.wave_frequency = L.s.wave_frequency; p.wave_amplitude = L.s.wave_amplitude;
     p.wave_phase = L.wave_phase;
     p.ilda_time = L.ilda_time;
-    p.fx_time = G_time;
+    p.sparkle_phase = L.sparkle_phase;
     p.maxPoints = maxPoints;
     return p;
 }
@@ -1350,7 +1354,7 @@ static core::Frame render_look_for_laser(const LaserState& s, double movePhase, 
         const float bri = std::clamp(s.intensity, 0.0f, 1.0f);
         apply_sparkle(f.points, s.sparkle_amount, s.sparkle_intensity,
                       std::clamp(s.sparkle_r, 0.0f, 1.0f) * bri, std::clamp(s.sparkle_g, 0.0f, 1.0f) * bri,
-                      std::clamp(s.sparkle_b, 0.0f, 1.0f) * bri, pose.fx_time, (unsigned)k * 7919U + 1U);
+                      std::clamp(s.sparkle_b, 0.0f, 1.0f) * bri, pose.sparkle_phase, (unsigned)k * 7919U + 1U);
     }
     return f;
 }
@@ -1375,7 +1379,7 @@ static LookRender look_render_input(const LookSlot& sl, const LaserState& global
     r.pose.wave_frequency = sl.wave_frequency_smooth; r.pose.wave_amplitude = sl.wave_amplitude_smooth;
     r.pose.wave_phase = sl.wave_phase;
     r.pose.ilda_time = sl.ilda_time;
-    r.pose.fx_time = G_time;
+    r.pose.sparkle_phase = sl.sparkle_phase;
     r.move_phase = sl.move_phase;
     r.rainbow_phase = sl.rainbow_phase;
     r.layers = sl.layers;
@@ -1448,6 +1452,9 @@ static void animate_look(LookSlot& sl, double dt, bool frozen) {
     // ILDA animations play on regardless of motion hold.
     sl.ilda_time += dt;
     for (auto& Ly : sl.layers) Ly.ilda_time += dt;
+    // Sparkle keeps glittering regardless of motion hold.
+    sl.sparkle_phase += std::clamp(L.sparkle_speed, 0.0f, kSparkleMaxHz) * dt;
+    for (auto& Ly : sl.layers) Ly.sparkle_phase += std::clamp(Ly.s.sparkle_speed, 0.0f, kSparkleMaxHz) * dt;
     // Cue layers run their own animation (frozen by motion hold).
     if (!frozen) {
         for (auto& Ly : sl.layers) {
@@ -2103,6 +2110,7 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"rainbow_phase_degrees\":" << s.rainbow_phase_degrees << ","
        << "\"sparkle_amount\":" << s.sparkle_amount << ","
        << "\"sparkle_intensity\":" << s.sparkle_intensity << ","
+       << "\"sparkle_speed\":" << s.sparkle_speed << ","
        << "\"sparkle_r\":" << s.sparkle_r << ",\"sparkle_g\":" << s.sparkle_g << ",\"sparkle_b\":" << s.sparkle_b << ","
        << "\"dot_amount\":"    << s.dot_amount    << ","
        << "\"flicker_hz\":"    << s.flicker_hz    << ","
@@ -2153,6 +2161,7 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.rainbow_phase_degrees = json_float(obj,"rainbow_phase_degrees",s.rainbow_phase_degrees);
     s.sparkle_amount    = std::clamp(json_float(obj,"sparkle_amount",s.sparkle_amount),0.0f,1.0f);
     s.sparkle_intensity = std::clamp(json_float(obj,"sparkle_intensity",s.sparkle_intensity),0.0f,1.0f);
+    s.sparkle_speed     = std::clamp(json_float(obj,"sparkle_speed",s.sparkle_speed),0.0f,kSparkleMaxHz);
     s.sparkle_r = std::clamp(json_float(obj,"sparkle_r",s.sparkle_r),0.0f,1.0f);
     s.sparkle_g = std::clamp(json_float(obj,"sparkle_g",s.sparkle_g),0.0f,1.0f);
     s.sparkle_b = std::clamp(json_float(obj,"sparkle_b",s.sparkle_b),0.0f,1.0f);
@@ -2704,6 +2713,7 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     if (action=="rainbow_speed")  { for_all_looks([&](LookSlot& sl) { sl.look.rainbow_speed=out; }); return; }
     if (action=="sparkle_amount") { for_all_looks([&](LookSlot& sl) { sl.look.sparkle_amount=std::clamp(out,0.0f,1.0f); }); return; }
     if (action=="sparkle_intensity") { for_all_looks([&](LookSlot& sl) { sl.look.sparkle_intensity=std::clamp(out,0.0f,1.0f); }); return; }
+    if (action=="sparkle_speed")  { for_all_looks([&](LookSlot& sl) { sl.look.sparkle_speed=std::clamp(out,0.0f,kSparkleMaxHz); }); return; }
     if (action=="rainbow_phase_degrees") { for_all_looks([&](LookSlot& sl) { sl.look.rainbow_phase_degrees=std::clamp(out,0.0f,360.0f); }); return; }
     if (action=="move_size")      { for_all_looks([&](LookSlot& sl) { sl.look.move_size=std::clamp(out,0.0f,6.0f); }); return; }
     if (action=="move_speed")     { for_all_looks([&](LookSlot& sl) { sl.look.move_speed=std::max(0.0f,out); }); return; }
@@ -3666,6 +3676,7 @@ int main(int argc, char* argv[]) {
             APPLY_F("rainbow_phase_degrees",rainbow_phase_degrees) APPLY_CLAMP("rainbow_phase_degrees",rainbow_phase_degrees,0,360)
             APPLY_F("sparkle_amount",sparkle_amount) APPLY_CLAMP("sparkle_amount",sparkle_amount,0,1)
             APPLY_F("sparkle_intensity",sparkle_intensity) APPLY_CLAMP("sparkle_intensity",sparkle_intensity,0,1)
+            APPLY_F("sparkle_speed",sparkle_speed) APPLY_CLAMP("sparkle_speed",sparkle_speed,0,kSparkleMaxHz)
             APPLY_F("sparkle_r",sparkle_r) APPLY_CLAMP("sparkle_r",sparkle_r,0,1)
             APPLY_F("sparkle_g",sparkle_g) APPLY_CLAMP("sparkle_g",sparkle_g,0,1)
             APPLY_F("sparkle_b",sparkle_b) APPLY_CLAMP("sparkle_b",sparkle_b,0,1)

@@ -44,7 +44,7 @@
     </g>
     <!-- Sparkle: a few twinkling glints in the sparkle color. -->
     <g v-if="cue.sparkle_amount > 0" class="cue-sparkle" :fill="sparkleColor">
-      <circle v-for="(gl, i) in SPARKLE_GLINTS" :key="i" :cx="gl[0]" :cy="gl[1]" r="0.9" :style="{ animationDelay: `${gl[2]}s` }" />
+      <circle v-for="(gl, i) in SPARKLE_GLINTS" :key="i" :cx="gl[0]" :cy="gl[1]" r="0.9" :style="glintStyle(gl)" />
     </g>
   </g>
 </template>
@@ -111,6 +111,14 @@ const starDots = computed(() => STAR_SPOTS.slice(0, Math.max(3, Math.min(STAR_SP
 
 // Sparkle cues: glints that twinkle at different times.
 const SPARKLE_GLINTS = [[6, 9, 0], [17, 6, 0.3], [12, 17, 0.6], [19, 15, 0.15], [8, 19, 0.45]]
+// The twinkle follows sparkle_speed (8 Hz = the base 0.6 s cycle); speed 0
+// is a frozen pattern, so some glints just stay lit.
+function glintStyle(gl) {
+  const speed = props.cue.sparkle_speed ?? 8
+  if (!(speed > 0)) return { animation: 'none', opacity: gl[2] * 10 % 3 < 1.5 ? 1 : 0 }
+  const scale = Math.max(0.25, Math.min(5, 8 / speed))
+  return { animationDuration: `${0.6 * scale}s`, animationDelay: `${gl[2] * scale}s` }
+}
 const sparkleColor = computed(() => {
   const to = (v) => Math.round(Math.max(0, Math.min(1, v ?? 1)) * 255)
   return `rgb(${to(props.cue.sparkle_r)},${to(props.cue.sparkle_g)},${to(props.cue.sparkle_b)})`

@@ -39,6 +39,7 @@ export const laserState = reactive({
   // Sparkle color FX (glitter on any shape)
   sparkle_amount:  0,
   sparkle_intensity: 1,
+  sparkle_speed: 8,
   sparkle_r: 1, sparkle_g: 1, sparkle_b: 1,
   // FX
   blackout:        true,
@@ -225,7 +226,7 @@ export const LOOK_FIELDS = [
   'shape', 'ilda_file', 'ilda_name', 'ilda_fps', 'radius', 'points', 'r', 'g', 'b', 'shape_scale',
   'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed', 'move_size', 'move_phase_degrees',
   'wave_frequency', 'wave_amplitude', 'wave_speed', 'stars_amount', 'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees',
-  'sparkle_amount', 'sparkle_intensity', 'sparkle_r', 'sparkle_g', 'sparkle_b',
+  'sparkle_amount', 'sparkle_intensity', 'sparkle_speed', 'sparkle_r', 'sparkle_g', 'sparkle_b',
   'dot_amount', 'flicker_hz', 'flicker_on_ms', 'flicker_phase_degrees', 'layers',
   'text', 'font', 'text_size', 'text_spacing', 'text_bold', 'text_italic', 'text_underline', 'frame_points',
 ]
@@ -537,7 +538,7 @@ const CUE_STATE_FIELDS = [
   'pos_x', 'pos_y', 'rotation_speed', 'mirror_x', 'move_mode', 'move_speed',
   'move_size', 'move_phase_degrees', 'wave_frequency', 'wave_amplitude', 'wave_speed', 'stars_amount',
   'rainbow_amount', 'rainbow_speed', 'rainbow_phase_degrees',
-  'sparkle_amount', 'sparkle_intensity', 'sparkle_r', 'sparkle_g', 'sparkle_b',
+  'sparkle_amount', 'sparkle_intensity', 'sparkle_speed', 'sparkle_r', 'sparkle_g', 'sparkle_b',
   'dot_amount', 'flicker_hz', 'flicker_on_ms', 'flicker_phase_degrees',
 ]
 

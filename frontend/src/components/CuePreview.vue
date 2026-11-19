@@ -17,7 +17,7 @@ const props = defineProps({ cue: { type: Object, required: true } })
 // What makes two looks look different in the icon.
 const ICON_FIELDS = [
   'shape', 'ilda_file', 'text', 'font', 'text_bold', 'text_italic', 'text_underline', 'r', 'g', 'b',
-  'rainbow_amount', 'rainbow_speed', 'sparkle_amount', 'sparkle_r', 'sparkle_g', 'sparkle_b', 'dot_amount', 'shape_scale', 'pos_x', 'pos_y', 'rotation_speed',
+  'rainbow_amount', 'rainbow_speed', 'sparkle_amount', 'sparkle_speed', 'sparkle_r', 'sparkle_g', 'sparkle_b', 'dot_amount', 'shape_scale', 'pos_x', 'pos_y', 'rotation_speed',
   'move_mode', 'move_size', 'move_speed', 'wave_speed', 'stars_amount',
 ]
 const looks = computed(() => {

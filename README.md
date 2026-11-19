@@ -271,7 +271,9 @@ for how the packaged macOS/Windows builds are put together.
    **Sparkle** (Color) lets parts of any shape, stars, text or ILDA file
    flash in the sparkle color at random, constantly changing: **Amount**
    is how much of it sparkles at once (0 = off), **Intensity** how strongly
-   it turns to the sparkle color, and the sparkle color itself is white by
+   it turns to the sparkle color, **Speed** how often per second each glint
+   changes (0-30 Hz, default 8; 0 = a frozen glitter pattern), and the
+   sparkle color itself is white by
    default (presets or any custom color). Lines and text glint in short
    pieces, dots and stars sparkle as a whole; every laser glitters
    differently.
@@ -575,7 +577,7 @@ always apply to all lasers.
 `shape_scale`, `pos_x`, `pos_y`, `rotation_speed`, `mirror_x`, `move_mode`,
 `move_speed`, `move_size`, `move_phase_degrees`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
 `stars_amount` (stars shape: number of stars, 1-200),
-`sparkle_amount`, `sparkle_intensity` (0-1), `sparkle_r`, `sparkle_g`, `sparkle_b` (sparkle color, 0-1; default white),
+`sparkle_amount`, `sparkle_intensity` (0-1), `sparkle_speed` (0-30 changes per second, default 8; 0 = frozen pattern), `sparkle_r`, `sparkle_g`, `sparkle_b` (sparkle color, 0-1; default white),
 `rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `blackout`, `dot_amount`, `flicker_hz`
 (flicker rate), `flicker_on_ms` (lit time per flicker flash, 0-1000 ms; `0` = auto, half of every period),
 `flicker_phase_degrees` (0-360°: laser 2 flashes that much of a period after laser 1, laser 3 twice as much, ...
@@ -681,7 +683,7 @@ applied, matching the original BeamCommander's MIDI mapper:
 curve fields above):**
 `r`, `g`, `b`, `intensity`, `shape_scale`, `rotation_speed`, `pos_x`, `pos_y`,
 `dot_amount`, `flicker_hz`, `flicker_on_ms`, `flicker_phase_degrees`, `wave_frequency`, `wave_amplitude`, `wave_speed`,
-`stars_amount`, `rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `sparkle_amount`, `sparkle_intensity`,
+`stars_amount`, `rainbow_amount`, `rainbow_speed`, `rainbow_phase_degrees`, `sparkle_amount`, `sparkle_intensity`, `sparkle_speed`,
 `move_size`, `move_speed`, `rate_kpps`,
 `flash_release_ms` (0-2000ms; ported from the original BeamCommander's
 `flashReleaseMs` knob - the shipped binding uses `relative: true` since the

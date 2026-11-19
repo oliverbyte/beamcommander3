@@ -260,10 +260,16 @@ frame in `render_look_for_laser()` - shapes, stars, text, ILDA and layers
 alike, so the preview shows exactly what the laser does. The lit points are
 cut into elements of equal drawn length (1/`kSparkleElements` of the frame's
 lit path; a dot has no length, so it always sparkles whole); each element
-re-decides every `kSparkleSlotSec` (own phase, hashed) whether it sparkles
-(`sparkle_amount` = probability) and is then blended by `sparkle_intensity`
-towards the sparkle color times master brightness. The laser index is part
-of the hash, so every laser glitters differently.
+re-decides whether it sparkles (`sparkle_amount` = probability) every time
+the look's sparkle phase passes a whole number (own hashed offset, so they
+don't all change at once), and is then blended by `sparkle_intensity`
+towards the sparkle color times master brightness. The phase is
+`sparkle_speed` (decisions per second, 0-`kSparkleMaxHz`, default
+`kSparkleDefaultHz`) integrated per look and per cue layer in
+`animate_look()` (`LookSlot`/`ShowLayer::sparkle_phase`), like the rainbow
+phase: changing the speed only changes the rate, it never jumps the
+pattern, and speed 0 freezes it. The laser index is part of the hash, so
+every laser glitters differently.
 
 ### Stars shape
 

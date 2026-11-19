@@ -381,6 +381,7 @@ const COLOR_CONTROLS = [
 const SPARKLE_CONTROLS = [
   { label: 'Amount', key: 'sparkle_amount', min: 0, max: 1, step: 0.01, decimals: 2, zeroLabel: 'Off' },
   { label: 'Intensity', key: 'sparkle_intensity', min: 0, max: 1, step: 0.01, decimals: 2 },
+  { label: 'Speed', key: 'sparkle_speed', min: 0, max: 30, step: 0.5, decimals: 1, suffix: ' Hz', zeroLabel: 'Frozen' },
 ]
 const SPARKLE_PRESETS = [
   { name: 'White', color: '#ffffff' }, { name: 'Red', color: '#ff0000' },
