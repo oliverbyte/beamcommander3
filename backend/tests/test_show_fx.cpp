@@ -404,6 +404,80 @@ TEST(stars_spread_over_the_square_and_are_ordered_for_short_travel) {
     CHECK(pathLen(stars) < 0.5 * pathLen(byIndex));
 }
 
+// ── Sparkle ────────────────────────────────────────────────────────────────
+struct SP { float x = 0, y = 0, r = 0, g = 0, b = 0; };
+static std::vector<SP> litLine(int n, float c = 0.2f) {
+    std::vector<SP> v(n);
+    for (int i = 0; i < n; ++i) { v[i].x = (float)i / n; v[i].r = v[i].g = v[i].b = c; }
+    return v;
+}
+
+TEST(sparkle_off_changes_nothing) {
+    auto pts = litLine(300);
+    const auto orig = pts;
+    apply_sparkle(pts, 0.0f, 1.0f, 1, 1, 1, 1.0, 0);
+    apply_sparkle(pts, 0.5f, 0.0f, 1, 1, 1, 1.0, 0);
+    for (std::size_t i = 0; i < pts.size(); ++i) CHECK(pts[i].r == orig[i].r);
+}
+
+TEST(sparkle_full_amount_and_intensity_turns_everything_to_the_sparkle_color) {
+    auto pts = litLine(100);
+    pts[50].r = pts[50].g = pts[50].b = 0; // blanked
+    apply_sparkle(pts, 1.0f, 1.0f, 0.9f, 0.1f, 0.5f, 3.0, 2);
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        if (i == 50) { CHECK(pts[i].r == 0 && pts[i].g == 0 && pts[i].b == 0); continue; } // blanked stays dark
+        CHECK_NEAR(pts[i].r, 0.9, 1e-6); CHECK_NEAR(pts[i].g, 0.1, 1e-6); CHECK_NEAR(pts[i].b, 0.5, 1e-6);
+    }
+    auto half = litLine(10);
+    apply_sparkle(half, 1.0f, 0.5f, 1, 1, 1, 0.0, 0);
+    CHECK_NEAR(half[0].r, 0.6, 1e-6); // halfway from 0.2 to 1
+}
+
+TEST(sparkle_amount_is_the_share_and_it_keeps_changing) {
+    // Share over many elements and times ~ amount.
+    int on = 0, total = 0;
+    for (unsigned e = 0; e < 200; ++e)
+        for (int k = 0; k < 50; ++k) { on += sparkle_lit(e, 1, k * 0.05, 0.3f); ++total; }
+    CHECK_NEAR((double)on / total, 0.3, 0.03);
+    // Changes over time: an element is not stuck on or off.
+    int changes = 0;
+    for (unsigned e = 0; e < 20; ++e) {
+        bool prev = sparkle_lit(e, 1, 0.0, 0.5f);
+        for (int k = 1; k < 40; ++k) { const bool cur = sparkle_lit(e, 1, k * kSparkleSlotSec, 0.5f); changes += cur != prev; prev = cur; }
+    }
+    CHECK(changes > 100);
+    // Different lasers (seeds) glitter differently.
+    int diff = 0;
+    for (unsigned e = 0; e < 100; ++e) diff += sparkle_lit(e, 1, 2.0, 0.5f) != sparkle_lit(e, 2, 2.0, 0.5f);
+    CHECK(diff > 20);
+}
+
+TEST(sparkle_elements_are_whole_dots_and_short_glints) {
+    // Dots: 12 lit points each, separated by blanks -> every dot sparkles as a whole.
+    std::vector<SP> dots;
+    for (int d = 0; d < 40; ++d) {
+        for (int i = 0; i < 4; ++i) dots.push_back(SP{});
+        for (int i = 0; i < 12; ++i) { SP p; p.r = p.g = p.b = 0.2f; dots.push_back(p); }
+    }
+    for (int k = 0; k < 10; ++k) {
+        auto pts = dots;
+        apply_sparkle(pts, 0.5f, 1.0f, 1, 1, 1, k * 0.37, 3);
+        for (std::size_t i = 0; i + 1 < pts.size(); ++i)
+            if (pts[i].r > 0 && pts[i + 1].r > 0) CHECK(pts[i].r == pts[i + 1].r); // no half-sparkling dot
+    }
+    // A long line glints in short pieces of equal length, not all or nothing.
+    auto line = litLine(640);
+    apply_sparkle(line, 0.5f, 1.0f, 1, 1, 1, 1.23, 4);
+    int sparkling = 0, glints = 0;
+    for (std::size_t i = 0; i < line.size(); ++i) {
+        sparkling += line[i].r > 0.5f;
+        glints += line[i].r > 0.5f && (i == 0 || line[i - 1].r <= 0.5f);
+    }
+    CHECK(sparkling > 0 && sparkling < 640);
+    CHECK(glints >= 8);                                   // many separate glints ...
+    CHECK(sparkling / glints <= 3 * 640 / kSparkleElements); // ... each short
+}
+
 int main() {
     std::printf("show_fx tests\n");
     for (const auto& t : registry()) {

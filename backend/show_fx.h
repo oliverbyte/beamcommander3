@@ -233,3 +233,58 @@ inline std::vector<StarPos> star_layout(int count) {
     });
     return stars;
 }
+
+// ── Sparkle color effect ─────────────────────────────────────────────────────
+// Glitter on any look (shape, stars, text, ILDA): parts of the output flash
+// to the sparkle color for a moment, at random, and keep changing. The
+// lit points are split into "elements" - each contiguous lit run (a dot, a
+// stroke, the whole outline) cut into pieces of equal drawn length (1/
+// kSparkleElements of the frame's lit path) - so on a line or text short
+// glints flash (a single scan point would be far too short to see on a real
+// laser), while a dot (no drawn length) always sparkles as a whole. Each element
+// gets a new random on/off decision every kSparkleSlotSec, with its own phase
+// offset so they don't all change at once; `seed` (the laser) makes every
+// laser glitter differently.
+//  amount    0..1  share of elements sparkling at any moment (0 = off)
+//  intensity 0..1  how far a sparkling element's color goes to the sparkle color
+//  sr/sg/sb        the sparkle color, already scaled by the master brightness
+inline constexpr double kSparkleSlotSec = 0.12;
+inline constexpr int    kSparkleElements = 64; // about this many elements per frame (short glints, still long enough to see)
+inline double sparkle_hash01(unsigned x) {
+    x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+    return (double)x / 4294967296.0;
+}
+inline bool sparkle_lit(unsigned element, unsigned seed, double t, float amount) {
+    if (!(amount > 0.0f)) return false;
+    if (amount >= 1.0f) return true;
+    const double phase = sparkle_hash01(element * 2654435761U ^ (seed * 40503U + 17U));
+    const double slot = std::floor(t / kSparkleSlotSec + phase);
+    const unsigned s = (unsigned)(long long)slot;
+    return sparkle_hash01(element * 73856093U ^ s * 19349663U ^ seed * 83492791U) < amount;
+}
+template <class P>
+inline void apply_sparkle(std::vector<P>& pts, float amount, float intensity, float sr, float sg, float sb,
+                          double t, unsigned seed) {
+    if (!(amount > 0.0f) || !(intensity > 0.0f)) return;
+    const float k = std::min(1.0f, intensity);
+    auto isLitPt = [](const P& p) { return p.r > 0.0f || p.g > 0.0f || p.b > 0.0f; };
+    double litPath = 0.0;
+    for (std::size_t i = 1; i < pts.size(); ++i)
+        if (isLitPt(pts[i]) && isLitPt(pts[i - 1])) litPath += std::hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    const double glintLen = std::max(1e-6, litPath / kSparkleElements);
+    unsigned element = 0;
+    double acc = 0.0;
+    bool prevLit = false;
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+        auto& p = pts[i];
+        const bool isLit = isLitPt(p);
+        if (!isLit) { if (prevLit) { ++element; acc = 0.0; } prevLit = false; continue; }
+        if (prevLit) {
+            acc += std::hypot(p.x - pts[i - 1].x, p.y - pts[i - 1].y);
+            if (acc > glintLen) { ++element; acc = 0.0; }
+        }
+        prevLit = true;
+        if (!sparkle_lit(element, seed, t, amount)) continue;
+        p.r += (sr - p.r) * k; p.g += (sg - p.g) * k; p.b += (sb - p.b) * k;
+    }
+}

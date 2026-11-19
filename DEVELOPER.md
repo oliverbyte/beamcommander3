@@ -253,6 +253,18 @@ drawn exactly. Rays, haze and the fixture are hidden and the wall image
 ignores depth, so in the straight-on view the text stays readable even with
 other fixtures or beams in front.
 
+### Sparkle color effect
+
+`apply_sparkle()` (show_fx.h, unit-tested) runs on every look's finished
+frame in `render_look_for_laser()` - shapes, stars, text, ILDA and layers
+alike, so the preview shows exactly what the laser does. The lit points are
+cut into elements of equal drawn length (1/`kSparkleElements` of the frame's
+lit path; a dot has no length, so it always sparkles whole); each element
+re-decides every `kSparkleSlotSec` (own phase, hashed) whether it sparkles
+(`sparkle_amount` = probability) and is then blended by `sparkle_intensity`
+towards the sparkle color times master brightness. The laser index is part
+of the hash, so every laser glitters differently.
+
 ### Stars shape
 
 `shape == "stars"`: `star_layout()` (show_fx.h, unit-tested) places

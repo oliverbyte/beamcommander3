@@ -307,6 +307,13 @@ struct LaserState {
     float rainbow_speed   = 0.0f;     // hue cycles/sec
     float rainbow_phase_degrees = 0.0f; // hue offset per configured laser, degrees (360 = one full hue cycle)
 
+    // Sparkle (glitter, see apply_sparkle() in show_fx.h): share of the
+    // output flashing at any moment (0 = off), how far it goes to the
+    // sparkle color, and that color (white by default). Works on every shape.
+    float sparkle_amount    = 0.0f;   // 0..1
+    float sparkle_intensity = 1.0f;   // 0..1
+    float sparkle_r = 1.0f, sparkle_g = 1.0f, sparkle_b = 1.0f;
+
     // FX
     // Blackout is a global daemon safety setting, not part of the per-cue
     // show state - like intensity/master brightness, it's deliberately
@@ -662,6 +669,7 @@ struct RenderPose {
     float  wave_frequency = 1.0f, wave_amplitude = 0.45f;
     double wave_phase = 0.0;         // radians
     double ilda_time = 0.0;          // seconds since the look started (ILDA animation)
+    double fx_time = 0.0;            // show clock (G_time) for time-based effects (sparkle)
     int    maxPoints = 3000;
 };
 static constexpr int kFramePointBudget = 3000; // safely under the DAC's 4095-point buffer
@@ -1236,6 +1244,9 @@ static void look_fields_json(std::ostringstream& ss, const LookSlot& sl) {
        << "\"rainbow_amount\":" << L.rainbow_amount << ","
        << "\"rainbow_speed\":" << L.rainbow_speed  << ","
        << "\"rainbow_phase_degrees\":" << L.rainbow_phase_degrees << ","
+       << "\"sparkle_amount\":" << L.sparkle_amount << ","
+       << "\"sparkle_intensity\":" << L.sparkle_intensity << ","
+       << "\"sparkle_r\":" << L.sparkle_r << ",\"sparkle_g\":" << L.sparkle_g << ",\"sparkle_b\":" << L.sparkle_b << ","
        << "\"dot_amount\":"    << L.dot_amount     << ","
        << "\"flicker_hz\":"    << L.flicker_hz     << ","
        << "\"flicker_on_ms\":" << L.flicker_on_ms  << ","
@@ -1299,6 +1310,7 @@ static RenderPose layer_pose(const ShowLayer& L, int maxPoints) {
     p.wave_frequency = L.s.wave_frequency; p.wave_amplitude = L.s.wave_amplitude;
     p.wave_phase = L.wave_phase;
     p.ilda_time = L.ilda_time;
+    p.fx_time = G_time;
     p.maxPoints = maxPoints;
     return p;
 }
@@ -1331,7 +1343,16 @@ static core::Frame render_look_for_laser(const LaserState& s, double movePhase, 
             laserHue = huePhase >= 0.0 ? std::max(0.0, huePhase - kk * rainbowStep)
                                        : std::min(0.0, huePhase + kk * rainbowStep);
     }
-    return make_frame(s, laserMove, laserHue, pose);
+    core::Frame f = make_frame(s, laserMove, laserHue, pose);
+    // Sparkle on top of whatever the look drew - every shape, stars, text and
+    // ILDA alike. Its color goes through the master brightness like the rest.
+    if (s.sparkle_amount > 0.0f) {
+        const float bri = std::clamp(s.intensity, 0.0f, 1.0f);
+        apply_sparkle(f.points, s.sparkle_amount, s.sparkle_intensity,
+                      std::clamp(s.sparkle_r, 0.0f, 1.0f) * bri, std::clamp(s.sparkle_g, 0.0f, 1.0f) * bri,
+                      std::clamp(s.sparkle_b, 0.0f, 1.0f) * bri, pose.fx_time, (unsigned)k * 7919U + 1U);
+    }
+    return f;
 }
 
 // Everything needed to draw one laser's look, copied under G_mtx so the
@@ -1354,6 +1375,7 @@ static LookRender look_render_input(const LookSlot& sl, const LaserState& global
     r.pose.wave_frequency = sl.wave_frequency_smooth; r.pose.wave_amplitude = sl.wave_amplitude_smooth;
     r.pose.wave_phase = sl.wave_phase;
     r.pose.ilda_time = sl.ilda_time;
+    r.pose.fx_time = G_time;
     r.move_phase = sl.move_phase;
     r.rainbow_phase = sl.rainbow_phase;
     r.layers = sl.layers;
@@ -2079,6 +2101,9 @@ static std::string cue_state_to_json(const LaserState& s) {
        << "\"rainbow_amount\":" << s.rainbow_amount << ","
        << "\"rainbow_speed\":" << s.rainbow_speed << ","
        << "\"rainbow_phase_degrees\":" << s.rainbow_phase_degrees << ","
+       << "\"sparkle_amount\":" << s.sparkle_amount << ","
+       << "\"sparkle_intensity\":" << s.sparkle_intensity << ","
+       << "\"sparkle_r\":" << s.sparkle_r << ",\"sparkle_g\":" << s.sparkle_g << ",\"sparkle_b\":" << s.sparkle_b << ","
        << "\"dot_amount\":"    << s.dot_amount    << ","
        << "\"flicker_hz\":"    << s.flicker_hz    << ","
        << "\"flicker_on_ms\":" << s.flicker_on_ms << ","
@@ -2126,6 +2151,11 @@ static LaserState cue_state_from_json(const std::string& obj) {
     s.rainbow_amount  = json_float(obj,"rainbow_amount",s.rainbow_amount);
     s.rainbow_speed   = json_float(obj,"rainbow_speed",s.rainbow_speed);
     s.rainbow_phase_degrees = json_float(obj,"rainbow_phase_degrees",s.rainbow_phase_degrees);
+    s.sparkle_amount    = std::clamp(json_float(obj,"sparkle_amount",s.sparkle_amount),0.0f,1.0f);
+    s.sparkle_intensity = std::clamp(json_float(obj,"sparkle_intensity",s.sparkle_intensity),0.0f,1.0f);
+    s.sparkle_r = std::clamp(json_float(obj,"sparkle_r",s.sparkle_r),0.0f,1.0f);
+    s.sparkle_g = std::clamp(json_float(obj,"sparkle_g",s.sparkle_g),0.0f,1.0f);
+    s.sparkle_b = std::clamp(json_float(obj,"sparkle_b",s.sparkle_b),0.0f,1.0f);
     s.dot_amount      = std::clamp(json_float(obj,"dot_amount",s.dot_amount),0.0f,1.0f);
     s.flicker_hz      = std::max(0.0f, json_float(obj,"flicker_hz",s.flicker_hz));
     // Cues saved before the on time existed have no such key: keep the
@@ -2672,6 +2702,8 @@ static void midi_apply_cc_action(const std::string& action, float out) {
     if (action=="stars_amount")   { for_all_looks([&](LookSlot& sl) { sl.look.stars_amount=std::clamp((int)std::lround(out),1,kMaxStars); }); return; }
     if (action=="rainbow_amount") { for_all_looks([&](LookSlot& sl) { sl.look.rainbow_amount=std::clamp(out,0.0f,1.0f); }); return; }
     if (action=="rainbow_speed")  { for_all_looks([&](LookSlot& sl) { sl.look.rainbow_speed=out; }); return; }
+    if (action=="sparkle_amount") { for_all_looks([&](LookSlot& sl) { sl.look.sparkle_amount=std::clamp(out,0.0f,1.0f); }); return; }
+    if (action=="sparkle_intensity") { for_all_looks([&](LookSlot& sl) { sl.look.sparkle_intensity=std::clamp(out,0.0f,1.0f); }); return; }
     if (action=="rainbow_phase_degrees") { for_all_looks([&](LookSlot& sl) { sl.look.rainbow_phase_degrees=std::clamp(out,0.0f,360.0f); }); return; }
     if (action=="move_size")      { for_all_looks([&](LookSlot& sl) { sl.look.move_size=std::clamp(out,0.0f,6.0f); }); return; }
     if (action=="move_speed")     { for_all_looks([&](LookSlot& sl) { sl.look.move_speed=std::max(0.0f,out); }); return; }
@@ -3632,6 +3664,11 @@ int main(int argc, char* argv[]) {
             APPLY_F("rainbow_amount",rainbow_amount) APPLY_CLAMP("rainbow_amount",rainbow_amount,0,1)
             APPLY_F("rainbow_speed",rainbow_speed)
             APPLY_F("rainbow_phase_degrees",rainbow_phase_degrees) APPLY_CLAMP("rainbow_phase_degrees",rainbow_phase_degrees,0,360)
+            APPLY_F("sparkle_amount",sparkle_amount) APPLY_CLAMP("sparkle_amount",sparkle_amount,0,1)
+            APPLY_F("sparkle_intensity",sparkle_intensity) APPLY_CLAMP("sparkle_intensity",sparkle_intensity,0,1)
+            APPLY_F("sparkle_r",sparkle_r) APPLY_CLAMP("sparkle_r",sparkle_r,0,1)
+            APPLY_F("sparkle_g",sparkle_g) APPLY_CLAMP("sparkle_g",sparkle_g,0,1)
+            APPLY_F("sparkle_b",sparkle_b) APPLY_CLAMP("sparkle_b",sparkle_b,0,1)
             APPLY_F("dot_amount",dot_amount) APPLY_CLAMP("dot_amount",dot_amount,0,1)
             APPLY_F("flicker_hz",flicker_hz)
             APPLY_F("flicker_on_ms",flicker_on_ms) APPLY_CLAMP("flicker_on_ms",flicker_on_ms,0,kFlickerOnMsMax)

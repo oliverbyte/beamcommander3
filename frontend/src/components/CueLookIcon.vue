@@ -42,6 +42,10 @@
         </g>
       </g>
     </g>
+    <!-- Sparkle: a few twinkling glints in the sparkle color. -->
+    <g v-if="cue.sparkle_amount > 0" class="cue-sparkle" :fill="sparkleColor">
+      <circle v-for="(gl, i) in SPARKLE_GLINTS" :key="i" :cx="gl[0]" :cy="gl[1]" r="0.9" :style="{ animationDelay: `${gl[2]}s` }" />
+    </g>
   </g>
 </template>
 
@@ -105,6 +109,13 @@ const ildaScaleStyle = computed(() => {
 const STAR_SPOTS = [[7, 7], [15, 5], [19, 12], [10, 12], [5, 17], [14, 18], [18, 19], [12, 8], [8, 14], [17, 9], [4, 11], [11, 19]]
 const starDots = computed(() => STAR_SPOTS.slice(0, Math.max(3, Math.min(STAR_SPOTS.length, Math.ceil((props.cue.stars_amount || 40) / 8)))))
 
+// Sparkle cues: glints that twinkle at different times.
+const SPARKLE_GLINTS = [[6, 9, 0], [17, 6, 0.3], [12, 17, 0.6], [19, 15, 0.15], [8, 19, 0.45]]
+const sparkleColor = computed(() => {
+  const to = (v) => Math.round(Math.max(0, Math.min(1, v ?? 1)) * 255)
+  return `rgb(${to(props.cue.sparkle_r)},${to(props.cue.sparkle_g)},${to(props.cue.sparkle_b)})`
+})
+
 // Text cues show their text, sized to fit the slot.
 const textFontSize = computed(() => Math.max(2.5, Math.min(9, 34 / Math.max(1, [...(props.cue.text || '')].length))))
 
@@ -158,6 +169,8 @@ function shapeStyle(shape) {
 
 <!-- Unscoped: scoped CSS rewrites @keyframes names, but the animation names are plain strings built in JS above. -->
 <style>
+@keyframes cue-twinkle { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
+.cue-sparkle circle { animation: cue-twinkle 0.6s ease-in-out infinite; }
 @keyframes cue-spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
 @keyframes cue-hue  { from { filter:hue-rotate(0deg); } to { filter:hue-rotate(360deg); } }
 @keyframes cue-dash { from { stroke-dashoffset:0; } to { stroke-dashoffset:-24; } }

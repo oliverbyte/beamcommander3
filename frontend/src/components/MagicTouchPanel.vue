@@ -79,6 +79,32 @@
               <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="laserState[control.key]" @input="setNumeric(control.key, $event.target.value)" />
             </div>
           </section>
+          <section class="control-section">
+            <div class="section-heading">
+              <div><h2>Sparkle</h2><p>Let parts of any shape or text flash in the sparkle color, at random.</p></div>
+              <div class="current-color" :style="{ '--swatch': sparkleHex }" :aria-label="`Sparkle color ${sparkleHex}`"></div>
+            </div>
+            <div v-for="control in SPARKLE_CONTROLS" :key="control.key" class="range-control">
+              <label :for="`magic-${control.key}`">{{ control.label }} <span v-if="isLookMixed(control.key)" class="mixed-badge" title="The selected lasers have different values - changing it sets all of them">mixed</span> <output>{{ formatValue(laserState[control.key], control) }}</output></label>
+              <input :id="`magic-${control.key}`" type="range" :min="control.min" :max="control.max" :step="control.step" :value="laserState[control.key]" @input="setNumeric(control.key, $event.target.value)" />
+            </div>
+            <div class="sparkle-color-row">
+              <button
+                v-for="preset in SPARKLE_PRESETS" :key="preset.name"
+                class="color-preset sparkle-preset"
+                :class="{ selected: sparkleHex.toLowerCase() === preset.color }"
+                :style="{ '--swatch': preset.color }"
+                :aria-label="`Sparkle ${preset.name}`" :title="`Sparkle color: ${preset.name}`"
+                @click="selectSparkleColor(preset.color)"
+              ><span>{{ preset.name }}</span></button>
+              <label class="color-picker-row">
+                <span class="color-picker-swatch" :style="{ '--swatch': sparkleHex }"></span>
+                <span>Custom</span>
+                <input type="color" :value="sparkleHex" aria-label="Choose sparkle color" @input="selectSparkleColor($event.target.value)" />
+              </label>
+              <span v-if="isLookMixed('sparkle_r') || isLookMixed('sparkle_g') || isLookMixed('sparkle_b')" class="mixed-badge" title="The selected lasers have different sparkle colors">mixed</span>
+            </div>
+          </section>
         </div>
 
         <div v-else-if="activePage === 'shapes'" class="page-body">
@@ -351,6 +377,15 @@ const COLOR_CONTROLS = [
   { label: 'Rainbow speed', key: 'rainbow_speed', min: 0, max: 4, step: 0.1, decimals: 1 },
   { label: 'Rainbow phase per laser', key: 'rainbow_phase_degrees', min: 0, max: 360, step: 1, decimals: 0, suffix: '°' },
 ]
+// Sparkle color FX (apply_sparkle() in backend/show_fx.h) - works on every shape.
+const SPARKLE_CONTROLS = [
+  { label: 'Amount', key: 'sparkle_amount', min: 0, max: 1, step: 0.01, decimals: 2, zeroLabel: 'Off' },
+  { label: 'Intensity', key: 'sparkle_intensity', min: 0, max: 1, step: 0.01, decimals: 2 },
+]
+const SPARKLE_PRESETS = [
+  { name: 'White', color: '#ffffff' }, { name: 'Red', color: '#ff0000' },
+  { name: 'Green', color: '#00ff00' }, { name: 'Blue', color: '#0000ff' },
+]
 const SHAPE_CONTROLS = [
   { label: 'Radius', key: 'radius', min: 0.05, max: 1, step: 0.01, decimals: 2 },
   { label: 'Shape scale', key: 'shape_scale', min: -1, max: 1, step: 0.01, decimals: 2 },
@@ -418,6 +453,10 @@ const connectedLaserCount = computed(() => lasers.filter((laser) => laser.connec
 const hexColor = computed(() => {
   const toHex = (value) => Math.round(Math.max(0, Math.min(1, value)) * 255).toString(16).padStart(2, '0')
   return `#${toHex(laserState.r)}${toHex(laserState.g)}${toHex(laserState.b)}`
+})
+const sparkleHex = computed(() => {
+  const toHex = (value) => Math.round(Math.max(0, Math.min(1, value ?? 1)) * 255).toString(16).padStart(2, '0')
+  return `#${toHex(laserState.sparkle_r)}${toHex(laserState.sparkle_g)}${toHex(laserState.sparkle_b)}`
 })
 const ratePosition = computed(() => {
   const maximum = laserState.max_rate_kpps || 1
@@ -527,6 +566,13 @@ function selectColor(color) {
   queueState({ r: red, g: green, b: blue, rainbow_amount: 0 })
 }
 function onColorInput(event) { selectColor(event.target.value) }
+function selectSparkleColor(color) {
+  queueState({
+    sparkle_r: parseInt(color.slice(1, 3), 16) / 255,
+    sparkle_g: parseInt(color.slice(3, 5), 16) / 255,
+    sparkle_b: parseInt(color.slice(5, 7), 16) / 255,
+  })
+}
 function isPresetActive(preset) { return hexColor.value.toLowerCase() === preset.color.toLowerCase() && laserState.rainbow_amount === 0 }
 // Shape-dependent controls (see shapeCatalog): why one is greyed out.
 function shapeLabel(id) { return shapeCatalog.shapes.find((s) => s.id === id)?.label || id }
@@ -669,6 +715,9 @@ h1 { margin: 0; font-size: 23px; line-height: 1.2; }
 .style-button:disabled { opacity: .3; cursor: default; }
 .text-hint { margin-left: 6px; color: var(--mt-muted); font-size: 12px; }
 .text-hint.warn { color: #ff8080; }
+.sparkle-color-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
+.sparkle-preset { width: 64px; min-height: 44px; flex: 0 0 auto; }
+.sparkle-color-row .color-picker-row { margin: 0; }
 .mixed-badge { display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 4px; font-size: 10px; letter-spacing: .04em; color: #0c1116; background: #f2c14e; vertical-align: 1px; }
 .color-page { grid-template-columns: minmax(0, 1.3fr) minmax(240px, .7fr); }
 .color-page .palette-section { grid-row: span 2; }
